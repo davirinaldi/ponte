@@ -1,0 +1,25 @@
+[package]
+name = "ponte-agent"
+description = "Ponte agent: privileged Windows service that reports telemetry and runs signed actions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ponte-actions.workspace = true
+ponte-protocol.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Windows-only dependencies (windows-service, windows) are added in milestone M2.
+# Keep them under [target.'cfg(windows)'.dependencies] so the crate still builds on Linux CI.
+
+[lints]
+workspace = true

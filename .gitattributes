@@ -1,0 +1,6 @@
+# Normalise to LF in the repository, even when committing from Windows.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.png binary
+*.ico binary
