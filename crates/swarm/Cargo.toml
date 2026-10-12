@@ -1,0 +1,16 @@
+[package]
+name = "swarm"
+description = "Simulates thousands of agents against a server for load testing (RNF-14, RNF-16)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "ponte-decision"
+description = "Decision layer: calibrated classifiers and the risk x confidence routing policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+ponte-actions.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

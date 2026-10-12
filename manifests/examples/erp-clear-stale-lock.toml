@@ -1,0 +1,32 @@
+id = "erp.clear-stale-lock"
+version = 1
+title = "Remove a stale ERP lock file"
+description = "Deletes the lock file the ERP leaves behind after a crash, then starts the service."
+ai_description = """
+Use when the ERP service is stopped and fails to start, and the error log mentions an \
+existing lock file. Never use while the service is running.\
+"""
+risk = "medium"
+timeout_secs = 60
+
+[[preconditions]]
+check = "service_state"
+service = "FakeErp"
+state = "stopped"
+
+[[preconditions]]
+check = "path_exists"
+path = 'C:\FakeErp\run\erp.lock'
+
+[[steps]]
+op = "delete_file"
+path = 'C:\FakeErp\run\erp.lock'
+
+[[steps]]
+op = "service_start"
+service = "FakeErp"
+
+[[verify]]
+check = "service_state"
+service = "FakeErp"
+state = "running"

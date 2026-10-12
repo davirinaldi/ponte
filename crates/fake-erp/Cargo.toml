@@ -1,0 +1,16 @@
+[package]
+name = "fake-erp"
+description = "A deliberately breakable fake ERP service for demos and end-to-end tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

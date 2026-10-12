@@ -1,0 +1,25 @@
+id = "erp.restart-service"
+version = 1
+title = "Restart the ERP service"
+description = "Restarts the FakeErp Windows service and confirms it is running again."
+ai_description = """
+Use when telemetry shows the FakeErp service stopped or not responding and the customer \
+reports the system will not open. Do not use for slowness alone, and do not use while \
+the customer reports a sale in progress.\
+"""
+risk = "medium"
+timeout_secs = 60
+
+[[preconditions]]
+check = "disk_free_at_least"
+mount = "C:"
+percent = 2
+
+[[steps]]
+op = "service_restart"
+service = "FakeErp"
+
+[[verify]]
+check = "service_state"
+service = "FakeErp"
+state = "running"
