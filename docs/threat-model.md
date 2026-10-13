@@ -30,7 +30,7 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
 | T2 | Prompt injection via machine-originated text makes the AI request harmful actions | Text labelled as untrusted and truncated; closed catalog; risk x confidence policy; per-ticket limits; approval for medium/high | RF-24, RF-25, RF-17 |
 | T3 | Path tricks escape allowed directories (`..`, UNC, ADS, trailing dots, device names, look-alike letters, junctions) | Strict lexical `PathPolicy` on every path in steps and checks, plus resolved-path re-check at execution | RF-11 |
 | T4 | Replay or duplicate execution of an action | `RequestId` idempotency on the agent; short-lived requests | RNF-18 |
-| T5 | Enrollment token leak clones devices | Single-use tokens; device keys generated locally; per-device revocation | RF-01, RF-02, RF-04 |
+| T5 | Enrollment token leak clones devices | Expiring, use-limited tokens (single-use by default); devices from a multi-use token wait for approval; device keys generated locally; per-device revocation | RF-01, RF-02, RF-04, RF-49 |
 | T6 | Agent key theft from disk | DPAPI/TPM protection; revocation | RNF-04 |
 | T7 | Malicious update | Signed binaries, verified by the agent before install; staged rollout; rollback | RF-43, RNF-07 |
 | T8 | Personal data leaks through telemetry, logs or recordings | Minimal telemetry; no content in logs; consent, retention and audited access for recordings | RNF-09..11 |
