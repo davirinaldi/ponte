@@ -14,10 +14,11 @@ Phase tags: **P1** core (telemetry and typed actions), **P2** view the screen, *
 ## Functional requirements
 
 ### A. Devices and identity
-- **RF-01 (P1)** Single-use enrollment token per customer, embedded in the installer.
+- **RF-01 (P1)** Enrollment token per customer, passed to the installer, with an expiry and a use limit (one by default).
 - **RF-02 (P1)** Agent generates a local key pair on enrollment and receives a device identity.
 - **RF-03 (P1)** List, search and group devices by customer and tags, with online status and last contact.
 - **RF-04 (P1)** Revoke a device: drop its connection immediately and refuse reconnection.
+- **RF-49 (P1)** A device enrolled with a multi-use token stays pending until a technician approves it: nothing from it reaches the AI and it receives no actions.
 
 ### B. Telemetry
 - **RF-05 (P1)** Inventory: OS, CPU, RAM, disks, network, uptime.

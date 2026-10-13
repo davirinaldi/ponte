@@ -16,8 +16,9 @@ connection that fails.
 ## Decision
 
 The agent verifies the server certificate against the operating system's trust store.
-Hostname verification stays on and plain `ws://` stays limited to localhost. There is no
-certificate pinning in phase 1.
+Hostname verification stays on and plain `ws://` stays limited to localhost. Nothing is
+pinned by default; an opt-in pin of the server's public key, for customers that do not
+inspect TLS, comes with the hardening milestone (M5).
 
 Whether this goes through `rustls-platform-verifier` or `rustls-native-certs` is decided in
 M1 by binary size (RNF-12); both read the Windows store.
@@ -42,5 +43,6 @@ M1 by binary size (RNF-12); both read the Windows store.
 - **Roots compiled into the binary (`webpki-roots`)**: the same behaviour everywhere and no
   dependency on the system, but it never connects behind TLS inspection or to an internal
   authority.
-- **Pin the server's key or authority**: the strongest option, and rotating it means touching
-  every machine. Worth offering later as an opt-in for customers that do not inspect TLS.
+- **Pin the server's key or authority by default**: the strongest option against
+  interception, but rotating it means touching every machine, and one mistake locks the whole
+  fleet out with no way to reach it. Kept as an opt-in.

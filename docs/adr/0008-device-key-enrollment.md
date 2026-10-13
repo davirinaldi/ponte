@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-10-12
-- Requirements: RF-01, RF-02, RF-04, RNF-04
+- Requirements: RF-01, RF-02, RF-04, RF-49, RNF-04
 
 ## Context
 
@@ -26,6 +26,12 @@ string, the negotiated protocol version (ADR-0007), the nonce and the device id.
 checks it against the stored key. An unknown or revoked device, or a bad signature, closes the
 connection (RF-04). Nothing else is accepted from a connection before that check passes.
 
+**Tokens.** A token belongs to one customer, expires, and is good for a fixed number of
+enrollments: one by default (RF-01). A rollout to many PCs uses a token issued for that many
+machines with a short deadline. A device enrolled with a multi-use token starts as pending:
+the server shows nothing from it to the AI and sends it no actions until a technician
+approves it (RF-49).
+
 Enrollment travels on the same WebSocket, so the agent needs no HTTP client. M1 delivers both
 parts. The private key is protected with DPAPI (RNF-04) from M2, when the Windows platform
 layer exists; until then it sits in a file and M1 builds are for development only.
@@ -43,9 +49,8 @@ layer exists; until then it sits in a file and M1 builds are for development onl
   alter what follows (ADR-0009).
 - A re-imaged machine, or one that lost its key, enrolls again and appears as a new device.
   The console will need a way to replace the old record.
-- Open: RF-01 says "single-use token per customer", while a silent MSI rollout to fifty PCs
-  (RF-42) needs a token per machine or a token good for N enrollments until a deadline. M1
-  implements single-use; the question must be settled before the installer (M5).
+- A leaked multi-use token can enroll at most the machines it has left, before its deadline,
+  and those wait for approval. The price of a silent rollout (RF-42) is one bulk approval.
 
 ## Alternatives considered
 
