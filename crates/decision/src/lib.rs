@@ -87,7 +87,9 @@ impl RoutingPolicy {
 
     #[must_use]
     pub fn route(&self, risk: RiskLevel, confidence: f32) -> Route {
-        if confidence.is_nan() || confidence < self.approval_threshold {
+        // Anything outside `[0, 1]` (NaN included) is not a probability: the provider is
+        // broken or lying, so nothing it proposed may run on its own.
+        if !(0.0..=1.0).contains(&confidence) || confidence < self.approval_threshold {
             return Route::EscalateToHuman;
         }
         if risk <= self.max_auto_risk && confidence >= self.auto_threshold {
@@ -127,6 +129,29 @@ mod tests {
     fn nan_confidence_escalates() {
         let p = RoutingPolicy::default();
         assert_eq!(p.route(RiskLevel::Read, f32::NAN), Route::EscalateToHuman);
+    }
+
+    #[test]
+    fn out_of_range_confidence_escalates() {
+        // Zero thresholds accept every probability, so nothing but the range check stops a
+        // value above 1. Negative values never passed the threshold comparison either way.
+        let p = RoutingPolicy::new(0.0, 0.0, RiskLevel::Low).unwrap();
+        for confidence in [
+            f32::INFINITY,
+            5.0,
+            1.000_001,
+            -0.000_001,
+            -1.0,
+            f32::NEG_INFINITY,
+        ] {
+            assert_eq!(
+                p.route(RiskLevel::Read, confidence),
+                Route::EscalateToHuman,
+                "{confidence}"
+            );
+        }
+        assert_eq!(p.route(RiskLevel::Read, 1.0), Route::AutoExecute);
+        assert_eq!(p.route(RiskLevel::Read, 0.0), Route::AutoExecute);
     }
 
     #[test]
