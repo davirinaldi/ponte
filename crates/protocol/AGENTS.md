@@ -6,11 +6,32 @@ Wire types for every message between agent, server and web console.
 - Every type has `deny_unknown_fields`: receivers reject what they do not know (ADR-0006).
   Write a variant without fields as `Variant {}`, never `Variant`: serde ignores
   `deny_unknown_fields` on unit variants of internally tagged enums.
+- The version is negotiated in the WebSocket upgrade as `ponte.v<N>` (ADR-0007), never inside
+  a message. A build speaks every version from `MIN_PROTOCOL_VERSION` to `PROTOCOL_VERSION`.
+  Raising the minimum locks out older agents, auto-update included: that needs an ADR.
+- The version of a connection is a `ProtocolVersion`, which only comes out of a negotiated
+  subprotocol name. Never pass `PROTOCOL_VERSION` where the connection's version is meant.
 - A new field is an `Option<T>` left out of the JSON when unset (`skip_serializing_if`). It
-  bumps `PROTOCOL_VERSION` and is only sent to a peer that announced a version that knows it.
-  Renaming, removing or retyping a field is breaking: bump `PROTOCOL_VERSION` and add an ADR.
-- Keep the pinned-format tests in `src/messages.rs` passing. If one fails, you changed the
-  wire format: decide deliberately, never just update the expected JSON. A new type or
-  variant needs a case in the `*_reject_unknown_fields` tests.
-- No business logic here. Types, serde attributes and tiny constructors only.
-- Fields named `output` or containing free text from a machine are untrusted (AGENTS.md, invariant 4).
+  bumps `PROTOCOL_VERSION` and is only sent on a connection that negotiated a version that
+  knows it. Renaming, removing or retyping a field is breaking: bump `PROTOCOL_VERSION` and
+  add an ADR. The handshake messages follow the same rule; they are no longer frozen.
+- Keep the pinned-format tests in `src/messages.rs` and `src/transcript.rs` passing. If one
+  fails, you changed the wire format: decide deliberately, never just update the expected
+  value. A new type or variant needs a case in the `*_wire_format_is_stable` and
+  `*_reject_unknown_fields` tests.
+- `src/transcript.rs` is the bytes a device signs (ADR-0008). Changing them stops every
+  enrolled device from authenticating, so a new layout is a new protocol version and the old
+  layout stays for connections that negotiated the old one. Every field has a fixed size and
+  every transcript its own label; keep both true.
+- Keys, signatures, nonces and tokens (`src/keys.rs`) are lowercase hex of their exact
+  length. One value, one spelling: never accept uppercase, padding or a prefix.
+- A type that holds a secret has a redacted `Debug`, no `Display`, and an accessor named
+  `expose_*`. See `EnrollmentToken` and `Transcript`.
+- A parse error never quotes its input, secret or not: the peer chose the text and the error
+  goes to a log.
+- Text a peer says about itself before it has proven anything is a `Label`, never a `String`.
+  Handshake messages stay under `MAX_HANDSHAKE_MESSAGE_BYTES`.
+- No business logic here. Types, serde attributes, tiny constructors and the layout of signed
+  bytes only. No cryptography: signing and verifying belong to the agent and the server.
+- Fields named `output` or containing free text from a machine are untrusted (AGENTS.md,
+  invariant 4). A `Label` is bounded, and still untrusted.

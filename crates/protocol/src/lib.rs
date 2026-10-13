@@ -5,16 +5,44 @@
 //! crate before editing.
 
 mod ids;
+mod keys;
 mod messages;
 mod telemetry;
+mod text;
+mod transcript;
+mod version;
 
 pub use ids::{DeviceId, RequestId};
+pub use keys::{EnrollmentToken, InvalidHex, Nonce, PublicKey, Signature};
 pub use messages::{
     ActionOutcome, ActionRequest, ActionResult, AgentToServer, Initiator, ServerToAgent,
 };
 pub use telemetry::{DiskUsage, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot};
+pub use text::{InvalidLabel, Label};
+pub use transcript::{Transcript, enroll_transcript, hello_transcript};
+pub use version::ProtocolVersion;
 
-/// Version of the agent <-> server protocol. Bump it on every wire change, additive ones
-/// included: peers reject unknown fields, so a sender needs the version to know which
-/// fields the other side understands (ADR-0006).
+/// Newest version of the agent <-> server protocol this build speaks. Bump it on every wire
+/// change, additive ones included: peers reject unknown fields, so a sender needs the
+/// version to know which fields the other side understands (ADR-0006).
+///
+/// This is not the version of a connection. That one is negotiated: see [`ProtocolVersion`].
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// Oldest version this build still speaks. Both sides speak every version from here to
+/// [`PROTOCOL_VERSION`]. Raising it on the server locks out every agent older than the new
+/// value, auto-update included (ADR-0007).
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
+const _: () = assert!(1 <= MIN_PROTOCOL_VERSION && MIN_PROTOCOL_VERSION <= PROTOCOL_VERSION);
+
+/// Largest WebSocket message either side accepts, in bytes. Both ends set it on the socket,
+/// so an oversized message is refused before it is buffered, let alone parsed.
+pub const MAX_MESSAGE_BYTES: usize = 256 * 1024;
+
+/// Largest message accepted before the handshake is over, in bytes. Every handshake message
+/// has a fixed shape well under 1 KiB, and a peer that has proven nothing yet gets no more
+/// room than that needs.
+pub const MAX_HANDSHAKE_MESSAGE_BYTES: usize = 4 * 1024;
+
+const _: () = assert!(MAX_HANDSHAKE_MESSAGE_BYTES <= MAX_MESSAGE_BYTES);
