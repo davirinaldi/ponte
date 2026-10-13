@@ -24,7 +24,8 @@ approval, without any screen sharing. Each milestone should end with something w
   fallback; Zammad connector; demo clip end to end. Session helper with consent prompt.
   *Post: the 60-second demo.*
 - [ ] **M5 Hardening**: MSI installer, auto-update, swarm load test (10k agents), calibration
-  report, threat model review. *Post: 10,000 simulated agents on one small server.*
+  report, opt-in pin of the server key (ADR-0009), threat model review.
+  *Post: 10,000 simulated agents on one small server.*
 
 ## Phase 2: view the screen
 
@@ -40,8 +41,6 @@ approval, without any screen sharing. Each milestone should end with something w
 - `str0m` or `webrtc-rs` for media.
 - Plain Postgres or TimescaleDB for telemetry.
 - Local consent for high-risk actions already in phase 1, or only with the helper in M4.
-- One enrollment token per machine, or a token good for N enrollments until a deadline?
-  RF-01 says single-use; a silent rollout to many PCs (RF-42) needs an answer before M5.
 - What binds an `ActionRequest` to one device and a time window? T4 promises short-lived
   requests, but the type has no expiry, and a compromised server can replay any signed
   manifest on any machine with a made-up initiator.
