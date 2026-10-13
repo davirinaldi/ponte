@@ -1,6 +1,6 @@
 # 0007. Negotiate the protocol version in the WebSocket upgrade
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-12
 - Requirements: RNF-16, RNF-21
 

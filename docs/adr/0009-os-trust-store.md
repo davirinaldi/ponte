@@ -1,6 +1,6 @@
 # 0009. Verify the server certificate against the operating system's trust store
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-12
 - Requirements: RNF-01
 

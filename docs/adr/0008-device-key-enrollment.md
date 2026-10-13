@@ -1,6 +1,6 @@
-# 0008. Enroll with a one-time token and prove a device key on every connection
+# 0008. Enroll with an expiring token and prove a device key on every connection
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-12
 - Requirements: RF-01, RF-02, RF-04, RF-49, RNF-04
 
