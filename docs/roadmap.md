@@ -59,3 +59,13 @@ approval, without any screen sharing. Each milestone should end with something w
 - `Manifest::validate` is opt-in and manifests have no size limits (steps, strings). Should
   only a validated type be runnable?
 - May an allowed root be a whole drive? `C:\` is accepted today and allows everything on it.
+- A wire message has more than one spelling. serde also reads a struct written as a JSON
+  array, in field order, and a UUID in upper case, braced or without hyphens. No constraint
+  is dropped that way, but anything that looks at JSON keys (a log scrubber, a proxy, the
+  web console) sees something else than the receiver. Our senders only write the canonical
+  form, so a stricter reader can come later without a new protocol version.
+- The handshake signs the version the server selected, not what the agent offered (ADR-0007).
+  Whoever terminates TLS can strip the newer names from the offer unnoticed. Sign the offered
+  range too, once a second version exists?
+- Outside the handshake, strings and lists are bounded only by `MAX_MESSAGE_BYTES`: telemetry
+  names, `output`, `reason`, `manifest_id`, the initiator fields. Which get a limit of their own?
