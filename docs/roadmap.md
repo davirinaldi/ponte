@@ -7,14 +7,19 @@ approval, without any screen sharing. Each milestone should end with something w
 
 - [x] **M0 Skeleton**: workspace, protocol types, manifest validation, path policy,
   routing policy, server health endpoint, CI, agent instructions.
-- [ ] **M1 Connected agent**: agent connects over WSS, sends `Hello` and heartbeats with real
-  telemetry (`sysinfo`); server tracks online devices in Postgres; reconnect with backoff
-  and jitter. *Post: Rust agent footprint (binary size, idle RAM).*
-- [ ] **M2 Actions on Windows**: windows-service lifecycle; service control and file primitives;
-  resolved-path re-check; preconditions and verification; idempotent `RequestId`.
-- [ ] **M3 Signed catalog and approvals**: ed25519 manifest signing (offline key), agent-side
-  verification; approval queue; hash-chained audit log; fake-erp failure modes.
-  *Post: why typed actions are the defence against prompt injection.*
+- [ ] **M1 Connected agent**: agent connects over WSS, with the server certificate checked
+  against the OS trust store (ADR-0009) and the protocol version negotiated in the WebSocket
+  upgrade (ADR-0007); enrollment token, then a device key proven on every connection
+  (ADR-0008); heartbeats with real telemetry (`sysinfo`); server tracks online devices in
+  Postgres; reconnect with backoff and jitter. Dependencies agreed for this milestone:
+  `tokio-tungstenite` with rustls, `sysinfo`, `sqlx` and an ed25519 crate.
+  *Post: Rust agent footprint (binary size, idle RAM).*
+- [ ] **M2 Signed actions on Windows**: ed25519 manifest signing (offline key) and agent-side
+  verification first, so that no primitive ever runs unverified; windows-service lifecycle;
+  service control and file primitives; resolved-path re-check; preconditions and
+  verification; idempotent `RequestId`; device key under DPAPI.
+- [ ] **M3 Approvals and audit**: approval queue; hash-chained audit log; fake-erp failure
+  modes. *Post: why typed actions are the defence against prompt injection.*
 - [ ] **M4 MCP and helpdesk**: MCP tools; decision layer with a classifier provider and LLM
   fallback; Zammad connector; demo clip end to end. Session helper with consent prompt.
   *Post: the 60-second demo.*
@@ -35,9 +40,8 @@ approval, without any screen sharing. Each milestone should end with something w
 - `str0m` or `webrtc-rs` for media.
 - Plain Postgres or TimescaleDB for telemetry.
 - Local consent for high-risk actions already in phase 1, or only with the helper in M4.
-- Which milestone delivers enrollment and device identity (RF-01, RF-02, RF-04)? None lists
-  them, and M1 will store devices under a `device_id` the agent asserts on its own.
-- M2 runs actions before M3 verifies signatures. What may an M2 agent accept from the network?
+- One enrollment token per machine, or a token good for N enrollments until a deadline?
+  RF-01 says single-use; a silent rollout to many PCs (RF-42) needs an answer before M5.
 - What binds an `ActionRequest` to one device and a time window? T4 promises short-lived
   requests, but the type has no expiry, and a compromised server can replay any signed
   manifest on any machine with a made-up initiator.
