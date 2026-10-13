@@ -10,3 +10,4 @@ Claude Code, or copy `0000-template.md` by hand.
 | [0003](0003-agent-enforces-policy.md) | The agent verifies signatures and enforces policy itself | Accepted |
 | [0004](0004-websocket-control-channel.md) | Outbound WebSocket over TLS for the control channel | Accepted |
 | [0005](0005-pluggable-decision-layer.md) | Pluggable decision layer with risk x confidence routing | Accepted |
+| [0006](0006-strict-wire-parsing.md) | Reject unknown fields on the wire and gate new fields by protocol version | Proposed |
