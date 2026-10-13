@@ -1,6 +1,6 @@
 # 0006. Reject unknown fields on the wire and gate new fields by protocol version
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-12
 - Requirements: RNF-21
 
