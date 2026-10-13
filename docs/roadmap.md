@@ -35,3 +35,24 @@ approval, without any screen sharing. Each milestone should end with something w
 - `str0m` or `webrtc-rs` for media.
 - Plain Postgres or TimescaleDB for telemetry.
 - Local consent for high-risk actions already in phase 1, or only with the helper in M4.
+- Which milestone delivers enrollment and device identity (RF-01, RF-02, RF-04)? None lists
+  them, and M1 will store devices under a `device_id` the agent asserts on its own.
+- M2 runs actions before M3 verifies signatures. What may an M2 agent accept from the network?
+- What binds an `ActionRequest` to one device and a time window? T4 promises short-lived
+  requests, but the type has no expiry, and a compromised server can replay any signed
+  manifest on any machine with a made-up initiator.
+- Agent-local policy beyond `allowed_roots`. ADR-0003 names a risk ceiling and consent for
+  high risk, and `AgentConfig` has neither. Do services and processes need an allowlist too?
+  Today any signed manifest may stop `WinDefend` or kill `lsass.exe`.
+- How does the signed catalog reach the agent? `RunAction` carries an id and a version only.
+- Who computes the confidence that drives routing: the classifier, or the model that calls
+  `request_action`? `IntentClassifier` scores a ticket's intent, not an action on a machine.
+- `RoutingPolicy::default()` auto-executes low-risk actions at 0.9 before any calibration
+  report exists (RF-48). Should the default be "nothing runs alone"?
+- What may `SqlReadonly` run? The query is free text rated `read`; its safety rests entirely
+  on the database account behind the connection.
+- A verify check can still be filler. Nothing ties it to what the steps touched, and there
+  is no "path is gone" check for `delete_file` or `clear_temp_dir` to use.
+- `Manifest::validate` is opt-in and manifests have no size limits (steps, strings). Should
+  only a validated type be runnable?
+- May an allowed root be a whole drive? `C:\` is accepted today and allows everything on it.
