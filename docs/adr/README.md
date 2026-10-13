@@ -11,3 +11,4 @@ Claude Code, or copy `0000-template.md` by hand.
 | [0004](0004-websocket-control-channel.md) | Outbound WebSocket over TLS for the control channel | Accepted |
 | [0005](0005-pluggable-decision-layer.md) | Pluggable decision layer with risk x confidence routing | Accepted |
 | [0006](0006-strict-wire-parsing.md) | Reject unknown fields on the wire and gate new fields by protocol version | Accepted |
+| [0007](0007-version-in-websocket-subprotocol.md) | Negotiate the protocol version in the WebSocket upgrade | Proposed |
