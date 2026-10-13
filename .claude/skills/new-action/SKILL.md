@@ -19,8 +19,14 @@ Work through these steps in order. Stop and ask if any step needs a new primitiv
    - `ai_description`: when a model should use it **and when it must not**.
    - `risk`: at least the highest `inherent_risk` of its steps. When unsure, go higher.
    - `preconditions`: what must be true for the fix to be safe (e.g. service stopped).
-   - `verify`: how to prove it worked. Every action needs at least one verify check.
-   - Paths as TOML literal strings (`'C:\...'`) under an allowed root. No `..`, no UNC.
+   - `verify`: how to prove it worked. Every action above `read` risk needs at least one
+     verify check; `validate` rejects it otherwise.
+   - Paths as TOML literal strings (`'C:\...'`) under an allowed root, in steps and in checks
+     alike. No `..`, no UNC. Accented letters must match the configured root exactly, case
+     included: `C:\FARMÁCIA` is not `C:\Farmácia`.
+   - Service, image and connection names are plain names (`FakeErp`, `erp.exe`): letters,
+     digits, `.`, `_`, `-`, `$` and single spaces, never paths or patterns.
+   - `max_bytes` is at most 64 KiB; a disk `percent` is between 1 and 100.
 3. **Test it.** Add the file to `example_manifests_are_valid` in
    `crates/actions/src/manifest.rs`, plus a negative test if the action has a non-obvious
    safety condition.

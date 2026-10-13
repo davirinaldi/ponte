@@ -30,7 +30,7 @@ Phase tags: **P1** core (telemetry and typed actions), **P2** view the screen, *
 ### C. Typed action catalog
 - **RF-11 (P1)** Primitives compiled into the agent: service control, read/delete file under allowed roots, read registry, kill process, read-only SQL, clear temp.
 - **RF-12 (P1)** Declarative manifests composing primitives: id, descriptions for humans and AI, schema-validated parameters, risk, timeout.
-- **RF-13 (P1)** Preconditions before and verification after every action.
+- **RF-13 (P1)** Preconditions before and verification after every action. An action that changes the machine (risk above read) must declare at least one verification check.
 - **RF-14 (P1)** Versioned, signed manifests. The agent rejects any manifest without a valid signature.
 - **RF-15 (P1)** Structured results (outcome, output, duration) and cancellation.
 
