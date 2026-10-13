@@ -13,3 +13,4 @@ Claude Code, or copy `0000-template.md` by hand.
 | [0006](0006-strict-wire-parsing.md) | Reject unknown fields on the wire and gate new fields by protocol version | Accepted |
 | [0007](0007-version-in-websocket-subprotocol.md) | Negotiate the protocol version in the WebSocket upgrade | Proposed |
 | [0008](0008-device-key-enrollment.md) | Enroll with a one-time token and prove a device key on every connection | Proposed |
+| [0009](0009-os-trust-store.md) | Verify the server certificate against the operating system's trust store | Proposed |
