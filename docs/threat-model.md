@@ -28,7 +28,7 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
 |---|---|---|---|
 | T1 | Server compromise becomes RCE on every agent | Signing key never on the server; agent verifies signatures and enforces local policy; no arbitrary-execution primitive | RNF-02, RF-14, RNF-06 |
 | T2 | Prompt injection via machine-originated text makes the AI request harmful actions | Text labelled as untrusted and truncated; closed catalog; risk x confidence policy; per-ticket limits; approval for medium/high | RF-24, RF-25, RF-17 |
-| T3 | Path tricks escape allowed directories (`..`, UNC, ADS, trailing dots, junctions) | Strict lexical `PathPolicy` plus resolved-path re-check at execution | RF-11 |
+| T3 | Path tricks escape allowed directories (`..`, UNC, ADS, trailing dots, device names, look-alike letters, junctions) | Strict lexical `PathPolicy` on every path in steps and checks, plus resolved-path re-check at execution | RF-11 |
 | T4 | Replay or duplicate execution of an action | `RequestId` idempotency on the agent; short-lived requests | RNF-18 |
 | T5 | Enrollment token leak clones devices | Single-use tokens; device keys generated locally; per-device revocation | RF-01, RF-02, RF-04 |
 | T6 | Agent key theft from disk | DPAPI/TPM protection; revocation | RNF-04 |
