@@ -13,7 +13,7 @@ mod path_policy;
 mod primitive;
 mod risk;
 
-pub use manifest::{Check, ExpectedServiceState, Manifest, ManifestError};
+pub use manifest::{Check, ExpectedServiceState, Location, Manifest, ManifestError};
 pub use path_policy::PathPolicy;
 pub use primitive::Primitive;
 pub use risk::RiskLevel;

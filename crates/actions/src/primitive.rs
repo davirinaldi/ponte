@@ -28,7 +28,11 @@ pub enum Primitive {
         path: String,
     },
     /// Empties the temp directory of the account the ERP runs as.
-    ClearTempDir,
+    ///
+    /// The empty braces are load-bearing: serde ignores `deny_unknown_fields` on unit
+    /// variants of an internally tagged enum, so `ClearTempDir` alone would silently
+    /// accept `recursive = true` or a `path`.
+    ClearTempDir {},
     /// Terminates every process with this image name, e.g. `erp.exe`.
     KillProcess {
         image: String,
@@ -46,7 +50,7 @@ impl Primitive {
     pub const fn inherent_risk(&self) -> RiskLevel {
         match self {
             Self::ReadFileTail { .. } | Self::SqlReadonly { .. } => RiskLevel::Read,
-            Self::ServiceStart { .. } | Self::ClearTempDir => RiskLevel::Low,
+            Self::ServiceStart { .. } | Self::ClearTempDir {} => RiskLevel::Low,
             Self::ServiceStop { .. } | Self::ServiceRestart { .. } | Self::DeleteFile { .. } => {
                 RiskLevel::Medium
             }
@@ -59,7 +63,30 @@ impl Primitive {
     pub fn path(&self) -> Option<&str> {
         match self {
             Self::ReadFileTail { path, .. } | Self::DeleteFile { path } => Some(path),
-            _ => None,
+            // Listed one by one: a new primitive must say whether it touches a path.
+            Self::ServiceStart { .. }
+            | Self::ServiceStop { .. }
+            | Self::ServiceRestart { .. }
+            | Self::ClearTempDir {}
+            | Self::KillProcess { .. }
+            | Self::SqlReadonly { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fieldless_primitive_rejects_unknown_fields() {
+        assert_eq!(
+            toml::from_str::<Primitive>("op = \"clear_temp_dir\"").unwrap(),
+            Primitive::ClearTempDir {}
+        );
+        for extra in ["recursive = true", r"path = 'C:\Windows'"] {
+            let source = format!("op = \"clear_temp_dir\"\n{extra}");
+            assert!(toml::from_str::<Primitive>(&source).is_err(), "{extra}");
         }
     }
 }
