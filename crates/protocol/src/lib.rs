@@ -14,5 +14,7 @@ pub use messages::{
 };
 pub use telemetry::{DiskUsage, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot};
 
-/// Version of the agent <-> server protocol. Bump it on any breaking wire change.
+/// Version of the agent <-> server protocol. Bump it on every wire change, additive ones
+/// included: peers reject unknown fields, so a sender needs the version to know which
+/// fields the other side understands (ADR-0006).
 pub const PROTOCOL_VERSION: u16 = 1;

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// Telemetry must never contain personal data (screen content, documents, patient
 /// or customer records). See RNF-09 in `docs/requirements.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetrySnapshot {
     pub collected_at: DateTime<Utc>,
     pub uptime_secs: u64,
@@ -16,12 +17,14 @@ pub struct TelemetrySnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MemoryUsage {
     pub total_bytes: u64,
     pub used_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiskUsage {
     /// Mount point or drive, e.g. `C:`.
     pub mount: String,
@@ -30,6 +33,7 @@ pub struct DiskUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceStatus {
     pub name: String,
     pub state: ServiceState,
