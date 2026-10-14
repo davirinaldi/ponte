@@ -157,6 +157,35 @@ mod tests {
         panic!("the place was never given back");
     }
 
+    /// What `limited` sets is what axum hands to the WebSocket library. axum shows its
+    /// configuration only through `Debug`, so that is what is read here.
+    #[tokio::test]
+    async fn ws_loopback_an_upgrade_carries_every_limit() {
+        let (seen, mut debug) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/agent",
+            axum::routing::get(move |upgrade: axum::extract::ws::WebSocketUpgrade| {
+                let _ = seen.send(format!("{:?}", super::limited(upgrade)));
+                async { axum::http::StatusCode::NO_CONTENT }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let (status, _) = ask(addr).await;
+        assert_eq!(status, 204);
+        let debug = debug.recv().await.unwrap();
+        for limit in [
+            format!("max_message_size: Some({MAX_MESSAGE_BYTES})"),
+            format!("max_frame_size: Some({MAX_MESSAGE_BYTES})"),
+            format!("write_buffer_size: {WRITE_BUFFER_BYTES}"),
+            format!("max_write_buffer_size: {MAX_WRITE_BUFFER_BYTES}"),
+        ] {
+            assert!(debug.contains(&limit), "{limit} not in {debug}");
+        }
+    }
+
     /// The limits of the server's sockets, as the WebSocket library under axum takes them.
     fn socket_limits() -> WebSocketConfig {
         WebSocketConfig::default()

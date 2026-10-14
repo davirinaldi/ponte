@@ -253,7 +253,9 @@ async fn pg_an_error_carries_no_value_of_the_call(pool: PgPoolOptions, options: 
     issue(&store, 1, 1).await;
     let device_id = enrolled(&store, 1, [10; 32]).await;
     let mut poisoned = telemetry(1);
-    // PostgreSQL refuses a NUL in JSON text, and its message quotes the JSON around it.
+    // PostgreSQL refuses a NUL in JSON text, and the context of its error quotes the JSON
+    // around it. `tests::an_error_keeps_the_kind_and_drops_the_text` covers a message that
+    // quotes a value itself.
     poisoned.disks.push(DiskUsage {
         mount: "\0SECRET-CUSTOMER-RECORD".to_owned(),
         total_bytes: 1,
