@@ -20,8 +20,16 @@ Hostname verification stays on and plain `ws://` stays limited to localhost. Not
 pinned by default; an opt-in pin of the server's public key, for customers that do not
 inspect TLS, comes with the hardening milestone (M5).
 
-Whether this goes through `rustls-platform-verifier` or `rustls-native-certs` is decided in
-M1 by binary size (RNF-12); both read the Windows store.
+The verifier is `rustls-platform-verifier`, chosen in M1 over `rustls-native-certs`. Binary
+size (RNF-12) was to decide and does not separate them: on x86_64 Windows with the release
+profile, a minimal WebSocket client grows by 8 KB with the first and 47 KB with the second.
+Behaviour does. Windows fetches root certificates on demand, so the store of a fresh or
+rarely updated machine lists only a few. `rustls-native-certs` reads that list once and
+trusts nothing else; the platform verifier asks Windows to build the chain, which fetches
+the missing root, follows intermediate certificates and applies the machine's own policy.
+
+The agent offers TLS 1.3 only (RNF-01) and names its crypto provider (`ring`) itself, so
+nothing depends on a process-wide default.
 
 ## Consequences
 
@@ -35,6 +43,9 @@ M1 by binary size (RNF-12); both read the Windows store.
   trigger actions that are already signed, within local policy (ADR-0003), and it cannot pose
   as the device elsewhere without the device key (ADR-0008).
 - Trust and revocation follow Windows updates instead of agent releases.
+- Verifying a certificate can make Windows fetch a root, an intermediate or revocation data
+  over HTTP. The agent's connection deadline leaves room for that.
+- An inspecting proxy that stops at TLS 1.2 does not connect.
 - The agent behaves differently from machine to machine, since stores differ. Connection
   errors must name the certificate problem in the log.
 

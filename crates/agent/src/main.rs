@@ -1,16 +1,5 @@
-//! Ponte agent.
-//!
-//! Runs on the supported machine (a point-of-sale PC, for example) as a privileged
-//! Windows service. It only ever opens *outbound* connections, reports telemetry,
-//! and runs actions from the signed catalog after checking its own local policy.
-//!
-//! Current state: loads its configuration and waits for Ctrl+C. The connection
-//! loop is milestone M1 in `docs/roadmap.md`.
-
-mod config;
-mod platform;
-
 use anyhow::Context;
+use ponte_agent::AgentConfig;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -25,14 +14,14 @@ async fn main() -> anyhow::Result<()> {
     let config_path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "agent.toml".to_owned());
-    let config = config::AgentConfig::load(&config_path)
+    let config = AgentConfig::load(&config_path)
         .with_context(|| format!("loading agent config from {config_path}"))?;
 
     info!(
         server = %config.server_url,
         allowed_roots = config.allowed_roots.len(),
         protocol = ponte_protocol::PROTOCOL_VERSION,
-        platform = platform::NAME,
+        platform = ponte_agent::PLATFORM,
         "agent starting"
     );
 
