@@ -23,8 +23,11 @@ pub(crate) trait Collect {
 ///
 /// It lives as long as the agent: processor usage is the share of time spent busy since
 /// the reading before, so each heartbeat reports the average since the last one.
+///
+/// The very first reading of the processors takes the system about half a second, so it
+/// happens on a blocking thread, like every other one, and never on the async runtime.
 #[derive(Clone)]
-pub(crate) struct Collector(Arc<Mutex<Probe>>);
+pub(crate) struct Collector(Arc<Mutex<Option<Probe>>>);
 
 struct Probe {
     system: System,
@@ -33,15 +36,23 @@ struct Probe {
 
 impl Collector {
     pub(crate) fn new() -> Self {
-        let mut system = System::new();
-        // The first reading has nothing to compare with. Taking it now gives the first
-        // heartbeat one that does.
-        system.refresh_cpu_usage();
-        Self(Arc::new(Mutex::new(Probe {
-            system,
-            disks: Disks::new(),
-        })))
+        Self(Arc::new(Mutex::new(None)))
     }
+
+    /// Takes the first reading in the background, so that the first heartbeat has one
+    /// to compare with and does not wait for it.
+    pub(crate) fn warm_up(&self) {
+        let probe = Arc::clone(&self.0);
+        drop(tokio::task::spawn_blocking(move || {
+            locked(&probe).get_or_insert_with(Probe::new);
+        }));
+    }
+}
+
+/// A panic in an earlier reading leaves nothing half-written that matters: everything is
+/// read again each time.
+fn locked(probe: &Mutex<Option<Probe>>) -> std::sync::MutexGuard<'_, Option<Probe>> {
+    probe.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Collect for Collector {
@@ -49,9 +60,7 @@ impl Collect for Collector {
         let probe = Arc::clone(&self.0);
         // Reading disks is a handful of system calls that may wait on a slow drive.
         let reading = tokio::task::spawn_blocking(move || {
-            // A panic in an earlier reading leaves nothing half-written that matters:
-            // everything is read again here.
-            probe.lock().unwrap_or_else(PoisonError::into_inner).read()
+            locked(&probe).get_or_insert_with(Probe::new).read()
         })
         .await;
         match reading {
@@ -81,6 +90,17 @@ struct DiskReading {
 }
 
 impl Probe {
+    fn new() -> Self {
+        let mut system = System::new();
+        // The first reading of the processors has nothing to compare with. It is taken
+        // now, so that the next one has.
+        system.refresh_cpu_usage();
+        Self {
+            system,
+            disks: Disks::new(),
+        }
+    }
+
     fn read(&mut self) -> Reading {
         self.system.refresh_memory();
         self.system.refresh_cpu_usage();
@@ -311,6 +331,7 @@ mod tests {
     #[tokio::test]
     async fn a_snapshot_of_this_machine_is_plausible() {
         let collector = Collector::new();
+        collector.warm_up();
         let before = Utc::now();
         let snapshot = collector.snapshot().await.expect("the reading failed");
 
