@@ -12,7 +12,7 @@
 //!
 //! Read `crates/server/AGENTS.md` before changing what is accepted, refused or logged here.
 
-mod audit;
+pub(crate) mod audit;
 mod handshake;
 mod pg;
 mod registry;

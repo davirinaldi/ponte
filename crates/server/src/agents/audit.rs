@@ -5,12 +5,15 @@
 //! target, which the server's log filter never turns off. Every event goes through
 //! [`record`], so that is the one place M3 replaces.
 
+use std::num::NonZeroU32;
+
+use chrono::{DateTime, Utc};
 use ponte_protocol::{DeviceId, PublicKey};
 use tracing::{info, warn};
 
 use super::handshake::{Claim, Rejection};
 use super::session::SessionEnd;
-use super::store::{CustomerId, DeviceStatus, SessionId};
+use super::store::{CustomerId, DeviceStatus, SessionId, TokenHash};
 
 /// The `tracing` target of every audit event.
 pub const TARGET: &str = "ponte::audit";
@@ -29,7 +32,10 @@ pub(crate) enum AuditEvent {
     /// A handshake was refused after the peer showed a token the server issued or the key
     /// of a device it knows (see `Rejection::follows_a_real_credential`). `who` says which:
     /// the device, or the key that tried to enroll and the hash of the token it used.
-    HandshakeRefused { reason: Rejection, who: Claim },
+    HandshakeRefused {
+        reason: Rejection,
+        who: Claim,
+    },
     SessionStarted {
         device: DeviceId,
         session: SessionId,
@@ -47,7 +53,30 @@ pub(crate) enum AuditEvent {
         session: SessionId,
         reason: SessionEnd,
     },
+    /// What an operator did, through the server's subcommands. There are no accounts yet,
+    /// so the actor is whoever runs them on the server host (`actor = "server_cli"`).
+    CustomerAdded {
+        customer: CustomerId,
+    },
+    TokenIssued {
+        token: TokenHash,
+        customer: CustomerId,
+        max_uses: NonZeroU32,
+        expires_at: DateTime<Utc>,
+    },
+    TokenRevoked {
+        token: TokenHash,
+    },
+    DeviceApproved {
+        device: DeviceId,
+    },
+    DeviceRevoked {
+        device: DeviceId,
+    },
 }
+
+/// The actor of the events an operator causes, until there are accounts (M3).
+const OPERATOR: &str = "server_cli";
 
 pub(crate) fn record(event: &AuditEvent) {
     match *event {
@@ -85,6 +114,35 @@ pub(crate) fn record(event: &AuditEvent) {
             reason,
         } => {
             info!(target: TARGET, event = "session_ended", %device, %session, ?reason);
+        }
+        AuditEvent::CustomerAdded { customer } => {
+            // The id, not the name: the name is for people, the log is for finding things.
+            info!(target: TARGET, event = "customer_added", actor = OPERATOR, %customer);
+        }
+        AuditEvent::TokenIssued {
+            token,
+            customer,
+            max_uses,
+            expires_at,
+        } => {
+            info!(
+                target: TARGET,
+                event = "token_issued",
+                actor = OPERATOR,
+                token_hash = %token.short(),
+                %customer,
+                max_uses = max_uses.get(),
+                %expires_at,
+            );
+        }
+        AuditEvent::TokenRevoked { token } => {
+            info!(target: TARGET, event = "token_revoked", actor = OPERATOR, token_hash = %token.short());
+        }
+        AuditEvent::DeviceApproved { device } => {
+            info!(target: TARGET, event = "device_approved", actor = OPERATOR, %device);
+        }
+        AuditEvent::DeviceRevoked { device } => {
+            info!(target: TARGET, event = "device_revoked", actor = OPERATOR, %device);
         }
     }
 }

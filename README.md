@@ -55,13 +55,22 @@ More in [docs/architecture.md](docs/architecture.md).
 
 ## Getting started
 
-Requires Rust (the version is pinned in `rust-toolchain.toml`; rustup installs it).
+Requires Rust (the version is pinned in `rust-toolchain.toml`; rustup installs it) and, to
+run the server, Docker for PostgreSQL.
 
 ```sh
 cargo test --workspace
+docker compose -f deploy/docker-compose.yml up -d
+export DATABASE_URL=postgres://ponte:ponte@127.0.0.1:5432/ponte
+cargo run -p ponte-server -- customer create "Demo Customer"     # prints the customer id
+mkdir -p keys/agent-dev                                          # ignored by git
+cargo run -p ponte-server -- token create <customer-id> --out keys/agent-dev/enrollment-token
 cargo run -p ponte-server            # then open http://127.0.0.1:8080/healthz
 cargo run -p ponte-agent -- crates/agent/agent.example.toml
+cargo run -p ponte-server -- device list
 ```
+
+`cargo run -p ponte-server -- help` lists the other subcommands.
 
 ## Documentation
 

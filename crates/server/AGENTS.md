@@ -81,6 +81,21 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
 - Tests run without a socket (`testkit::Peer`) and with a paused clock. Tests named
   `ws_loopback_*` bind `127.0.0.1` and cover only what needs a real socket.
 
+## Operator subcommands (`src/admin.rs`)
+
+Until the console exists, `ponte-server <subcommand>` is how an operator adds customers,
+issues and revokes tokens, and approves and revokes devices (`ponte-server help`).
+
+- **A token is shown once, in a file, and nowhere else.** `token create` makes it from the
+  operating system's random bytes and writes it to a new file (`--out`, never over an
+  existing one). The terminal and the log get the first eight bytes of its hash, which is
+  also how `token revoke` and audit events name it. Never print a token, never take one
+  as an argument, never log one.
+- Everything that changes state is an audit event with `actor = "server_cli"` (RF-40).
+- Answers go to stdout, the log to stderr. Errors name what failed, never a secret.
+- The server refuses to start without `DATABASE_URL` (invariant 7). It migrates the
+  schema and marks every device offline before it listens.
+
 ## Database (`src/agents/pg.rs`, `migrations/`)
 
 - **All SQL goes through the `query!` family of macros.** Never build SQL from strings,

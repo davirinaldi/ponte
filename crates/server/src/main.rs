@@ -1,27 +1,77 @@
+use std::io::Write;
+use std::process::ExitCode;
+
 use anyhow::Context;
-use tracing::{info, warn};
+use chrono::Utc;
+use ponte_server::admin::{self, Command};
+use ponte_server::agents::PgStore;
+use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<ExitCode> {
+    let command = match admin::parse(std::env::args_os().skip(1)) {
+        Ok(command) => command,
+        Err(error) => {
+            let _ = writeln!(std::io::stderr(), "{error}\n\n{}", admin::USAGE);
+            return Ok(ExitCode::from(2));
+        }
+    };
+    if command == Command::Help {
+        let _ = writeln!(std::io::stdout(), "{}", admin::USAGE);
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    // A subcommand prints its answer on stdout, so its log goes to stderr.
     let directives = std::env::var("RUST_LOG").ok();
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_filter(ponte_server::log_filter(directives.as_deref())))
-        .init();
+    let filter = ponte_server::log_filter(directives.as_deref());
+    if command == Command::Serve {
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_filter(filter))
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(
+                fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_filter(filter),
+            )
+            .init();
+    }
+
+    // No database, no server: there is nothing to check a device against (invariant 7).
+    let url =
+        std::env::var("DATABASE_URL").context("DATABASE_URL must name the PostgreSQL database")?;
+    let store = PgStore::connect(&url).await?;
+    drop(url);
+    store.migrate().await?;
+
+    if command == Command::Serve {
+        serve(store).await?;
+    } else {
+        let mut out = std::io::stdout().lock();
+        admin::run(&store, command, &mut out, Utc::now()).await?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn serve(store: PgStore) -> anyhow::Result<()> {
+    // Sessions open when the server last stopped ended without a record.
+    let cleared = store.clear_online().await?;
+    info!(
+        devices = cleared,
+        "devices left online by the last run marked offline"
+    );
 
     let bind = std::env::var("PONTE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
     info!(%bind, "server listening");
-    warn!(
-        "devices are kept in memory and no enrollment token exists: agents can connect, \
-         none can enroll"
-    );
 
-    axum::serve(listener, ponte_server::router())
+    axum::serve(listener, ponte_server::router_with(store))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serving HTTP")?;
