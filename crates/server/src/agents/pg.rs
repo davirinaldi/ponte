@@ -71,6 +71,8 @@ const SERVER_LOCK: i64 = 0x706f_6e74_652d_7376;
 #[derive(Debug)]
 pub struct ServerClaim {
     connection: sqlx::PgConnection,
+    /// The database session that holds the lock, to tell it from another server's.
+    session: i32,
 }
 
 /// How often a serving process checks that it still holds its claim ([`PgStore::hold_claim`]).
@@ -358,20 +360,23 @@ impl PgStore {
                 .await
                 .map_err(failed(OPERATION))?
                 .detach();
-            let claimed = sqlx::query_scalar!(
-                r#"SELECT pg_try_advisory_lock($1) AS "claimed!""#,
+            let claimed = sqlx::query!(
+                r#"SELECT pg_try_advisory_lock($1) AS "claimed!", pg_backend_pid() AS "session!""#,
                 SERVER_LOCK
             )
             .fetch_one(&mut connection)
             .await
             .map_err(failed(OPERATION))?;
-            if !claimed {
+            if !claimed.claimed {
                 return Err(PgStoreError {
                     operation: OPERATION,
                     kind: ErrorKind::AnotherServer,
                 });
             }
-            Ok(ServerClaim { connection })
+            Ok(ServerClaim {
+                connection,
+                session: claimed.session,
+            })
         })
         .await
     }
@@ -392,14 +397,55 @@ impl PgStore {
             if matches!(ping, Ok(Ok(()))) {
                 continue;
             }
-            warn!("the connection holding this server's claim on the database was lost");
-            match self.claim_server().await {
-                Ok(again) => {
-                    claim = again;
-                    warn!("this server's claim on the database was taken again");
+            warn!("the connection holding this server's claim on the database did not answer");
+            claim = match self.regain(claim).await {
+                Ok(kept) => kept,
+                Err(error) => return error,
+            };
+        }
+    }
+
+    /// What follows a claim whose connection did not answer: the claim taken again on a
+    /// new connection, or the same one if its session still holds the lock (a slow answer
+    /// is not a lost claim), or `AnotherServer` if another session holds it. While the
+    /// database cannot be reached, the same claim, to be checked again.
+    #[doc(hidden)]
+    pub async fn regain(&self, claim: ServerClaim) -> Result<ServerClaim, PgStoreError> {
+        const OPERATION: &str = "find who holds the claim on the database";
+        match self.claim_server().await {
+            Ok(again) => {
+                warn!("this server's claim on the database was taken again");
+                Ok(again)
+            }
+            Err(error) if error.kind() == ErrorKind::AnotherServer => {
+                let holder = bounded(OPERATION, async {
+                    sqlx::query_scalar!(
+                        "SELECT pid FROM pg_locks
+                         WHERE locktype = 'advisory' AND granted AND objsubid = 1
+                           AND classid = ($1::bigint >> 32)::oid
+                           AND objid = ($1::bigint & 4294967295)::oid",
+                        SERVER_LOCK
+                    )
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(failed(OPERATION))
+                })
+                .await;
+                match holder {
+                    Ok(Some(Some(pid))) if pid == claim.session => {
+                        warn!("this server's own session still holds its claim; keeping it");
+                        Ok(claim)
+                    }
+                    Ok(_) => Err(error),
+                    Err(error) => {
+                        warn!(%error, "checking the claim on the database failed; retrying");
+                        Ok(claim)
+                    }
                 }
-                Err(error) if error.kind() == ErrorKind::AnotherServer => return error,
-                Err(error) => warn!(%error, "claiming the database again failed; retrying"),
+            }
+            Err(error) => {
+                warn!(%error, "claiming the database again failed; retrying");
+                Ok(claim)
             }
         }
     }
