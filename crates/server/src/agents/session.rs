@@ -28,7 +28,7 @@ use tracing::{debug, error, info, warn};
 
 use super::Gateway;
 use super::audit::{self, AuditEvent};
-use super::handshake::{self, Accepted, Rejection};
+use super::handshake::{self, Accepted, Claim, Rejection};
 use super::registry::Registration;
 use super::store::{AgentInfo, DeviceStatus, DeviceStore, SessionId};
 
@@ -76,15 +76,12 @@ pub(crate) async fn run<D, St, Si, E>(
         .unwrap_or(Err(Rejection::TimedOut));
     let outcome = match first {
         Ok((nonce, message)) => {
-            let claimed = match &message {
-                AgentToServer::Hello { device_id, .. } => Some(*device_id),
-                _ => None,
-            };
+            let claim = Claim::of(&message);
             handshake::answer(&gateway.store, version, &nonce, message, gateway.now())
                 .await
-                .map_err(|reason| (reason, claimed))
+                .map_err(|reason| (reason, claim))
         }
-        Err(reason) => Err((reason, None)),
+        Err(reason) => Err((reason, Claim::default())),
     };
 
     match outcome {
@@ -112,25 +109,22 @@ pub(crate) async fn run<D, St, Si, E>(
             // If this is lost on the way the agent enrolls again and gets the same answer.
             let _ = send(&mut sink, &ServerToAgent::Enrolled { device_id }).await;
         }
-        Err((reason, claimed)) => refused(reason, claimed, version),
+        Err((reason, claim)) => refused(reason, claim, version),
     }
     close(limits.close, &mut stream, &mut sink).await;
 }
 
-/// Records a refused handshake. `claimed` is the id a `Hello` came with: proven if the
-/// refusal came after the signature was checked, and a claim and nothing more otherwise.
-fn refused(reason: Rejection, claimed: Option<DeviceId>, version: ProtocolVersion) {
+/// Records a refused handshake. What `claim` says is proven if the refusal came after the
+/// signature was checked, and a claim and nothing more otherwise.
+fn refused(reason: Rejection, claim: Claim, version: ProtocolVersion) {
     if reason.follows_a_real_credential() {
-        audit::record(&AuditEvent::HandshakeRefused {
-            reason,
-            device: claimed,
-        });
+        audit::record(&AuditEvent::HandshakeRefused { reason, who: claim });
     } else {
         // Anyone who reaches the port can cause these, as often as they like, so they are
         // not worth a line at the default level.
         debug!(
             ?reason,
-            claimed_device = claimed.map(tracing::field::display),
+            claimed_device = claim.device.map(tracing::field::display),
             version = version.number(),
             "handshake refused"
         );
@@ -235,7 +229,11 @@ async fn start<'a, D: DeviceStore>(
 ) -> Option<Registration<'a>> {
     // Held across both steps, so two connections of one device reach the store and the
     // registry in the same order. See `Registry::starting`.
-    let _turn = gateway.registry.starting(id).await;
+    let Some(_turn) = gateway.registry.starting(id).await else {
+        // At `debug`: whoever holds the key can cause this as often as they connect.
+        debug!(device = %id, "session not started: too many connections of the device are starting");
+        return None;
+    };
 
     let started = gateway
         .store
@@ -248,7 +246,10 @@ async fn start<'a, D: DeviceStore>(
             // proven and this is the key of a revoked device in use.
             audit::record(&AuditEvent::HandshakeRefused {
                 reason: Rejection::RevokedDevice,
-                device: Some(id),
+                who: Claim {
+                    device: Some(id),
+                    ..Claim::default()
+                },
             });
             return None;
         }
@@ -460,7 +461,12 @@ mod tests {
     /// one that was left open until some deadline closed it.
     async fn closed_at_once(peer: &mut Peer) {
         let started = Instant::now();
-        assert_eq!(peer.rest().await, [Sent::Closed]);
+        // Longer than any deadline the server has, so a connection it never closes fails
+        // the test instead of hanging it.
+        let rest = tokio::time::timeout(Duration::from_secs(7 * 24 * 60 * 60), peer.rest())
+            .await
+            .expect("the server never closed");
+        assert_eq!(rest, [Sent::Closed]);
         assert_eq!(started.elapsed(), Duration::ZERO, "closed, but only later");
     }
 
@@ -1275,9 +1281,13 @@ mod tests {
         let started = Instant::now();
 
         store.revoke_device(id);
-        peer.send(Message::Ping(Vec::new().into()));
-        peer.send(Message::Text("not a heartbeat".into()));
-        peer.send(Message::Binary(vec![0].into()));
+        // Something every twenty seconds, none of it a heartbeat: it must not buy time.
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            peer.send(Message::Ping(Vec::new().into()));
+            peer.send(Message::Text("not a heartbeat".into()));
+            peer.send(Message::Binary(vec![0].into()));
+        }
         assert_eq!(peer.rest().await, [Sent::Closed]);
         assert_eq!(started.elapsed(), Duration::from_secs(60));
         peer.finished().await;
@@ -1352,12 +1362,14 @@ mod tests {
             second.receive().await,
             Some(Sent::Message(ServerToAgent::Welcome {}))
         );
-        // The first one was welcomed and then replaced.
+        // The first one was welcomed and then replaced, there and then.
+        let released = Instant::now();
         let rest = first.rest().await;
         assert_eq!(
             rest,
             [Sent::Message(ServerToAgent::Welcome {}), Sent::Closed]
         );
+        assert_eq!(released.elapsed(), Duration::ZERO, "closed, but only later");
         first.finished().await;
 
         let session = gateway.registry.current(id);
@@ -1436,6 +1448,11 @@ mod tests {
         closed_at_once(&mut peer).await;
         let line = audited(&logs).unwrap_or_else(|| panic!("not audited: {}", logs.text()));
         assert!(line.contains("reason=Enrollment(ExhaustedToken)"), "{line}");
+        let key = format!("public_key={}", stranger.public_key());
+        assert!(line.contains(&key), "{line}");
+        let hash = format!("token_hash={}", TokenHash::of(&token(1)).short());
+        assert!(line.contains(&hash), "{line}");
+        assert!(!line.contains(&token(1).expose_hex()[..16]), "{line}");
         drop(guard);
 
         // The device is revoked: whoever says hello with its key has the key.
@@ -1502,5 +1519,70 @@ mod tests {
             .filter(|line| line.contains("no longer logged"))
             .count();
         assert_eq!(notices, 1, "{logs}");
+    }
+
+    /// A machine has one agent. Someone who holds a device key and opens connection after
+    /// connection gets a few of them in line for a session, and the rest are dropped
+    /// before they cost a store call. No other device waits for any of it.
+    #[tokio::test(start_paused = true)]
+    async fn a_device_that_floods_with_connections_holds_up_only_itself() {
+        let inner = store_with_token(1, 2);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+        let other = TestDevice::new(11);
+        let other_id = enroll_at(&gateway, &other).await;
+
+        // The first connection is held inside the store. Three more line up behind it.
+        gateway.store.hold_next_start.store(true, Ordering::SeqCst);
+        let mut held = hello_at(&gateway, &device, id).await;
+        eventually("the first session is being recorded", || {
+            gateway.store.held.load(Ordering::SeqCst)
+        })
+        .await;
+        let mut waiting = Vec::new();
+        for _ in 0..3 {
+            waiting.push(hello_at(&gateway, &device, id).await);
+        }
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+
+        // Every one after that is turned away at once, however many come.
+        for _ in 0..20 {
+            let mut extra = hello_at(&gateway, &device, id).await;
+            closed_at_once(&mut extra).await;
+            extra.finished().await;
+        }
+        // Another device is welcomed as if nothing was going on.
+        let started = Instant::now();
+        let mut neighbour = hello_at(&gateway, &other, other_id).await;
+        assert_eq!(
+            neighbour.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        // Once the store answers, the ones in line each get their turn, and the last one
+        // to start is the one that stays.
+        gateway.store.release.add_permits(1);
+        let mut last = waiting.pop().unwrap();
+        assert_eq!(
+            last.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+        for peer in waiting.iter_mut().chain([&mut held]) {
+            let rest = peer.rest().await;
+            assert_eq!(rest.last(), Some(&Sent::Closed), "{rest:?}");
+            peer.finished().await;
+        }
+        let session = gateway.registry.current(id);
+        assert!(session.is_some());
+        assert_eq!(inner.record(id).unwrap().online, session);
+        assert_eq!(gateway.registry.devices_starting(), 0);
+
+        last.finished().await;
+        neighbour.finished().await;
+        assert_eq!(inner.record(id).unwrap().online, None);
     }
 }

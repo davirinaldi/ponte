@@ -8,7 +8,7 @@
 use ponte_protocol::{DeviceId, PublicKey};
 use tracing::{info, warn};
 
-use super::handshake::Rejection;
+use super::handshake::{Claim, Rejection};
 use super::session::SessionEnd;
 use super::store::{CustomerId, DeviceStatus, SessionId};
 
@@ -25,12 +25,9 @@ pub(crate) enum AuditEvent {
         status: DeviceStatus,
     },
     /// A handshake was refused after the peer showed a token the server issued or the key
-    /// of a device it knows (see `Rejection::follows_a_real_credential`). `device` is there
-    /// when it was the key of that device.
-    HandshakeRefused {
-        reason: Rejection,
-        device: Option<DeviceId>,
-    },
+    /// of a device it knows (see `Rejection::follows_a_real_credential`). `who` says which:
+    /// the device, or the key that tried to enroll and the hash of the token it used.
+    HandshakeRefused { reason: Rejection, who: Claim },
     SessionStarted {
         device: DeviceId,
         session: SessionId,
@@ -60,9 +57,18 @@ pub(crate) fn record(event: &AuditEvent) {
         } => {
             info!(target: TARGET, event = "device_enrolled", %device, %customer, %public_key, ?status);
         }
-        AuditEvent::HandshakeRefused { reason, device } => {
-            let device = device.map(tracing::field::display);
-            warn!(target: TARGET, event = "handshake_refused", ?reason, device);
+        AuditEvent::HandshakeRefused { reason, who } => {
+            let device = who.device.map(tracing::field::display);
+            let public_key = who.public_key.map(tracing::field::display);
+            let token_hash = who.token.map(|token| token.short());
+            warn!(
+                target: TARGET,
+                event = "handshake_refused",
+                ?reason,
+                device,
+                public_key,
+                token_hash = token_hash.as_deref().map(tracing::field::display),
+            );
         }
         AuditEvent::SessionStarted { device, session } => {
             info!(target: TARGET, event = "session_started", %device, %session);

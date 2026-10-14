@@ -77,6 +77,9 @@ approval, without any screen sharing. Each milestone should end with something w
   newest (what M1 does, and what lets a fleet reconnect in order) or drop the oldest (what
   makes a silent connection cheap to push out)? Planned for M5 with the other rate limits.
 - Nothing limits how often a connected device sends heartbeats, and each one is a write.
+- Whoever holds a spent, expired or revoked token, or the key of a revoked device, gets one
+  audit event per connection, as fast as they connect. Worth a line each today; in M3
+  these become rows in an append-only table. Count them per token and per device instead?
 - The server never pings. A connection that died without a close stays "online" until the
   device connects again or the session reaches its time limit. A ping needs the agent to
   answer it, and a heartbeat deadline needs the server to know the agent's interval.

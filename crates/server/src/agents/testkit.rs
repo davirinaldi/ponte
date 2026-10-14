@@ -18,7 +18,8 @@ use ponte_protocol::{
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{Layer, fmt};
 
 use super::store::{AgentInfo, CustomerId, DeviceStore, MemoryStore, TokenGrant};
 use super::{Gateway, Limits, session};
@@ -245,18 +246,20 @@ pub(crate) struct Logs(Arc<Mutex<Vec<u8>>>);
 impl Logs {
     /// Everything, down to `trace`.
     pub(crate) fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
-        Self::capture_with(EnvFilter::new("trace"))
+        Self::capture_with(Some("trace"))
     }
 
-    /// What `filter` lets through.
-    pub(crate) fn capture_with(filter: EnvFilter) -> (Self, tracing::subscriber::DefaultGuard) {
+    /// What the server's own filter lets through when `RUST_LOG` is `directives`.
+    pub(crate) fn capture_with(
+        directives: Option<&str>,
+    ) -> (Self, tracing::subscriber::DefaultGuard) {
         let logs = Self::default();
         let writer = logs.clone();
-        let subscriber = tracing_subscriber::fmt()
+        let layer = fmt::layer()
             .with_ansi(false)
-            .with_env_filter(filter)
             .with_writer(move || writer.clone())
-            .finish();
+            .with_filter(crate::log_filter(directives));
+        let subscriber = tracing_subscriber::registry().with(layer);
         (logs, tracing::subscriber::set_default(subscriber))
     }
 

@@ -47,27 +47,32 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
 - **Dependencies do not log for us.** The WebSocket library writes every frame it reads to
   the `log` crate at `trace`. The workspace builds `tracing-subscriber` without its
   `tracing-log` feature, so none of that reaches the output. `tests/agent_logs.rs` fails
-  if it ever does. Do not turn the feature back on to see a dependency's logs.
+  if it ever does, and `deny.toml` bans the crate. Do not turn the feature back on to see
+  a dependency's logs.
 - **A stranger gets no log line at the default level.** A refusal anyone can cause is
   logged at `debug`. A refusal that followed a real token or a real device key is an audit
-  event (`Rejection::follows_a_real_credential`). After `Welcome`, only the first few
-  dropped messages of a session are logged.
+  event (`Rejection::follows_a_real_credential`) that names the device, or the key and
+  the hash prefix of the token. After `Welcome`, only the first few dropped messages of a
+  session are logged.
 - **Limits are set on the socket**, both `max_message_size` and `max_frame_size`, and
   connections that have not authenticated yet are counted and capped (`Limits`).
 - **Revocation does not wait for the device.** A session reads the device's status again at
   least every `Limits::status_check`, with or without a heartbeat, and ends when the device
   is revoked. The store has the last word when a session starts, too.
 - **One session per device, started one at a time.** A session is recorded in the store
-  first and takes the device's place in the registry second, both under
-  `Registry::starting`. The old session is only replaced once the store accepted the new
+  first and takes the device's place in the registry second, both under the device's turn
+  (`Registry::starting`). The old session is only replaced once the store accepted the new
   one, and the takeover is audited. A session also ends at a time limit, so the key is
   proven again.
+- **A device waits only behind itself.** The turn is per device, never shared, and only a
+  few connections of one device may hold or wait for it; the rest are dropped. Whoever
+  holds one device key must not be able to slow down the others.
 - **A store keeps the hash of a token, never the token** (`TokenHash`), and follows the
   rules written on `DeviceStore`: enrollment is atomic and repeatable, a key enrolls once,
   telemetry of a device that is not active is dropped (RF-49), and its error type never
   carries the values of a call.
 - Audit events go through `audit::record`. Until the audit log exists (M3) they are log
-  lines under the `ponte::audit` target, which `log_filter` keeps on whatever `RUST_LOG`
-  says.
+  lines under the `ponte::audit` target. `log_filter` lets them through with a filter of
+  its own, beside the one built from `RUST_LOG`: a directive could be outranked.
 - Tests run without a socket (`testkit::Peer`) and with a paused clock. Tests named
   `ws_loopback_*` bind `127.0.0.1` and cover only what needs a real socket.

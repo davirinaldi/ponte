@@ -16,7 +16,9 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use ponte_protocol::ServerToAgent;
+use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Layer, fmt};
 
 use common::{
     CLOSE, TestDevice, authenticate, connect, heartbeat_of, serve, store_with_token, token,
@@ -49,11 +51,12 @@ async fn ws_loopback_logs_no_frame_even_at_trace() {
     let captured = Captured::default();
     let writer = captured.clone();
     // The same setup as `main`, with the output kept instead of printed.
-    tracing_subscriber::fmt()
-        .with_env_filter(ponte_server::log_filter(Some("trace")))
+    let layer = fmt::layer()
         .with_ansi(false)
         .with_writer(move || writer.clone())
-        .finish()
+        .with_filter(ponte_server::log_filter(Some("trace")));
+    tracing_subscriber::registry()
+        .with(layer)
         .try_init()
         .expect("this test is the only one in its process");
 
