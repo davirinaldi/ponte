@@ -96,16 +96,15 @@ pub(crate) async fn run<D, St, Si, E>(
             status,
             repeated,
         }) => {
-            if repeated {
-                info!(device = %device_id, "enrollment repeated: same token, same key");
-            } else {
-                audit::record(&AuditEvent::DeviceEnrolled {
-                    device: device_id,
-                    customer,
-                    public_key,
-                    status,
-                });
-            }
+            // A repetition is audited too. A store can keep an enrollment and fail to say
+            // so, and then the repetition is the first answer anyone saw.
+            audit::record(&AuditEvent::DeviceEnrolled {
+                device: device_id,
+                customer,
+                public_key,
+                status,
+                repeated,
+            });
             // If this is lost on the way the agent enrolls again and gets the same answer.
             let _ = send(&mut sink, &ServerToAgent::Enrolled { device_id }).await;
         }
@@ -1420,6 +1419,28 @@ mod tests {
             enrolled.contains(&format!("public_key={}", device.public_key())),
             "{enrolled}"
         );
+    }
+
+    /// A store can keep an enrollment and still fail to say so: a database that committed
+    /// and then went quiet. The agent asks again and gets the same device, and that answer
+    /// is audited too, or the device would be in the store and in no audit event.
+    #[tokio::test(start_paused = true)]
+    async fn a_repeated_enrollment_is_audited() {
+        let store = store_with_token(1, 1);
+        let gateway = gateway(store.clone());
+        let device = TestDevice::new(10);
+        let first = enroll(&gateway, &device, 1).await;
+
+        let (logs, _guard) = Logs::capture_with(Some("warn"));
+        let again = enroll(&gateway, &device, 1).await;
+        assert_eq!(again, first);
+        let logs = logs.text();
+        let audited = logs
+            .lines()
+            .find(|line| line.contains("ponte::audit") && line.contains("device_enrolled"))
+            .unwrap_or_else(|| panic!("not audited: {logs}"));
+        assert!(audited.contains(&format!("device={first}")), "{audited}");
+        assert!(audited.contains("repeated=true"), "{audited}");
     }
 
     /// A refusal that followed a real token or a real key is what a leak looks like, and

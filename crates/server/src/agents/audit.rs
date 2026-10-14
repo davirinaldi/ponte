@@ -23,6 +23,8 @@ pub(crate) enum AuditEvent {
         customer: CustomerId,
         public_key: PublicKey,
         status: DeviceStatus,
+        /// The same token and key enrolled before, and the same device was given back.
+        repeated: bool,
     },
     /// A handshake was refused after the peer showed a token the server issued or the key
     /// of a device it knows (see `Rejection::follows_a_real_credential`). `who` says which:
@@ -54,8 +56,9 @@ pub(crate) fn record(event: &AuditEvent) {
             customer,
             public_key,
             status,
+            repeated,
         } => {
-            info!(target: TARGET, event = "device_enrolled", %device, %customer, %public_key, ?status);
+            info!(target: TARGET, event = "device_enrolled", %device, %customer, %public_key, ?status, repeated);
         }
         AuditEvent::HandshakeRefused { reason, who } => {
             let device = who.device.map(tracing::field::display);
