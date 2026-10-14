@@ -1,6 +1,6 @@
 use anyhow::Context;
 use ponte_agent::AgentConfig;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -25,9 +25,16 @@ async fn main() -> anyhow::Result<()> {
         "agent starting"
     );
 
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for the shutdown signal")?;
+    ponte_agent::run(config, shutdown_signal()).await;
     info!("agent stopped");
     Ok(())
+}
+
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        // Without the handler there is no signal to wait for, and an agent that takes
+        // that for one would stop the moment it started.
+        warn!(%error, "no shutdown signal can be received: the agent runs until it is killed");
+        std::future::pending::<()>().await;
+    }
 }

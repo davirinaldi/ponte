@@ -774,6 +774,7 @@ name = "ponte-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "ed25519-dalek",
  "futures-util",

@@ -82,9 +82,22 @@ approval, without any screen sharing. Each milestone should end with something w
 - Whoever holds a spent, expired or revoked token, or the key of a revoked device, gets one
   audit event per connection, as fast as they connect. Worth a line each today; in M3
   these become rows in an append-only table. Count them per token and per device instead?
-- The server never pings. A connection that died without a close stays "online" until the
-  device connects again or the session reaches its time limit. A ping needs the agent to
-  answer it, and a heartbeat deadline needs the server to know the agent's interval.
+- The server never pings. The agent does, and gives up a connection that stays silent for
+  90 seconds, so the agent's side recovers by itself. The server's side does not: a
+  connection that died without a close stays "online" until the device connects again or
+  the session reaches its time limit. The agent already answers pings, so the server can
+  start sending them; a heartbeat deadline needs the server to know the agent's interval.
+- How does a device enroll again? An agent that is revoked, or that the server forgot, is
+  refused for ever with no reason given, and keeps its identity: it cannot tell a
+  revocation from a bad day. Today someone removes the agent's data directory and brings a
+  new token. Should a new token file on an enrolled machine start a new enrollment by
+  itself? That lets the installer repair a machine, and lets a re-run of the installer
+  turn one device into two.
+- The agent speaks TLS 1.3 only (RNF-01), and ADR-0009 wants it to work behind proxies that
+  inspect TLS. A proxy that stops at TLS 1.2 cannot be both. Which one gives?
+- No test connects over `wss://`: the loopback tests use plain `ws://`, and TLS was checked
+  by hand in M1 (a public host, a self-signed certificate, a TLS 1.2 server). A test needs a
+  certificate made on the spot, which means a new dev-dependency.
 - Revoking a device ends its session at the next status check, up to a minute later. RF-04
   says "immediately": that takes the revocation and the session in the same process, which
   comes with the console.

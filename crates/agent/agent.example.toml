@@ -1,3 +1,13 @@
 # Copy to agent.toml for local development: cargo run -p ponte-agent -- agent.toml
 server_url = "ws://localhost:8080/agent"
 allowed_roots = ['C:\FakeErp']
+
+# Where the device key and the identity live. The installer writes an absolute path that
+# only administrators can change. `keys/` is ignored by git.
+data_dir = "keys/agent-dev"
+
+# The enrollment token: 64 lowercase hex characters. Read once, removed once enrolled.
+enrollment_token_file = "keys/agent-dev/enrollment-token"
+
+# Seconds between heartbeats (10 to 3600).
+heartbeat_secs = 60
