@@ -10,6 +10,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     /// Control-plane URL. Must be `wss://`; plain `ws://` is accepted only for localhost.
+    /// It is written to the log: never put a secret in it.
     pub server_url: ServerUrl,
     /// Directories that file-touching actions may access.
     #[serde(default)]
@@ -19,7 +20,9 @@ pub struct AgentConfig {
     /// path is taken from the working directory, which suits development only.
     pub data_dir: PathBuf,
     /// File holding the enrollment token (RF-01), 64 lowercase hex characters. The agent
-    /// reads it to enroll and removes it once enrolled. Not needed after that.
+    /// reads it to enroll and removes it once enrolled. Not needed after that. Like
+    /// `data_dir`, it belongs where only administrators can write: the agent, running as
+    /// SYSTEM, deletes whatever is at this path.
     #[serde(default)]
     pub enrollment_token_file: Option<PathBuf>,
     /// Seconds between heartbeats, from 10 to 3600.

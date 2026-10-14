@@ -204,6 +204,7 @@ impl Agent {
                  only (ADR-0008)"
             );
         }
+        self.collector.warm_up();
         let mut tls = Tls::default();
         let mut failures = 0;
         loop {
@@ -296,6 +297,7 @@ impl Agent {
                 return Err(Outcome::Failed);
             }
         };
+        debug!(version = version.number(), "upgrade done");
         let (mut sink, mut stream) = socket.split();
 
         let accepted = handshake::run(
