@@ -424,8 +424,8 @@ mod tests {
     use super::*;
     use crate::agents::Limits;
     use crate::agents::store::{
-        AgentInfo, Device, DeviceStatus, EnrollOutcome, EnrollRequest, MemoryStore, SessionId,
-        TokenHash,
+        AgentInfo, Device, DeviceAdmin, DeviceStatus, EnrollOutcome, EnrollRequest, MemoryStore,
+        SessionId, TokenHash,
     };
     use crate::agents::testkit::{
         Logs, Peer, Sent, TestDevice, about, gateway, gateway_with, store_with_token, telemetry,
@@ -588,7 +588,7 @@ mod tests {
         let id = enroll(&gateway, &device, 1).await;
         let revoked = TestDevice::new(11);
         let revoked_id = enroll(&gateway, &revoked, 1).await;
-        store.revoke_device(revoked_id);
+        store.revoke_device(revoked_id).await.unwrap();
         let stranger = TestDevice::new(12);
 
         let padded = |nonce: &Nonce| {
@@ -871,7 +871,7 @@ mod tests {
         })
         .await;
 
-        store.revoke_device(id);
+        store.revoke_device(id).await.unwrap();
         peer.send(text(&heartbeat(2)));
         closed_at_once(&mut peer).await;
         peer.finished().await;
@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(store.record(id).unwrap().telemetry, None);
 
         // Approval takes effect on the open session.
-        store.approve_device(id);
+        store.approve_device(id).await.unwrap();
         peer.send(text(&heartbeat(2)));
         eventually("telemetry is kept once approved", || {
             store.record(id).unwrap().telemetry == Some(telemetry(2))
@@ -1150,7 +1150,7 @@ mod tests {
                 return Err(Broken);
             }
             if self.revoke_at_start.load(Ordering::SeqCst) {
-                self.inner.revoke_device(id);
+                self.inner.revoke_device(id).await.unwrap();
             }
             if self.hold_next_start.swap(false, Ordering::SeqCst) {
                 self.held.store(true, Ordering::SeqCst);
@@ -1279,7 +1279,7 @@ mod tests {
         let mut peer = authenticate(&gateway, &device, id).await;
         let started = Instant::now();
 
-        store.revoke_device(id);
+        store.revoke_device(id).await.unwrap();
         // Something every twenty seconds, none of it a heartbeat: it must not buy time.
         for _ in 0..2 {
             tokio::time::sleep(Duration::from_secs(20)).await;
@@ -1477,7 +1477,7 @@ mod tests {
         drop(guard);
 
         // The device is revoked: whoever says hello with its key has the key.
-        store.revoke_device(id);
+        store.revoke_device(id).await.unwrap();
         let (logs, guard) = Logs::capture();
         let mut peer = Peer::connect(&gateway);
         let nonce = peer.challenge().await;

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use ponte_agent::Timing;
 use ponte_protocol::{AgentToServer, ProtocolVersion, PublicKey, ServerToAgent};
-use ponte_server::agents::{DeviceStatus, TokenHash};
+use ponte_server::agents::{DeviceAdmin, DeviceStatus, TokenHash};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -139,7 +139,7 @@ async fn ws_loopback_a_revoked_device_is_dropped_and_the_agent_keeps_its_identit
     let id = machine.online(&store).await;
     let key = machine.key_file();
 
-    assert!(store.revoke_device(id));
+    assert!(store.revoke_device(id).await.unwrap());
     eventually("the device is dropped", || {
         record(&store, id).online.is_none()
     })

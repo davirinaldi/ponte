@@ -34,8 +34,9 @@ use registry::Registry;
 pub use audit::TARGET as AUDIT_TARGET;
 
 pub use store::{
-    AgentInfo, CustomerId, Device, DeviceRecord, DeviceStatus, DeviceStore, EnrollOutcome,
-    EnrollRefusal, EnrollRequest, MemoryStore, SessionId, TokenGrant, TokenHash,
+    AgentInfo, Customer, CustomerId, CustomerName, Device, DeviceAdmin, DeviceRecord, DeviceStatus,
+    DeviceStore, EnrollOutcome, EnrollRefusal, EnrollRequest, InvalidCustomerName, MemoryStore,
+    SessionId, TokenGrant, TokenHash, TokenInfo,
 };
 
 /// How much a peer gets before and after it proves who it is.

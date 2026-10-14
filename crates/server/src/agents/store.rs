@@ -1,14 +1,16 @@
 //! Devices and enrollment tokens: what the handshake asks and what a session records.
 //!
-//! [`DeviceStore`] is what a connection needs and nothing more. [`MemoryStore`] keeps
-//! everything in the process, for tests and for running without a database. The PostgreSQL
-//! store comes later in M1 and follows the same rules, which are written on the trait.
+//! [`DeviceStore`] is what a connection needs and nothing more. [`DeviceAdmin`] adds what an
+//! operator does: customers, tokens, approving and revoking. [`MemoryStore`] keeps
+//! everything in the process, for tests. Every store follows the rules written on the
+//! traits, and `scenarios` checks them on each one.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use chrono::{DateTime, Utc};
@@ -239,6 +241,122 @@ pub trait DeviceStore: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// What an operator does to customers, tokens and devices: through the server's
+/// subcommands now, through the console later.
+///
+/// Agent connections never use it. They are generic over [`DeviceStore`] only, so nothing a
+/// device sends can reach a method that approves or revokes. The same rules as the trait
+/// it extends: methods take what they need and nothing more, a store keeps the hash of a
+/// token and never the token, and errors never carry the values of a call.
+pub trait DeviceAdmin: DeviceStore {
+    /// `None`, and nothing changes, if a customer already has that name.
+    fn add_customer(
+        &self,
+        name: &CustomerName,
+    ) -> impl Future<Output = Result<Option<CustomerId>, Self::Error>> + Send;
+
+    /// Every customer, ordered by name.
+    fn customers(&self) -> impl Future<Output = Result<Vec<Customer>, Self::Error>> + Send;
+
+    /// Makes the token whose hash is `token` valid. `false`, and nothing changes, if it
+    /// already exists or its customer does not.
+    fn issue_token(
+        &self,
+        token: TokenHash,
+        grant: TokenGrant,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
+    /// `false` if there is no such token. Revoking twice is the same as once.
+    fn revoke_token(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
+    fn token(
+        &self,
+        token: &TokenHash,
+    ) -> impl Future<Output = Result<Option<TokenInfo>, Self::Error>> + Send;
+
+    /// The tokens of one customer, or of all, ordered by deadline.
+    fn tokens(
+        &self,
+        customer: Option<CustomerId>,
+    ) -> impl Future<Output = Result<Vec<TokenInfo>, Self::Error>> + Send;
+
+    /// Makes a pending device active (RF-49). `false` for any other device, a revoked one
+    /// included.
+    fn approve_device(
+        &self,
+        id: DeviceId,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
+    /// `false` if there is no such device. There is no way back (RF-04).
+    fn revoke_device(&self, id: DeviceId)
+    -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
+    fn device_record(
+        &self,
+        id: DeviceId,
+    ) -> impl Future<Output = Result<Option<DeviceRecord>, Self::Error>> + Send;
+
+    /// The devices of one customer, or of all, oldest first.
+    fn devices(
+        &self,
+        customer: Option<CustomerId>,
+    ) -> impl Future<Output = Result<Vec<DeviceRecord>, Self::Error>> + Send;
+}
+
+/// The name of a customer, as an operator typed it: 1 to 100 characters, none of them a
+/// control character or one that changes how the text around it is shown.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CustomerName(String);
+
+impl CustomerName {
+    pub const MAX_CHARS: usize = 100;
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("a customer name has 1 to 100 characters, with no control or formatting characters")]
+pub struct InvalidCustomerName;
+
+impl FromStr for CustomerName {
+    type Err = InvalidCustomerName;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        let chars = name.chars().count();
+        let shown_as_is = |c: char| {
+            !c.is_control()
+                && !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{2069}' | '\u{feff}')
+        };
+        if (1..=Self::MAX_CHARS).contains(&chars)
+            && name.trim() == name
+            && name.chars().all(shown_as_is)
+        {
+            Ok(Self(name.to_owned()))
+        } else {
+            Err(InvalidCustomerName)
+        }
+    }
+}
+
+impl fmt::Display for CustomerName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Customer {
+    pub id: CustomerId,
+    pub name: CustomerName,
+}
+
 /// What a token allows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenGrant {
@@ -250,18 +368,38 @@ pub struct TokenGrant {
     pub max_uses: NonZeroU32,
 }
 
-/// Everything [`MemoryStore`] holds about one device.
+/// What a store holds about a token. Never the token itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenInfo {
+    pub hash: TokenHash,
+    pub grant: TokenGrant,
+    /// Machines enrolled with it so far.
+    pub uses: u32,
+    pub revoked: bool,
+}
+
+impl TokenInfo {
+    /// How many more machines may enroll with it, expired or not.
+    #[must_use]
+    pub fn uses_left(&self) -> u32 {
+        self.grant.max_uses.get().saturating_sub(self.uses)
+    }
+}
+
+/// Everything a store holds about one device.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRecord {
+    pub id: DeviceId,
     pub customer: CustomerId,
     pub public_key: PublicKey,
     pub status: DeviceStatus,
+    /// What the agent said about itself when it last connected. Untrusted.
     pub about: AgentInfo,
     /// The session the device is connected under, if any.
     pub online: Option<SessionId>,
     pub last_seen: Option<DateTime<Utc>>,
     pub telemetry: Option<TelemetrySnapshot>,
-    enrolled_with: TokenHash,
+    pub enrolled_with: TokenHash,
 }
 
 #[derive(Debug)]
@@ -271,8 +409,20 @@ struct TokenRecord {
     revoked: bool,
 }
 
+impl TokenRecord {
+    fn info(&self, hash: TokenHash) -> TokenInfo {
+        TokenInfo {
+            hash,
+            grant: self.grant,
+            uses: self.uses,
+            revoked: self.revoked,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Inner {
+    customers: HashMap<CustomerId, CustomerName>,
     tokens: HashMap<TokenHash, TokenRecord>,
     devices: HashMap<DeviceId, DeviceRecord>,
     /// A key enrolls once: this is the index that says under which device.
@@ -281,9 +431,9 @@ struct Inner {
 
 /// A [`DeviceStore`] that lives in the process and forgets everything when it stops.
 ///
-/// Clones share the same data. Besides the trait it has what a technician will do through
-/// the console and the server's subcommands later: issue and revoke tokens, approve and
-/// revoke devices.
+/// Clones share the same data. Besides the traits it has a few shortcuts for tests, which
+/// do not wait: [`MemoryStore::add_token`], [`MemoryStore::uses_left`] and
+/// [`MemoryStore::record`].
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStore(Arc<Mutex<Inner>>);
 
@@ -299,14 +449,37 @@ impl MemoryStore {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Makes `token` valid. Returns `false`, and changes nothing, if it already exists.
+    /// Makes `token` valid, adding its customer first if the store does not know it.
+    /// Returns `false`, and changes nothing, if the token already exists. For tests.
     pub fn add_token(&self, token: &EnrollmentToken, grant: TokenGrant) -> bool {
         let mut inner = self.lock();
-        let hash = TokenHash::of(token);
-        if inner.tokens.contains_key(&hash) {
+        inner
+            .customers
+            .entry(grant.customer)
+            .or_insert_with(|| CustomerName(format!("customer {}", grant.customer)));
+        inner.issue_token(TokenHash::of(token), grant)
+    }
+
+    /// How many more machines may enroll with the token, expired or not.
+    #[must_use]
+    pub fn uses_left(&self, token: &TokenHash) -> Option<u32> {
+        let inner = self.lock();
+        let record = inner.tokens.get(token)?;
+        Some(record.info(*token).uses_left())
+    }
+
+    #[must_use]
+    pub fn record(&self, id: DeviceId) -> Option<DeviceRecord> {
+        self.lock().devices.get(&id).cloned()
+    }
+}
+
+impl Inner {
+    fn issue_token(&mut self, hash: TokenHash, grant: TokenGrant) -> bool {
+        if self.tokens.contains_key(&hash) || !self.customers.contains_key(&grant.customer) {
             return false;
         }
-        inner.tokens.insert(
+        self.tokens.insert(
             hash,
             TokenRecord {
                 grant,
@@ -316,55 +489,107 @@ impl MemoryStore {
         );
         true
     }
+}
 
-    /// Returns `false` if there is no such token.
-    pub fn revoke_token(&self, token: &TokenHash) -> bool {
-        match self.lock().tokens.get_mut(token) {
+impl DeviceAdmin for MemoryStore {
+    async fn add_customer(&self, name: &CustomerName) -> Result<Option<CustomerId>, Self::Error> {
+        let mut inner = self.lock();
+        if inner.customers.values().any(|taken| taken == name) {
+            return Ok(None);
+        }
+        let id = CustomerId::new();
+        inner.customers.insert(id, name.clone());
+        Ok(Some(id))
+    }
+
+    async fn customers(&self) -> Result<Vec<Customer>, Self::Error> {
+        let mut customers: Vec<_> = self
+            .lock()
+            .customers
+            .iter()
+            .map(|(id, name)| Customer {
+                id: *id,
+                name: name.clone(),
+            })
+            .collect();
+        customers.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(customers)
+    }
+
+    async fn issue_token(&self, token: TokenHash, grant: TokenGrant) -> Result<bool, Self::Error> {
+        Ok(self.lock().issue_token(token, grant))
+    }
+
+    async fn revoke_token(&self, token: &TokenHash) -> Result<bool, Self::Error> {
+        Ok(match self.lock().tokens.get_mut(token) {
             Some(record) => {
                 record.revoked = true;
                 true
             }
             None => false,
-        }
+        })
     }
 
-    /// How many more machines may enroll with the token, expired or not.
-    #[must_use]
-    pub fn uses_left(&self, token: &TokenHash) -> Option<u32> {
-        let inner = self.lock();
-        let record = inner.tokens.get(token)?;
-        Some(record.grant.max_uses.get().saturating_sub(record.uses))
+    async fn token(&self, token: &TokenHash) -> Result<Option<TokenInfo>, Self::Error> {
+        Ok(self
+            .lock()
+            .tokens
+            .get(token)
+            .map(|record| record.info(*token)))
     }
 
-    /// Makes a pending device active. Returns `false` for any other device, a revoked one
-    /// included.
-    pub fn approve_device(&self, id: DeviceId) -> bool {
-        match self.lock().devices.get_mut(&id) {
+    async fn tokens(&self, customer: Option<CustomerId>) -> Result<Vec<TokenInfo>, Self::Error> {
+        let mut tokens: Vec<_> = self
+            .lock()
+            .tokens
+            .iter()
+            .map(|(hash, record)| record.info(*hash))
+            .filter(|token| customer.is_none_or(|customer| token.grant.customer == customer))
+            .collect();
+        tokens.sort_by_key(|token| (token.grant.expires_at, *token.hash.as_bytes()));
+        Ok(tokens)
+    }
+
+    async fn approve_device(&self, id: DeviceId) -> Result<bool, Self::Error> {
+        Ok(match self.lock().devices.get_mut(&id) {
             Some(device) if device.status == DeviceStatus::Pending => {
                 device.status = DeviceStatus::Active;
                 true
             }
             _ => false,
-        }
+        })
     }
 
-    /// Returns `false` if there is no such device.
-    pub fn revoke_device(&self, id: DeviceId) -> bool {
-        match self.lock().devices.get_mut(&id) {
+    async fn revoke_device(&self, id: DeviceId) -> Result<bool, Self::Error> {
+        Ok(match self.lock().devices.get_mut(&id) {
             Some(device) => {
                 device.status = DeviceStatus::Revoked;
                 true
             }
             None => false,
-        }
+        })
     }
 
-    #[must_use]
-    pub fn record(&self, id: DeviceId) -> Option<DeviceRecord> {
-        self.lock().devices.get(&id).cloned()
+    async fn device_record(&self, id: DeviceId) -> Result<Option<DeviceRecord>, Self::Error> {
+        Ok(self.record(id))
+    }
+
+    async fn devices(
+        &self,
+        customer: Option<CustomerId>,
+    ) -> Result<Vec<DeviceRecord>, Self::Error> {
+        let mut devices: Vec<_> = self
+            .lock()
+            .devices
+            .values()
+            .filter(|device| customer.is_none_or(|customer| device.customer == customer))
+            .cloned()
+            .collect();
+        // Ids are UUIDv7: in the order they were made.
+        devices.sort_by_key(|device| *device.id.as_uuid());
+        Ok(devices)
     }
 }
-
 impl DeviceStore for MemoryStore {
     type Error = Infallible;
 
@@ -424,6 +649,7 @@ impl DeviceStore for MemoryStore {
         inner.devices.insert(
             device_id,
             DeviceRecord {
+                id: device_id,
                 customer,
                 public_key: request.public_key,
                 status,
@@ -508,37 +734,23 @@ impl DeviceStore for MemoryStore {
 }
 
 #[cfg(test)]
+pub(crate) mod scenarios;
+
+#[cfg(test)]
 mod tests {
-    use chrono::TimeDelta;
-
+    use super::scenarios::{self, for_each_scenario};
     use super::*;
-    use crate::agents::testkit::{about, at, grant, telemetry, token};
+    use crate::agents::testkit::{grant, token};
 
-    fn key(seed: u8) -> PublicKey {
-        PublicKey::from_bytes([seed; 32])
+    macro_rules! in_memory {
+        ($scenario:ident) => {
+            #[tokio::test]
+            async fn $scenario() {
+                scenarios::$scenario(&MemoryStore::new()).await;
+            }
+        };
     }
-
-    fn request(token_seed: u8, key_seed: u8) -> EnrollRequest {
-        EnrollRequest {
-            token: TokenHash::of(&token(token_seed)),
-            public_key: key(key_seed),
-            about: about(),
-        }
-    }
-
-    async fn enroll(store: &MemoryStore, token_seed: u8, key_seed: u8) -> EnrollOutcome {
-        store
-            .enroll(request(token_seed, key_seed), at(0))
-            .await
-            .unwrap()
-    }
-
-    async fn enrolled(store: &MemoryStore, token_seed: u8, key_seed: u8) -> DeviceId {
-        match enroll(store, token_seed, key_seed).await {
-            EnrollOutcome::Enrolled { device_id, .. } => device_id,
-            EnrollOutcome::Refused(refusal) => panic!("refused: {refusal:?}"),
-        }
-    }
+    for_each_scenario!(in_memory);
 
     /// A store that kept the token itself would hand it out with any leak of its data.
     #[test]
@@ -559,332 +771,29 @@ mod tests {
         assert!(!dump.contains(&token(1).expose_hex()), "{dump}");
     }
 
-    #[tokio::test]
-    async fn a_single_use_token_enrolls_one_active_device() {
-        let store = MemoryStore::new();
-        let grant = grant(1);
-        assert!(store.add_token(&token(1), grant));
-
-        let outcome = enroll(&store, 1, 10).await;
-        let EnrollOutcome::Enrolled {
-            device_id,
-            customer,
-            status,
-            repeated,
-        } = outcome
-        else {
-            panic!("{outcome:?}");
-        };
-        assert_eq!(customer, grant.customer);
-        assert_eq!(status, DeviceStatus::Active);
-        assert!(!repeated);
-
-        let device = store.device(device_id).await.unwrap().unwrap();
-        assert_eq!(
-            device,
-            Device {
-                id: device_id,
-                customer: grant.customer,
-                public_key: key(10),
-                status: DeviceStatus::Active,
-            }
-        );
-        let record = store.record(device_id).unwrap();
-        assert_eq!(record.about, about());
-        assert_eq!(record.online, None);
-        assert_eq!(record.telemetry, None);
-
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(0));
-        assert_eq!(
-            enroll(&store, 1, 11).await,
-            EnrollOutcome::Refused(EnrollRefusal::ExhaustedToken)
-        );
-        assert_eq!(store.device(DeviceId::new()).await.unwrap(), None);
-    }
-
-    /// RF-49: a token for several machines can leak to more people, so its devices wait.
-    #[tokio::test]
-    async fn a_multi_use_token_enrolls_pending_devices_up_to_its_limit() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(2));
-
-        for key_seed in [10, 11] {
-            let id = enrolled(&store, 1, key_seed).await;
-            assert_eq!(store.record(id).unwrap().status, DeviceStatus::Pending);
-        }
-        assert_eq!(
-            enroll(&store, 1, 12).await,
-            EnrollOutcome::Refused(EnrollRefusal::ExhaustedToken)
-        );
-    }
-
-    #[tokio::test]
-    async fn a_token_that_is_unknown_expired_or_revoked_does_nothing() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(5));
-        store.add_token(&token(2), grant(5));
-        assert!(store.revoke_token(&TokenHash::of(&token(2))));
-        assert!(!store.revoke_token(&TokenHash::of(&token(3))));
-
-        let just_in_time = at(100) - TimeDelta::nanoseconds(1);
-        for (token_seed, now, refusal) in [
-            (3, at(0), EnrollRefusal::UnknownToken),
-            (1, at(100), EnrollRefusal::ExpiredToken),
-            (1, at(1_000_000), EnrollRefusal::ExpiredToken),
-            (2, at(0), EnrollRefusal::RevokedToken),
-        ] {
-            let outcome = store.enroll(request(token_seed, 10), now).await.unwrap();
-            assert_eq!(outcome, EnrollOutcome::Refused(refusal));
-        }
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(5));
-        assert_eq!(store.uses_left(&TokenHash::of(&token(2))), Some(5));
-        assert_eq!(store.uses_left(&TokenHash::of(&token(3))), None);
-
-        let outcome = store.enroll(request(1, 10), just_in_time).await.unwrap();
-        assert!(matches!(outcome, EnrollOutcome::Enrolled { .. }));
-    }
-
+    /// Names are shown in a terminal and, later, in the console. What an operator typed
+    /// must read the same there.
     #[test]
-    fn adding_a_token_twice_does_not_reset_it() {
-        let store = MemoryStore::new();
-        assert!(store.add_token(&token(1), grant(1)));
-        assert!(store.revoke_token(&TokenHash::of(&token(1))));
-        assert!(!store.add_token(&token(1), grant(9)));
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(1));
-    }
-
-    /// The agent stores its key, sends `Enroll`, and may never see the answer. Trying
-    /// again must neither spend another use nor leave the machine without an identity.
-    #[tokio::test]
-    async fn repeating_an_enrollment_gives_the_same_device_and_spends_nothing() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(1));
-
-        let first = enrolled(&store, 1, 10).await;
-        let again = enroll(&store, 1, 10).await;
-        let EnrollOutcome::Enrolled {
-            device_id,
-            repeated,
-            ..
-        } = again
-        else {
-            panic!("{again:?}");
-        };
-        assert_eq!(device_id, first);
-        assert!(repeated);
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(0));
-
-        // With uses to spare, none of them goes to a repetition either.
-        store.add_token(&token(2), grant(3));
-        let other = enrolled(&store, 2, 20).await;
-        for _ in 0..3 {
-            assert_eq!(enrolled(&store, 2, 20).await, other);
+    fn a_customer_name_is_plain_text_of_bounded_length() {
+        for good in ["A", "Acme Software", "Padaria São João", &"x".repeat(100)] {
+            assert_eq!(good.parse::<CustomerName>().unwrap().as_str(), good);
         }
-        assert_eq!(store.uses_left(&TokenHash::of(&token(2))), Some(2));
-    }
-
-    /// The machine may come back after the deadline: it stored its key, sent `Enroll`, and
-    /// lost the answer. Giving it back the device it already has creates nothing and spends
-    /// nothing, and only the holder of that key can ask.
-    #[tokio::test]
-    async fn a_repeated_enrollment_after_the_deadline_gives_the_same_device() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(2));
-        let first = enrolled(&store, 1, 10).await;
-
-        for late in [at(100), at(1_000_000)] {
-            let again = store.enroll(request(1, 10), late).await.unwrap();
-            let EnrollOutcome::Enrolled {
-                device_id,
-                repeated,
-                ..
-            } = again
-            else {
-                panic!("{again:?}");
-            };
-            assert_eq!(device_id, first);
-            assert!(repeated);
+        for bad in [
+            "",
+            " Acme",
+            "Acme ",
+            "Ac\nme",
+            "Ac\u{1b}[2Jme",
+            "Acme\u{202e}exe",
+            "Ac\u{200b}me",
+            "\u{feff}Acme",
+            &"x".repeat(101),
+        ] {
+            assert_eq!(
+                bad.parse::<CustomerName>(),
+                Err(InvalidCustomerName),
+                "{bad:?}"
+            );
         }
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(1));
-
-        // A key the token never enrolled is still too late.
-        let new_key = store.enroll(request(1, 11), at(100)).await.unwrap();
-        assert_eq!(new_key, EnrollOutcome::Refused(EnrollRefusal::ExpiredToken));
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(1));
-
-        // And a revoked device stays out, late or not.
-        store.revoke_device(first);
-        let revoked = store.enroll(request(1, 10), at(100)).await.unwrap();
-        assert_eq!(
-            revoked,
-            EnrollOutcome::Refused(EnrollRefusal::DeviceRevoked)
-        );
-    }
-
-    /// Revoking a token is a person saying no. That holds for the machines that already
-    /// enrolled with it and ask again, too.
-    #[tokio::test]
-    async fn a_repeated_enrollment_with_a_revoked_token_is_refused() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(1));
-        let device = enrolled(&store, 1, 10).await;
-
-        store.revoke_token(&TokenHash::of(&token(1)));
-        for now in [at(0), at(100)] {
-            let again = store.enroll(request(1, 10), now).await.unwrap();
-            assert_eq!(again, EnrollOutcome::Refused(EnrollRefusal::RevokedToken));
-        }
-        // The device itself is not revoked by that: it keeps its key and connects.
-        assert_eq!(store.record(device).unwrap().status, DeviceStatus::Active);
-    }
-
-    #[tokio::test]
-    async fn a_key_enrolls_once() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(1));
-        store.add_token(&token(2), grant(5));
-        let device = enrolled(&store, 1, 10).await;
-
-        assert_eq!(
-            enroll(&store, 2, 10).await,
-            EnrollOutcome::Refused(EnrollRefusal::KeyAlreadyEnrolled)
-        );
-        assert_eq!(store.uses_left(&TokenHash::of(&token(2))), Some(5));
-        assert_eq!(store.record(device).unwrap().customer, {
-            let EnrollOutcome::Enrolled { customer, .. } = enroll(&store, 1, 10).await else {
-                panic!("the first enrollment no longer repeats");
-            };
-            customer
-        });
-    }
-
-    #[tokio::test]
-    async fn a_revoked_device_does_not_enroll_again() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(5));
-        let device = enrolled(&store, 1, 10).await;
-
-        assert!(store.revoke_device(device));
-        assert!(!store.revoke_device(DeviceId::new()));
-        assert_eq!(store.record(device).unwrap().status, DeviceStatus::Revoked);
-        assert_eq!(
-            enroll(&store, 1, 10).await,
-            EnrollOutcome::Refused(EnrollRefusal::DeviceRevoked)
-        );
-        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(4));
-    }
-
-    #[tokio::test]
-    async fn only_a_pending_device_can_be_approved() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(1));
-        store.add_token(&token(2), grant(2));
-        let active = enrolled(&store, 1, 10).await;
-        let pending = enrolled(&store, 2, 11).await;
-        let revoked = enrolled(&store, 2, 12).await;
-        store.revoke_device(revoked);
-
-        assert!(store.approve_device(pending));
-        assert_eq!(store.record(pending).unwrap().status, DeviceStatus::Active);
-        assert!(!store.approve_device(active));
-        assert!(!store.approve_device(revoked));
-        assert!(!store.approve_device(DeviceId::new()));
-        assert_eq!(store.record(revoked).unwrap().status, DeviceStatus::Revoked);
-    }
-
-    /// RF-49: until someone approves the device, what it reports goes nowhere.
-    #[tokio::test]
-    async fn telemetry_is_kept_for_an_active_device_only() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(2));
-        let device = enrolled(&store, 1, 10).await;
-
-        let status = store.heartbeat(device, &telemetry(1), at(1)).await.unwrap();
-        assert_eq!(status, Some(DeviceStatus::Pending));
-        let record = store.record(device).unwrap();
-        assert_eq!(record.telemetry, None);
-        assert_eq!(record.last_seen, Some(at(1)));
-
-        store.approve_device(device);
-        let status = store.heartbeat(device, &telemetry(2), at(2)).await.unwrap();
-        assert_eq!(status, Some(DeviceStatus::Active));
-        let record = store.record(device).unwrap();
-        assert_eq!(record.telemetry, Some(telemetry(2)));
-        assert_eq!(record.last_seen, Some(at(2)));
-
-        store.revoke_device(device);
-        let status = store.heartbeat(device, &telemetry(3), at(3)).await.unwrap();
-        assert_eq!(status, Some(DeviceStatus::Revoked));
-        let record = store.record(device).unwrap();
-        assert_eq!(record.telemetry, Some(telemetry(2)));
-        assert_eq!(record.last_seen, Some(at(2)));
-
-        let unknown = store.heartbeat(DeviceId::new(), &telemetry(4), at(4)).await;
-        assert_eq!(unknown.unwrap(), None);
-    }
-
-    /// The session that was replaced ends after the new one began. It must not take the
-    /// device offline on its way out.
-    #[tokio::test]
-    async fn a_replaced_session_does_not_mark_the_device_offline() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(1));
-        let device = enrolled(&store, 1, 10).await;
-        let (old, new) = (SessionId::new(), SessionId::new());
-        let newer = AgentInfo {
-            agent_version: "0.2.0".parse().unwrap(),
-            os: about().os,
-        };
-
-        let started = store.session_started(device, old, &about(), at(1)).await;
-        assert_eq!(started.unwrap(), Some(DeviceStatus::Active));
-        assert_eq!(store.record(device).unwrap().online, Some(old));
-        assert_eq!(store.record(device).unwrap().last_seen, Some(at(1)));
-
-        let started = store.session_started(device, new, &newer, at(2)).await;
-        assert_eq!(started.unwrap(), Some(DeviceStatus::Active));
-        store.session_ended(device, old, at(3)).await.unwrap();
-        let record = store.record(device).unwrap();
-        assert_eq!(record.online, Some(new));
-        assert_eq!(record.about, newer);
-
-        store.session_ended(device, new, at(4)).await.unwrap();
-        assert_eq!(store.record(device).unwrap().online, None);
-
-        // Nothing to do for a device that is not there, and no error either.
-        let unknown = DeviceId::new();
-        let started = store.session_started(unknown, new, &about(), at(5)).await;
-        assert_eq!(started.unwrap(), None);
-        store.session_ended(unknown, new, at(5)).await.unwrap();
-        assert_eq!(store.record(unknown), None);
-    }
-
-    /// RF-04: the handshake may have looked a moment before the device was revoked. The
-    /// store has the last word, and a revoked device is never shown as connected.
-    #[tokio::test]
-    async fn a_session_of_a_revoked_device_does_not_start() {
-        let store = MemoryStore::new();
-        store.add_token(&token(1), grant(2));
-        let device = enrolled(&store, 1, 10).await;
-        let session = SessionId::new();
-        let newer = AgentInfo {
-            agent_version: "0.2.0".parse().unwrap(),
-            os: about().os,
-        };
-
-        let started = store
-            .session_started(device, session, &about(), at(1))
-            .await;
-        assert_eq!(started.unwrap(), Some(DeviceStatus::Pending));
-        store.session_ended(device, session, at(2)).await.unwrap();
-        let before = store.record(device).unwrap();
-
-        store.revoke_device(device);
-        let started = store.session_started(device, session, &newer, at(3)).await;
-        assert_eq!(started.unwrap(), Some(DeviceStatus::Revoked));
-        let after = store.record(device).unwrap();
-        assert_eq!(after.online, None);
-        assert_eq!(after.about, before.about);
-        assert_eq!(after.last_seen, before.last_seen);
     }
 }
