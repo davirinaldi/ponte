@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO enrollment_tokens (hash, customer_id, max_uses, expires_at)\n                 SELECT $1, $2, $3, $4 WHERE EXISTS (SELECT 1 FROM customers WHERE id = $2)\n                 ON CONFLICT (hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Uuid",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4298554240b2d75f12e64a46afae52582f1af70a12e12eb7726421de4e6e459b"
+}

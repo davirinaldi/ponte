@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET online_session = NULL WHERE online_session IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ad767779975a070c06fc25c600c6a87d067127df3cd53133581ea29920709a78"
+}

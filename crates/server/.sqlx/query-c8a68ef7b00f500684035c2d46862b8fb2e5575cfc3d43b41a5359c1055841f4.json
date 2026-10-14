@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET online_session = NULL, last_seen = $3\n                 WHERE id = $1 AND online_session = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c8a68ef7b00f500684035c2d46862b8fb2e5575cfc3d43b41a5359c1055841f4"
+}

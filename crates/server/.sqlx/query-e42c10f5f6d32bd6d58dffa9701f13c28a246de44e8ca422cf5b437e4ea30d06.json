@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrollment_tokens SET revoked_at = COALESCE(revoked_at, now())\n                 WHERE hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e42c10f5f6d32bd6d58dffa9701f13c28a246de44e8ca422cf5b437e4ea30d06"
+}
