@@ -84,8 +84,8 @@ async fn serve(store: PgStore) -> anyhow::Result<()> {
         served = server => served.context("serving HTTP")?,
         // Another server holds the database now: both serving it would undo each other.
         lost = store.hold_claim(claim, CLAIM_CHECK) => {
-            // Sessions are cut without their end recorded: the other server cleared
-            // "online" when it started, and this line says why the session events stop.
+            // Sessions are cut without their end recorded, and this line says why the
+            // session events stop. Whichever server holds the claim next clears "online".
             error!(%lost, "this server lost its claim on the database and stops");
             return Err(lost).context("stopped serving");
         }

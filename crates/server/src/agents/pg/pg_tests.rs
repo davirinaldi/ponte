@@ -343,12 +343,19 @@ fn only_the_session_that_took_the_claim_counts_as_this_server() {
         since: Some(at(0)),
     };
     assert!(matches!(judge(&ours, Some(other)), Verdict::Another));
-    // A session the database does not show the start of is never taken for ours.
-    let hidden = Holder {
+    // Our pid without a start: our session ending while the lookup ran (it lets go of the
+    // lock before it leaves the activity view). Not proof either way.
+    let leaving = Holder {
         pid: 72,
         since: None,
     };
-    assert!(matches!(judge(&hidden, Some(hidden)), Verdict::Another));
+    assert!(matches!(judge(&ours, Some(leaving)), Verdict::Unsure));
+    // Another pid without a start: a session of another role. Never ours.
+    let hidden = Holder {
+        pid: 79,
+        since: None,
+    };
+    assert!(matches!(judge(&ours, Some(hidden)), Verdict::Another));
     // Nobody holds it, as far as the database says: look again.
     assert!(matches!(judge(&ours, None), Verdict::Unsure));
 }
@@ -383,6 +390,30 @@ fn doubt_about_the_claim_ends_after_a_few_checks() {
     let mut doubt = Doubt::default();
     for _ in 0..100 {
         assert!(!doubt.weigh(Outcome::Waiting));
+    }
+}
+
+/// Only a database that did not answer is "waiting". One that answered with an error
+/// gave no proof of anything, and counts toward the limit like any other non-answer.
+#[test]
+fn only_a_missing_answer_is_waiting() {
+    let error = |kind| PgStoreError {
+        operation: "find who holds the claim on the database",
+        kind,
+    };
+    for waiting in [
+        ErrorKind::TimedOut,
+        ErrorKind::PoolTimedOut,
+        ErrorKind::Connection,
+    ] {
+        assert!(no_answer(&error(waiting)), "{waiting:?}");
+    }
+    for answered in [
+        ErrorKind::Database(SqlState::of("42501").unwrap()),
+        ErrorKind::CorruptRow("a column"),
+        ErrorKind::Other,
+    ] {
+        assert!(!no_answer(&error(answered)), "{answered:?}");
     }
 }
 
