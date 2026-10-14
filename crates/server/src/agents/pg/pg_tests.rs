@@ -306,7 +306,7 @@ async fn pg_a_slow_claim_is_not_mistaken_for_another_server(
     let mut kept = claim;
     for _ in 0..5 {
         kept = match first.regain(kept).await {
-            Regained::Kept(claim) => claim,
+            Regained::Ours(claim) => claim,
             other => panic!("{other:?}"),
         };
     }
@@ -329,34 +329,61 @@ async fn pg_a_slow_claim_is_not_mistaken_for_another_server(
 fn only_the_session_that_took_the_claim_counts_as_this_server() {
     let ours = Holder {
         pid: 72,
-        since: at(0),
+        since: Some(at(0)),
     };
     assert!(matches!(judge(&ours, Some(ours)), Verdict::Ours));
     // Same pid, but the database restarted: a new session that took the pid back.
     let reborn = Holder {
         pid: 72,
-        since: at(60),
+        since: Some(at(60)),
     };
     assert!(matches!(judge(&ours, Some(reborn)), Verdict::Another));
     let other = Holder {
         pid: 79,
-        since: at(0),
+        since: Some(at(0)),
     };
     assert!(matches!(judge(&ours, Some(other)), Verdict::Another));
+    // A session the database does not show the start of is never taken for ours.
+    let hidden = Holder {
+        pid: 72,
+        since: None,
+    };
+    assert!(matches!(judge(&hidden, Some(hidden)), Verdict::Another));
     // Nobody holds it, as far as the database says: look again.
     assert!(matches!(judge(&ours, None), Verdict::Unsure));
 }
 
-/// Not knowing who holds the claim is not a reason to keep serving for ever.
+/// Not knowing who holds the claim is not a reason to keep serving for ever, and a
+/// database that is only slow or down is not a reason to stop.
 #[test]
 fn doubt_about_the_claim_ends_after_a_few_checks() {
     let mut doubt = Doubt::default();
     for _ in 1..UNSURE_LIMIT {
-        assert!(!doubt.one_more());
+        assert!(!doubt.weigh(Outcome::Unsure));
     }
-    assert!(doubt.one_more());
-    doubt.clear();
-    assert!(!doubt.one_more());
+    assert!(doubt.weigh(Outcome::Unsure));
+
+    // Proof that the claim is ours starts the count again; no answer does not.
+    for proof in [Outcome::Answered, Outcome::Taken, Outcome::Ours] {
+        let mut doubt = Doubt::default();
+        for _ in 1..UNSURE_LIMIT {
+            assert!(!doubt.weigh(Outcome::Unsure));
+        }
+        assert!(!doubt.weigh(proof));
+        assert!(!doubt.weigh(Outcome::Unsure), "{proof:?}");
+    }
+    let mut doubt = Doubt::default();
+    for _ in 1..UNSURE_LIMIT {
+        assert!(!doubt.weigh(Outcome::Unsure));
+        assert!(!doubt.weigh(Outcome::Waiting));
+    }
+    assert!(doubt.weigh(Outcome::Unsure));
+
+    // However long the database is in trouble, that alone stops nothing.
+    let mut doubt = Doubt::default();
+    for _ in 0..100 {
+        assert!(!doubt.weigh(Outcome::Waiting));
+    }
 }
 
 /// A row the code cannot read is an error, never a guess.

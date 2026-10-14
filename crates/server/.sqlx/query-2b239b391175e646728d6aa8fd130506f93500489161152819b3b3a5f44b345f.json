@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT pg_try_advisory_lock($1) AS \"claimed!\", pg_backend_pid() AS \"pid!\",\n                          pg_postmaster_start_time() AS \"since!\"",
+  "query": "SELECT pg_try_advisory_lock($1) AS \"claimed!\", pg_backend_pid() AS \"pid!\",\n                          (SELECT backend_start FROM pg_stat_activity\n                           WHERE pid = pg_backend_pid()) AS since",
   "describe": {
     "columns": [
       {
@@ -17,7 +17,7 @@
       },
       {
         "ordinal": 2,
-        "name": "since!",
+        "name": "since",
         "type_info": "Timestamptz",
         "origin": "Expression"
       }
@@ -33,5 +33,5 @@
       null
     ]
   },
-  "hash": "c88e130c7aade3dc1efd3fddf5e26c2a5d90390c939cc08e0966b647e6c8f197"
+  "hash": "2b239b391175e646728d6aa8fd130506f93500489161152819b3b3a5f44b345f"
 }

@@ -102,11 +102,12 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   advisory lock held for the life of the process), migrates, and marks every device
   offline. `hold_claim` checks the claim every `CLAIM_CHECK` and takes it again if the
   database dropped it. A slow answer is not a lost claim: if the lock is still held by
-  this server's own session, the claim is kept. A session is its pid **and** the start
-  time of the database server (pids come back after a restart), and the holder is looked
-  up in this database only (`pg_locks` shows the whole cluster). If another server took
-  it, or the holder stays unknown for `UNSURE_LIMIT` checks, this one stops, without
-  recording the end of its sessions. Only serving and `migrate` change the schema; the other subcommands do not.
+  this server's own session, the claim is kept. A session is its pid **and** its
+  `backend_start` (pids come back after a restart), and the holder is looked up in this
+  database only (`pg_locks` shows the whole cluster). If another server took it, or the
+  database says `UNSURE_LIMIT` times in a row that it is held without showing one holder,
+  this one stops, without recording the end of its sessions. A database that is only slow
+  or down never stops it: nobody else can take the claim then either. Only serving and `migrate` change the schema; the other subcommands do not.
 
 ## Database (`src/agents/pg.rs`, `migrations/`)
 

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.pid AS \"pid!\", a.backend_start AS since\n                           FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid\n                           WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1\n                             AND l.pid IS NOT NULL\n                             AND l.database = (SELECT oid FROM pg_database\n                                               WHERE datname = current_database())\n                             AND l.classid = ($1::bigint >> 32)::oid\n                             AND l.objid = ($1::bigint & 4294967295)::oid",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pid!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pg_locks",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "since",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "pg_stat_activity",
+            "name": "backend_start"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "13ae6946477c474bbfe3647f751aedf48f244bd4f85ec2b9b3d82f9ef1b71b39"
+}

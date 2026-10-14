@@ -86,7 +86,7 @@ async fn serve(store: PgStore) -> anyhow::Result<()> {
         lost = store.hold_claim(claim, CLAIM_CHECK) => {
             // Sessions are cut without their end recorded: the other server cleared
             // "online" when it started, and this line says why the session events stop.
-            error!(%lost, "another server holds the database now; this one stops");
+            error!(%lost, "this server lost its claim on the database and stops");
             return Err(lost).context("stopped serving");
         }
     }
