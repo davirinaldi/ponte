@@ -401,15 +401,24 @@ fn only_a_missing_answer_is_waiting() {
         operation: "find who holds the claim on the database",
         kind,
     };
+    let state = |code| ErrorKind::Database(SqlState::of(code).unwrap());
     for waiting in [
         ErrorKind::TimedOut,
         ErrorKind::PoolTimedOut,
         ErrorKind::Connection,
+        // An overloaded or stopping database answers with these: no answer to the question.
+        state("57014"),
+        state("57P01"),
+        state("53300"),
+        state("53200"),
+        state("08006"),
     ] {
         assert!(no_answer(&error(waiting)), "{waiting:?}");
     }
     for answered in [
-        ErrorKind::Database(SqlState::of("42501").unwrap()),
+        state("42501"),
+        state("28P01"),
+        state("42P01"),
         ErrorKind::CorruptRow("a column"),
         ErrorKind::Other,
     ] {

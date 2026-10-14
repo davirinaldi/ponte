@@ -79,8 +79,9 @@ pub struct ServerClaim {
 pub const CLAIM_CHECK: Duration = Duration::from_secs(30);
 
 /// How many checks in a row may end without knowing who holds the claim before the server
-/// stops: the database answers, says the lock is taken, and shows no single holder. A
-/// check that could not ask the database does not count.
+/// stops: the database answered, and the answer was no proof either way (see
+/// [`Verdict::Unsure`] and [`no_answer`]). A check the database did not answer does not
+/// count.
 const UNSURE_LIMIT: u32 = 3;
 
 // The query that finds the holder splits the key into two `oid`s, which must not be negative.
@@ -101,7 +102,7 @@ struct Holder {
 enum Verdict {
     Ours,
     Another,
-    /// The database answered and showed no single holder.
+    /// No single holder shown, or our pid without the start that would prove it is ours.
     Unsure,
 }
 
@@ -109,20 +110,26 @@ fn judge(ours: &Holder, holder: Option<Holder>) -> Verdict {
     match holder {
         Some(holder) if holder.since.is_some() && holder == *ours => Verdict::Ours,
         // Our pid with no start: our own session leaving while the lookup ran (it lets go
-        // of its locks before it leaves the activity view), or a stranger. No proof.
+        // of its locks before it leaves the activity view), or, after a restart, a session
+        // of another role that got our pid. No proof: counted, so the second case still
+        // ends, `UNSURE_LIMIT` checks later.
         Some(holder) if holder.pid == ours.pid && holder.since.is_none() => Verdict::Unsure,
         Some(_) => Verdict::Another,
         None => Verdict::Unsure,
     }
 }
 
-/// Whether the database gave no answer at all: then nobody knows more than before, and a
-/// check neither counts nor clears. An error the database answered with is not that.
+/// Whether the database gave no answer to the question: then nobody knows more than
+/// before, and a check neither counts nor clears. That is no connection, a call cut at its
+/// limit, and the errors an overloaded or stopping database answers with: SQLSTATE classes
+/// 08 (connection), 53 (resources) and 57 (cancelled, shutting down; `statement_timeout` is
+/// 57014). Any other error is an answer, such as a refused grant, and counts.
 fn no_answer(error: &PgStoreError) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::TimedOut | ErrorKind::PoolTimedOut | ErrorKind::Connection
-    )
+    match error.kind() {
+        ErrorKind::TimedOut | ErrorKind::PoolTimedOut | ErrorKind::Connection => true,
+        ErrorKind::Database(state) => matches!(&state.class(), b"08" | b"53" | b"57"),
+        _ => false,
+    }
 }
 
 /// What became of a claim whose connection did not answer.
@@ -136,7 +143,8 @@ enum Regained {
     /// later. If only this server is cut off, another may take the claim meanwhile; this
     /// one cannot write either, and the first check that gets through says `Lost`.
     Waiting(ServerClaim),
-    /// The database answered that the lock is held, and showed no single holder.
+    /// The database answered, and the answer proves nothing: see [`Verdict::Unsure`],
+    /// and an error that is not [`no_answer`].
     Unsure(ServerClaim),
     /// Another session holds the lock.
     Lost(PgStoreError),
@@ -224,6 +232,11 @@ pub enum ErrorKind {
 pub struct SqlState([u8; 5]);
 
 impl SqlState {
+    /// The first two characters: the kind of error, in the standard's grouping.
+    fn class(self) -> [u8; 2] {
+        [self.0[0], self.0[1]]
+    }
+
     fn of(code: &str) -> Option<Self> {
         let bytes: [u8; 5] = code.as_bytes().try_into().ok()?;
         bytes
@@ -494,8 +507,9 @@ impl PgStore {
     /// administrator ends it, or when something on the network drops an idle connection;
     /// the lock goes with it. Every `every`, the claim's connection is checked, which also
     /// keeps it from looking idle. A lost claim is taken again; a slow answer is not a lost
-    /// claim. While the database cannot be reached the check goes on: nobody else can take
-    /// the claim then either.
+    /// claim. While the database gives no answer the check goes on without counting; if only
+    /// this server is cut off, another may take the claim meanwhile, and the first check
+    /// that gets through finds it.
     pub async fn hold_claim(&self, claim: ServerClaim, every: Duration) -> PgStoreError {
         let mut claim = claim;
         let mut doubt = Doubt::default();
