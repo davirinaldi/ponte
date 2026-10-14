@@ -43,7 +43,10 @@ pub(crate) enum ConnectError {
     NotLoopback,
     #[error("TLS could not be set up: {0}")]
     TlsSetup(String),
-    #[error("the connection is not encrypted although the URL asks for it")]
+    #[error(
+        "the URL and the TLS setup do not agree, or the connection is not encrypted although \
+         the URL asks for it"
+    )]
     NotEncrypted,
     #[error("the server answered the upgrade with HTTP status {0}")]
     Http(u16),
@@ -127,8 +130,12 @@ pub(crate) async fn connect(
     Ok((version, socket))
 }
 
-/// What may wait to be written, in bytes: one message of the largest size and room to spare.
-const MAX_WRITE_BUFFER_BYTES: usize = MAX_MESSAGE_BYTES + 64 * 1024;
+/// What is written to the socket at once, in bytes. The agent's messages are small.
+const WRITE_BUFFER_BYTES: usize = 16 * 1024;
+
+/// What may wait to be written, in bytes. The library asks for the write buffer and one
+/// message of the largest size; the rest is a margin.
+const MAX_WRITE_BUFFER_BYTES: usize = WRITE_BUFFER_BYTES + MAX_MESSAGE_BYTES + 64 * 1024;
 
 /// Limits in both directions. Without one on writing, a server that stops reading and
 /// keeps sending pings fills the agent's memory with the pongs it owes: each ping read is
@@ -138,6 +145,7 @@ fn socket_limits() -> WebSocketConfig {
     WebSocketConfig::default()
         .max_message_size(Some(MAX_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_MESSAGE_BYTES))
+        .write_buffer_size(WRITE_BUFFER_BYTES)
         .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
 }
 
@@ -372,9 +380,70 @@ mod tests {
         let limits = socket_limits();
         assert_eq!(limits.max_message_size, Some(MAX_MESSAGE_BYTES));
         assert_eq!(limits.max_frame_size, Some(MAX_MESSAGE_BYTES));
+        assert_eq!(limits.write_buffer_size, WRITE_BUFFER_BYTES);
         assert_eq!(limits.max_write_buffer_size, MAX_WRITE_BUFFER_BYTES);
-        assert!(limits.max_write_buffer_size > limits.write_buffer_size);
+        // The library's own rule: a message of the largest size fits on top of what it
+        // writes at once. Below that, a large message on a slow link would end a session.
+        assert!(limits.max_write_buffer_size >= limits.write_buffer_size + MAX_MESSAGE_BYTES);
         let _ = WebSocketContext::new(Role::Client, Some(limits));
+    }
+
+    /// A peer that sends nothing but pings, as whole frames, and takes nothing in.
+    struct Flood {
+        pings_left: usize,
+    }
+
+    impl io::Read for Flood {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let frames = (buffer.len() / 2).min(self.pings_left);
+            if frames == 0 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            for frame in buffer[..frames * 2].chunks_exact_mut(2) {
+                // FIN and ping, then an empty payload, unmasked as a server sends it.
+                frame.copy_from_slice(&[0x89, 0x00]);
+            }
+            self.pings_left -= frames;
+            Ok(frames * 2)
+        }
+    }
+
+    impl io::Write for Flood {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    /// Every ping read is a pong owed. When the peer takes nothing, the pongs must not pile
+    /// up in memory: once what waits reaches the limit, the agent's own next frame fails at
+    /// once, and the session ends. Without the limit, that frame would be queued too.
+    #[test]
+    fn pongs_owed_to_a_peer_that_reads_nothing_do_not_pile_up() {
+        use tokio_tungstenite::tungstenite::protocol::{Role, WebSocket};
+
+        // Pongs of six bytes each: almost four times the limit, if all of them waited.
+        let pings = 200_000;
+        let mut socket = WebSocket::from_raw_socket(
+            Flood { pings_left: pings },
+            Role::Client,
+            Some(socket_limits()),
+        );
+        let mut read = 0;
+        loop {
+            match socket.read() {
+                Ok(tungstenite::Message::Ping(_)) => read += 1,
+                Err(WsError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        // Reading went on all the while: the agent keeps hearing the server.
+        assert_eq!(read, pings);
+        let next = socket.write(tungstenite::Message::Ping(Vec::new().into()));
+        assert!(matches!(next, Err(WsError::WriteBufferFull(_))), "{next:?}");
     }
 
     /// The configuration builds on the machine that runs the tests, with the system's

@@ -3,8 +3,7 @@ use ponte_agent::AgentConfig;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -25,7 +24,8 @@ async fn main() -> anyhow::Result<()> {
         "agent starting"
     );
 
-    ponte_agent::run(config, shutdown_signal()).await;
+    let runtime = ponte_agent::runtime().context("starting the async runtime")?;
+    runtime.block_on(ponte_agent::run(config, shutdown_signal()));
     info!("agent stopped");
     Ok(())
 }

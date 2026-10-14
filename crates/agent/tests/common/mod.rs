@@ -241,17 +241,6 @@ pub fn challenge() -> Message {
     Message::text(serde_json::to_string(&challenge).unwrap())
 }
 
-/// A listener whose connections take in only a few kilobytes that nobody reads, so what
-/// the other side sends after that waits on the other side, not in this kernel's buffers.
-pub fn listen_with_a_small_window() -> (TcpListener, SocketAddr) {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.set_recv_buffer_size(4 * 1024).unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let listener = socket.listen(16).unwrap();
-    let addr = listener.local_addr().unwrap();
-    (listener, addr)
-}
-
 pub async fn listen() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
