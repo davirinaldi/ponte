@@ -23,7 +23,7 @@ Work through these steps in order. Stop and ask if any step needs a new primitiv
      verify check; `validate` rejects it otherwise.
    - Paths as TOML literal strings (`'C:\...'`) under an allowed root, in steps and in checks
      alike. No `..`, no UNC. Accented letters must match the configured root exactly, case
-     included: `C:\FARMÁCIA` is not `C:\Farmácia`.
+     included: `C:\GESTÃO` is not `C:\Gestão`.
    - Service, image and connection names are plain names (`FakeErp`, `erp.exe`): letters,
      digits, `.`, `_`, `-`, `$` and single spaces, never paths or patterns.
    - `max_bytes` is at most 64 KiB; a disk `percent` is between 1 and 100.

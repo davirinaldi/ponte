@@ -7,7 +7,7 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
 ## Assets
 
 - Code execution on customer machines (the most valuable asset an attacker can gain).
-- Personal data visible on those machines (pharmacy context: patients, prescriptions, CPF).
+- Personal data visible on those machines (customer records, documents, tax ids).
 - Agent identities and the manifest signing key.
 - Audit log integrity.
 
