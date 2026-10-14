@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use ponte_protocol::{MAX_MESSAGE_BYTES, ProtocolVersion};
@@ -15,8 +15,16 @@ use super::{Gateway, session};
 
 pub(crate) async fn upgrade<D: DeviceStore>(
     State(gateway): State<Arc<Gateway<D>>>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    // A browser names the page that opened the socket, and an agent is not a page. Without
+    // this, any website could spend its visitors' connections on this endpoint.
+    if headers.contains_key(header::ORIGIN) {
+        debug!("upgrade refused: the request comes from a browser");
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
     // Newest first: axum takes the first name of this list that the agent also offered.
     let names = ProtocolVersion::supported().map(ProtocolVersion::subprotocol);
     let upgrade = upgrade.protocols(names);

@@ -92,7 +92,10 @@ impl fmt::Debug for TokenHash {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceStatus {
     /// Enrolled with a token issued for several machines and not approved yet (RF-49): it
-    /// may connect, but nothing it sends is kept and it is sent no actions.
+    /// may connect, but its telemetry is dropped and it is sent no actions. What is kept is
+    /// what a technician needs to approve it: when it was last seen and the two labels it
+    /// gave in the handshake. Those labels are as untrusted as the device, and whatever
+    /// shows devices to a model leaves a pending one out entirely.
     Pending,
     Active,
     /// Refused on every connection (RF-04). There is no way back: the machine enrolls again
@@ -155,7 +158,13 @@ pub enum EnrollRefusal {
 ///
 /// The futures are `Send` so a connection can run on any worker thread. Methods take the
 /// current time instead of reading a clock, so a store's rules can be tested.
+///
+/// A call may be dropped before it returns, when its connection goes away: a store leaves
+/// nothing half done behind. A store also sets its own time limits; the caller waits.
 pub trait DeviceStore: Send + Sync + 'static {
+    /// Logged with `Display` when a call fails. It must name what failed and never carry
+    /// the values of the call: telemetry holds free text from the machine (invariants 4
+    /// and 6 in `AGENTS.md`).
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Spends one use of the token and stores the key as a new device, in one atomic step.
@@ -179,14 +188,20 @@ pub trait DeviceStore: Send + Sync + 'static {
         id: DeviceId,
     ) -> impl Future<Output = Result<Option<Device>, Self::Error>> + Send;
 
-    /// Marks the device online under `session`, replacing whichever session it had.
+    /// Marks the device online under `session`, replacing whichever session it had, and
+    /// says what the device is, or `None` if it no longer exists. A revoked device is left
+    /// as it was: it may have been revoked since the handshake looked. Checking and writing
+    /// happen in one atomic step.
+    ///
+    /// The caller starts the sessions of one device one at a time, in the order in which
+    /// they take over from each other, so the last call is the session that stays.
     fn session_started(
         &self,
         id: DeviceId,
         session: SessionId,
         about: &AgentInfo,
         now: DateTime<Utc>,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<DeviceStatus>, Self::Error>> + Send;
 
     /// Records a heartbeat and says what the device is now, or `None` if it no longer
     /// exists. Telemetry is kept for an active device only (RF-49), and a revoked device
@@ -424,13 +439,17 @@ impl DeviceStore for MemoryStore {
         session: SessionId,
         about: &AgentInfo,
         now: DateTime<Utc>,
-    ) -> Result<(), Self::Error> {
-        if let Some(device) = self.lock().devices.get_mut(&id) {
+    ) -> Result<Option<DeviceStatus>, Self::Error> {
+        let mut inner = self.lock();
+        let Some(device) = inner.devices.get_mut(&id) else {
+            return Ok(None);
+        };
+        if device.status != DeviceStatus::Revoked {
             device.online = Some(session);
             device.about = about.clone();
             device.last_seen = Some(now);
         }
-        Ok(())
+        Ok(Some(device.status))
     }
 
     async fn heartbeat(
@@ -752,17 +771,13 @@ mod tests {
             os: about().os,
         };
 
-        store
-            .session_started(device, old, &about(), at(1))
-            .await
-            .unwrap();
+        let started = store.session_started(device, old, &about(), at(1)).await;
+        assert_eq!(started.unwrap(), Some(DeviceStatus::Active));
         assert_eq!(store.record(device).unwrap().online, Some(old));
         assert_eq!(store.record(device).unwrap().last_seen, Some(at(1)));
 
-        store
-            .session_started(device, new, &newer, at(2))
-            .await
-            .unwrap();
+        let started = store.session_started(device, new, &newer, at(2)).await;
+        assert_eq!(started.unwrap(), Some(DeviceStatus::Active));
         store.session_ended(device, old, at(3)).await.unwrap();
         let record = store.record(device).unwrap();
         assert_eq!(record.online, Some(new));
@@ -773,11 +788,38 @@ mod tests {
 
         // Nothing to do for a device that is not there, and no error either.
         let unknown = DeviceId::new();
-        store
-            .session_started(unknown, new, &about(), at(5))
-            .await
-            .unwrap();
+        let started = store.session_started(unknown, new, &about(), at(5)).await;
+        assert_eq!(started.unwrap(), None);
         store.session_ended(unknown, new, at(5)).await.unwrap();
         assert_eq!(store.record(unknown), None);
+    }
+
+    /// RF-04: the handshake may have looked a moment before the device was revoked. The
+    /// store has the last word, and a revoked device is never shown as connected.
+    #[tokio::test]
+    async fn a_session_of_a_revoked_device_does_not_start() {
+        let store = MemoryStore::new();
+        store.add_token(&token(1), grant(2));
+        let device = enrolled(&store, 1, 10).await;
+        let session = SessionId::new();
+        let newer = AgentInfo {
+            agent_version: "0.2.0".parse().unwrap(),
+            os: about().os,
+        };
+
+        let started = store
+            .session_started(device, session, &about(), at(1))
+            .await;
+        assert_eq!(started.unwrap(), Some(DeviceStatus::Pending));
+        store.session_ended(device, session, at(2)).await.unwrap();
+        let before = store.record(device).unwrap();
+
+        store.revoke_device(device);
+        let started = store.session_started(device, session, &newer, at(3)).await;
+        assert_eq!(started.unwrap(), Some(DeviceStatus::Revoked));
+        let after = store.record(device).unwrap();
+        assert_eq!(after.online, None);
+        assert_eq!(after.about, before.about);
+        assert_eq!(after.last_seen, before.last_seen);
     }
 }

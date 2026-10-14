@@ -18,6 +18,7 @@ use ponte_protocol::{
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tracing_subscriber::EnvFilter;
 
 use super::store::{AgentInfo, CustomerId, DeviceStore, MemoryStore, TokenGrant};
 use super::{Gateway, Limits, session};
@@ -242,12 +243,18 @@ impl Peer {
 pub(crate) struct Logs(Arc<Mutex<Vec<u8>>>);
 
 impl Logs {
+    /// Everything, down to `trace`.
     pub(crate) fn capture() -> (Self, tracing::subscriber::DefaultGuard) {
+        Self::capture_with(EnvFilter::new("trace"))
+    }
+
+    /// What `filter` lets through.
+    pub(crate) fn capture_with(filter: EnvFilter) -> (Self, tracing::subscriber::DefaultGuard) {
         let logs = Self::default();
         let writer = logs.clone();
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
+            .with_env_filter(filter)
             .with_writer(move || writer.clone())
             .finish();
         (logs, tracing::subscriber::set_default(subscriber))

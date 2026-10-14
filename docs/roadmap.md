@@ -12,7 +12,8 @@ approval, without any screen sharing. Each milestone should end with something w
   upgrade (ADR-0007); enrollment token, then a device key proven on every connection
   (ADR-0008); heartbeats with real telemetry (`sysinfo`); server tracks online devices in
   Postgres; reconnect with backoff and jitter. Dependencies agreed for this milestone:
-  `tokio-tungstenite` with rustls, `sysinfo`, `sqlx` and an ed25519 crate.
+  `tokio-tungstenite` with rustls, `sysinfo`, `sqlx` and an ed25519 crate (`ed25519-dalek`),
+  plus three small ones other crates already brought in: `getrandom`, `sha2`, `futures-util`.
   *Post: Rust agent footprint (binary size, idle RAM).*
 - [ ] **M2 Signed actions on Windows**: ed25519 manifest signing (offline key) and agent-side
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
@@ -69,3 +70,18 @@ approval, without any screen sharing. Each milestone should end with something w
   range too, once a second version exists?
 - Outside the handshake, strings and lists are bounded only by `MAX_MESSAGE_BYTES`: telemetry
   names, `output`, `reason`, `manifest_id`, the initiator fields. Which get a limit of their own?
+- The cap on connections that have not authenticated yet is one number for everyone. A
+  single host that opens 256 of them and says nothing keeps every agent from reconnecting
+  for as long as it keeps going. A limit per source needs a decision first: the server sits
+  behind a proxy, so which address does it trust? And when the cap is reached, refuse the
+  newest (what M1 does, and what lets a fleet reconnect in order) or drop the oldest (what
+  makes a silent connection cheap to push out)? Planned for M5 with the other rate limits.
+- Nothing limits how often a connected device sends heartbeats, and each one is a write.
+- The server never pings. A connection that died without a close stays "online" until the
+  device connects again or the session reaches its time limit. A ping needs the agent to
+  answer it, and a heartbeat deadline needs the server to know the agent's interval.
+- Revoking a device ends its session at the next status check, up to a minute later. RF-04
+  says "immediately": that takes the revocation and the session in the same process, which
+  comes with the console.
+- When the server stops, open sessions are cut without their end being recorded. The store
+  has to clear "online" when the server starts.

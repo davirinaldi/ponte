@@ -19,7 +19,7 @@ mod store;
 mod ws;
 
 #[cfg(test)]
-mod testkit;
+pub(crate) mod testkit;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +30,8 @@ use chrono::{DateTime, Utc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use registry::Registry;
+
+pub use audit::TARGET as AUDIT_TARGET;
 
 pub use store::{
     AgentInfo, CustomerId, Device, DeviceRecord, DeviceStatus, DeviceStore, EnrollOutcome,
@@ -46,6 +48,9 @@ pub(crate) struct Limits {
     /// A session ends after this long and the agent proves its key again, so no connection
     /// lives forever on one check.
     pub(crate) session: Duration,
+    /// The status of a connected device is read again at least this often, so a revoked
+    /// device is out by then even if it never sends a heartbeat (RF-04).
+    pub(crate) status_check: Duration,
     /// Connections that have not authenticated yet. Past this, upgrades are refused.
     pub(crate) unauthenticated: usize,
 }
@@ -56,6 +61,7 @@ impl Default for Limits {
             handshake: Duration::from_secs(10),
             close: Duration::from_secs(2),
             session: Duration::from_secs(24 * 60 * 60),
+            status_check: Duration::from_secs(60),
             unauthenticated: 256,
         }
     }
