@@ -1,5 +1,5 @@
 use anyhow::Context;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -15,6 +15,10 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {bind}"))?;
     info!(%bind, "server listening");
+    warn!(
+        "devices are kept in memory and no enrollment token exists: agents can connect, \
+         none can enroll"
+    );
 
     axum::serve(listener, ponte_server::router())
         .with_graceful_shutdown(shutdown_signal())
