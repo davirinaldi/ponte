@@ -284,6 +284,49 @@ async fn ws_loopback_a_server_that_goes_quiet_is_given_up_and_connected_to_again
     agent.stop().await;
 }
 
+/// Both ends set the same limit on the socket. A server that sends more than that is cut
+/// off by the agent's WebSocket layer before the message is buffered, let alone parsed,
+/// and the agent connects again. Without the limit the message would be read in whole,
+/// dropped as unreadable, and the session would go on.
+#[tokio::test]
+async fn ws_loopback_a_message_over_the_size_limit_ends_the_connection() {
+    let store = store_with(&token(1));
+    let addr = serve(store.clone()).await;
+    let machine = Machine::with_token(&token(1));
+    let agent = RunningAgent::start(machine.config(addr), fast());
+    machine.online(&store).await;
+    agent.stop().await;
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let loud = fake_server(&[&newest()], {
+        let connections = Arc::clone(&connections);
+        move |mut socket| {
+            let connections = Arc::clone(&connections);
+            async move {
+                socket.send(challenge()).await.unwrap();
+                let Some(AgentToServer::Hello { .. }) = message(&mut socket).await else {
+                    return;
+                };
+                let welcome = serde_json::to_string(&ServerToAgent::Welcome {}).unwrap();
+                socket.send(Message::text(welcome)).await.unwrap();
+                connections.fetch_add(1, Ordering::SeqCst);
+                let too_large = "x".repeat(ponte_protocol::MAX_MESSAGE_BYTES + 1);
+                let _ = socket.send(Message::text(too_large)).await;
+                // Keeps reading, so pings are answered and nothing else ends the session.
+                tokio::spawn(async move { while let Some(Ok(_)) = socket.next().await {} });
+            }
+        }
+    })
+    .await;
+    let agent = RunningAgent::start(machine.config(loud), fast());
+
+    eventually("the agent left and connected again", || {
+        connections.load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    agent.stop().await;
+}
+
 /// ADR-0007: without a version the server selected out of the ones offered there is no
 /// connection. The agent leaves before it says anything, so the token never reaches a
 /// server it has not agreed on a protocol with.
