@@ -11,18 +11,44 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # The query macros check against crates/server/.sqlx, never a live database.
+  SQLX_OFFLINE: "true"
 
 jobs:
-  lint-and-test:
-    name: Lint and test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  linux:
+    name: Lint and test (ubuntu-latest, with PostgreSQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ponte
+          POSTGRES_PASSWORD: ponte
+          POSTGRES_DB: ponte
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ponte"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       # rust-toolchain.toml pins the version and components; rustup installs them on first use.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # The tests that need a database, on what the step above already built.
+      - run: cargo test -p ponte-server -- --ignored pg_
+        env:
+          DATABASE_URL: postgres://ponte:ponte@localhost:5432/ponte
+
+  windows:
+    name: Lint and test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
