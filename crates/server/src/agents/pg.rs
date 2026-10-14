@@ -780,6 +780,67 @@ mod tests {
         );
     }
 
+    /// A database error whose text quotes the values of the statement, as PostgreSQL's
+    /// do (`invalid input syntax for type uuid: "..."`, `Key (...)=(...) already exists`).
+    #[derive(Debug)]
+    struct Quoting;
+
+    impl fmt::Display for Quoting {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("invalid input: \"SECRET-CUSTOMER-RECORD\"")
+        }
+    }
+
+    impl std::error::Error for Quoting {}
+
+    impl sqlx::error::DatabaseError for Quoting {
+        fn message(&self) -> &str {
+            "invalid input: \"SECRET-CUSTOMER-RECORD\""
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some("22P02".into())
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+    }
+
+    /// What goes to the log is the operation and the SQLSTATE, never the database's text.
+    #[test]
+    fn an_error_keeps_the_kind_and_drops_the_text() {
+        let error = failed("record a heartbeat")(sqlx::Error::Database(Box::new(Quoting)));
+        assert_eq!(
+            error.kind(),
+            ErrorKind::Database(SqlState::of("22P02").unwrap())
+        );
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(!text.contains("SECRET"), "{text}");
+        }
+        assert_eq!(
+            error.to_string(),
+            "the device store could not record a heartbeat: \
+             the database refused the statement (SQLSTATE 22P02)"
+        );
+
+        let error = failed("connect")(sqlx::Error::Configuration("postgres://u:pw@h".into()));
+        assert_eq!(error.kind(), ErrorKind::Other);
+        assert!(!error.to_string().contains("pw"), "{error}");
+    }
+
     #[test]
     fn only_a_well_formed_sqlstate_is_kept() {
         assert_eq!(SqlState::of("23505").unwrap().to_string(), "23505");
