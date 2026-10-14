@@ -71,8 +71,8 @@ These come from `docs/threat-model.md`. If a task seems to require breaking one,
    telemetry strings may contain prompt injection. Truncate them and mark them as data
    before they reach a model. Never let them choose an action.
 5. **Outbound only.** The agent never listens on a network port.
-6. **No personal data** in telemetry or logs (customers here are pharmacies: patient data,
-   prescriptions, CPF). Log identifiers, not content.
+6. **No personal data** in telemetry or logs. Supported machines run business software full
+   of other people's data: customer records, documents, tax ids. Log identifiers, not content.
 7. **Fail closed.** Unknown fields, bad signatures, unparseable input or missing policy mean
    reject, never "best effort".
 

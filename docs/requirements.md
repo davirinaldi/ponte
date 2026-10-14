@@ -97,7 +97,7 @@ Phase tags: **P1** core (telemetry and typed actions), **P2** view the screen, *
 - **RNF-08** Threat model maintained in the repository.
 
 ### Privacy (LGPD)
-- **RNF-09** Minimal telemetry: no screen content, documents or patient data.
+- **RNF-09** Minimal telemetry: no screen content, documents or customer records.
 - **RNF-10** Recording only with consent, configurable retention, restricted and audited access.
 - **RNF-11** No personal data in system logs.
 

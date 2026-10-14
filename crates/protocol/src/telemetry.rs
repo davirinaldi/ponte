@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 /// Point-in-time view of a machine, sent with every heartbeat.
 ///
-/// Telemetry must never contain personal data (screen content, documents, patient
-/// or customer records). See RNF-09 in `docs/requirements.md`.
+/// Telemetry must never contain personal data (screen content, documents, customer
+/// records). See RNF-09 in `docs/requirements.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetrySnapshot {

@@ -1,6 +1,6 @@
 //! Ponte agent.
 //!
-//! Runs on the supported machine (a pharmacy PC, for example) as a privileged
+//! Runs on the supported machine (a point-of-sale PC, for example) as a privileged
 //! Windows service. It only ever opens *outbound* connections, reports telemetry,
 //! and runs actions from the signed catalog after checking its own local policy.
 //!

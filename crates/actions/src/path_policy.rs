@@ -217,9 +217,9 @@ mod tests {
         assert!(!p.is_allowed("C:\\Fa\u{212a}eErp\\run\\erp.lock"));
 
         // Outside ASCII, a letter only matches itself.
-        let accented = PathPolicy::new(["C:\\Farm\u{e1}cia"]).unwrap();
-        assert!(accented.is_allowed("c:\\FARM\u{e1}CIA\\erp.log"));
-        assert!(!accented.is_allowed("C:\\FARM\u{c1}CIA\\erp.log"));
+        let accented = PathPolicy::new(["C:\\Gest\u{e3}o"]).unwrap();
+        assert!(accented.is_allowed("c:\\GEST\u{e3}O\\erp.log"));
+        assert!(!accented.is_allowed("C:\\GEST\u{c3}O\\erp.log"));
         // U+212B ANGSTROM SIGN and U+00C5 share a lowercase form but are different names.
         let angstrom = PathPolicy::new(["C:\\\u{c5}"]).unwrap();
         assert!(!angstrom.is_allowed("C:\\\u{212b}\\erp.log"));
