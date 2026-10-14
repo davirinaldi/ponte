@@ -13,6 +13,25 @@ use tracing::debug;
 use super::store::DeviceStore;
 use super::{Gateway, session};
 
+/// What is written to the socket at once, in bytes. The server's messages are small.
+const WRITE_BUFFER_BYTES: usize = 16 * 1024;
+
+/// What may wait to be written, in bytes. The library asks for the write buffer and one
+/// message of the largest size; the rest is a margin.
+const MAX_WRITE_BUFFER_BYTES: usize = WRITE_BUFFER_BYTES + MAX_MESSAGE_BYTES + 64 * 1024;
+
+/// Limits in both directions. axum leaves what waits to be written unbounded, and every
+/// ping read is a pong queued: whoever holds a device key could fill the server's memory
+/// by pinging and never reading. With the limit, the pong owed waits in the one place the
+/// library keeps for it, and the server's own next frame fails.
+fn limited(upgrade: WebSocketUpgrade) -> WebSocketUpgrade {
+    upgrade
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
+        .write_buffer_size(WRITE_BUFFER_BYTES)
+        .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
+}
+
 pub(crate) async fn upgrade<D: DeviceStore>(
     State(gateway): State<Arc<Gateway<D>>>,
     headers: HeaderMap,
@@ -45,24 +64,29 @@ pub(crate) async fn upgrade<D: DeviceStore>(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    upgrade
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
-            let (sink, stream) = socket.split();
-            session::run(&gateway, version, stream, sink, permit).await;
-        })
+    limited(upgrade).on_upgrade(move |socket| async move {
+        let (sink, stream) = socket.split();
+        session::run(&gateway, version, stream, sink, permit).await;
+    })
 }
+
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::net::SocketAddr;
     use std::time::Duration;
 
-    use ponte_protocol::ProtocolVersion;
+    use ponte_protocol::{MAX_MESSAGE_BYTES, ProtocolVersion};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::time::{sleep, timeout};
+    use tokio_tungstenite::tungstenite;
+    use tokio_tungstenite::tungstenite::Error as WsError;
+    use tokio_tungstenite::tungstenite::protocol::{
+        Role, WebSocket, WebSocketConfig, WebSocketContext,
+    };
 
+    use super::{MAX_WRITE_BUFFER_BYTES, WRITE_BUFFER_BYTES};
     use crate::agents::store::MemoryStore;
     use crate::agents::{Limits, routes_with};
 
@@ -131,5 +155,83 @@ mod tests {
             sleep(Duration::from_millis(10)).await;
         }
         panic!("the place was never given back");
+    }
+
+    /// The limits of the server's sockets, as the WebSocket library under axum takes them.
+    fn socket_limits() -> WebSocketConfig {
+        WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_MESSAGE_BYTES))
+            .write_buffer_size(WRITE_BUFFER_BYTES)
+            .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
+    }
+
+    /// The library refuses, with a panic, limits where the most that may wait to be written
+    /// is not above what it writes at once. That panic would end every connection's task.
+    #[test]
+    fn the_socket_limits_are_ones_the_library_accepts() {
+        let limits = socket_limits();
+        // The library's own rule: a message of the largest size fits on top of what it
+        // writes at once. Below that, a large message on a slow link would end a session.
+        assert!(limits.max_write_buffer_size >= limits.write_buffer_size + MAX_MESSAGE_BYTES);
+        let _ = WebSocketContext::new(Role::Server, Some(limits));
+    }
+
+    /// A peer that sends nothing but pings, masked as a client must, and takes nothing in.
+    struct Flood {
+        pings_left: usize,
+    }
+
+    impl io::Read for Flood {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            // FIN and ping, then the mask bit with an empty payload, then the mask.
+            const PING: [u8; 6] = [0x89, 0x80, 0x3a, 0x51, 0xc4, 0x0e];
+            let frames = (buffer.len() / PING.len()).min(self.pings_left);
+            if frames == 0 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            for frame in buffer[..frames * PING.len()].chunks_exact_mut(PING.len()) {
+                frame.copy_from_slice(&PING);
+            }
+            self.pings_left -= frames;
+            Ok(frames * PING.len())
+        }
+    }
+
+    impl io::Write for Flood {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    /// Whoever holds a device key can send pings and never read the pongs. Each ping read
+    /// is a pong owed, and without a limit every one of them waits in memory. With it, a
+    /// pong that does not fit waits in the one place the library keeps for it, and the
+    /// server's own next frame fails at once.
+    #[test]
+    fn pongs_owed_to_a_peer_that_reads_nothing_do_not_pile_up() {
+        // Pongs of two bytes each: almost two times the limit, if all of them waited.
+        let pings = 400_000;
+        let mut socket = WebSocket::from_raw_socket(
+            Flood { pings_left: pings },
+            Role::Server,
+            Some(socket_limits()),
+        );
+        let mut read = 0;
+        loop {
+            match socket.read() {
+                Ok(tungstenite::Message::Ping(_)) => read += 1,
+                Err(WsError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => break,
+                other => panic!("{other:?}"),
+            }
+        }
+        // Reading went on all the while: the server keeps hearing the device.
+        assert_eq!(read, pings);
+        let next = socket.write(tungstenite::Message::Text("{}".into()));
+        assert!(matches!(next, Err(WsError::WriteBufferFull(_))), "{next:?}");
     }
 }
