@@ -13,7 +13,9 @@
 //!
 //! 1. A new key and its `enrolling` record are on disk **before** the key is shown to the
 //!    server. If the answer is lost, the agent enrolls again with the same key and the same
-//!    token and the server gives the same device back. A key the server stored and the
+//!    token and the server gives the same device back, as long as the token is still good
+//!    on the server. Past its deadline, or once it is revoked, the repeat is refused too and
+//!    the machine needs a new token, which means a new key and a new device. A key the server stored and the
 //!    agent forgot would be a device nobody can connect as, and a spent token.
 //! 2. The `enrolled` record is on disk **before** the token file is removed. Until then the
 //!    token is the only way to be told the id again.
@@ -308,8 +310,10 @@ impl<D: Disk> IdentityStore<D> {
             public_key: enrollment.public_key,
             token_sha256: enrollment.token,
         })?;
-        // Only now. Until the id is on disk, the token is the only way to be told it again.
-        self.remove_token();
+        // Only now: until the id is on disk, the token is the only way to be told it again.
+        // And only the token this enrollment was made with. One that arrived in the
+        // meantime is somebody else's decision.
+        self.leftover_token(enrollment.token);
         Ok(())
     }
 
@@ -856,6 +860,22 @@ mod tests {
         let (public_key, _) = enrolling(store(&disk).credentials().unwrap());
         assert_eq!(Some(public_key), disk.public_key());
         assert_eq!(public_key, enrollment.public_key);
+    }
+
+    /// A token that arrived while the enrollment was on its way is another enrollment's,
+    /// and stays where it is.
+    #[test]
+    fn enrolling_removes_its_own_token_and_no_other() {
+        let disk = FakeDisk::with_token(1);
+        let credentials = store(&disk).credentials().unwrap().unwrap();
+        let enrollment = credentials.enrollment().unwrap();
+
+        disk.put_token(&token(2).expose_hex());
+        store(&disk).enrolled(&enrollment, device_id()).unwrap();
+
+        assert_eq!(disk.files().token, Some(token(2).expose_hex()));
+        assert!(!disk.writes().contains(&Write::RemoveToken));
+        assert_eq!(enrolled(store(&disk).credentials().unwrap()).1, device_id());
     }
 
     /// The token file could not be removed: the device is enrolled all the same, and the

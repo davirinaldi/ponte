@@ -41,5 +41,10 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
 ## Accepted risks (for now)
 
 - Phase 1 runs without code signing on development builds.
+- Until M2 the agent's device key and enrollment token are plain files with whatever
+  permissions their folder gives them. Under `C:\ProgramData` every local user can read
+  them, and can create files beside them. M2 gives the data directory an access list of
+  its own (SYSTEM and administrators only), refuses one that others can write to, and keeps
+  the key under DPAPI for the SYSTEM account rather than for the whole machine (T6).
 - Lexical path checks alone do not stop junctions; the execution-time check lands with the
   first file primitive (milestone M2).

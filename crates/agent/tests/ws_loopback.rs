@@ -12,7 +12,6 @@
 
 mod common;
 
-use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,64 +22,14 @@ use ponte_agent::Timing;
 use ponte_protocol::{AgentToServer, ProtocolVersion, PublicKey, ServerToAgent};
 use ponte_server::agents::{DeviceStatus, TokenHash};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 
 use common::{
-    Machine, RunningAgent, challenge, eventually, fast, listen, record, serve, soon, store_with,
-    token,
+    Machine, RunningAgent, challenge, eventually, fake_server, fast, listen, message, newest,
+    record, serve, soon, store_with, token,
 };
-
-fn newest() -> String {
-    ProtocolVersion::supported().next().unwrap().subprotocol()
-}
-
-/// A WebSocket server that answers every upgrade by selecting `select`, one header per
-/// name, whatever was offered, and then hands the connection to `then`.
-// The signature of the callback is the library's: it is the one that makes the error large.
-#[allow(clippy::result_large_err)]
-async fn fake_server<F, Fut>(select: &[&str], then: F) -> SocketAddr
-where
-    F: Fn(WebSocketStream<TcpStream>) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = ()> + Send,
-{
-    let (listener, addr) = listen().await;
-    let select: Vec<String> = select.iter().map(|name| (*name).to_owned()).collect();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let select = select.clone();
-            let callback = move |_: &Request, mut response: Response| {
-                for name in &select {
-                    response
-                        .headers_mut()
-                        .append("sec-websocket-protocol", name.parse().unwrap());
-                }
-                Ok::<_, ErrorResponse>(response)
-            };
-            if let Ok(socket) = accept_hdr_async(stream, callback).await {
-                then(socket).await;
-            }
-        }
-    });
-    addr
-}
-
-/// The next message the agent sends on `socket`, if it sends one before it leaves.
-async fn message(socket: &mut WebSocketStream<TcpStream>) -> Option<AgentToServer> {
-    loop {
-        match timeout(Duration::from_secs(10), socket.next()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                return Some(serde_json::from_str(text.as_str()).unwrap());
-            }
-            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
-            _ => return None,
-        }
-    }
-}
 
 /// The whole of M1 from the agent's side: a machine with a token and nothing else ends
 /// up as a device the server knows, online, with telemetry, and with no token left.

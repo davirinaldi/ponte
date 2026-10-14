@@ -49,11 +49,13 @@ use tracing::{debug, error, info, warn};
 pub use config::{AgentConfig, ConfigError, InvalidServerUrl, ServerUrl};
 pub use platform::NAME as PLATFORM;
 
+use config::Security;
 use handshake::{About, Accepted};
 use identity::{DataDir, IdentityStore};
 use platform::keystore;
 use session::SessionEnd;
 use telemetry::Collector;
+use tokio::task::JoinHandle;
 use transport::{Socket, Tls};
 use wire::Message;
 
@@ -171,6 +173,15 @@ fn failures_after(failures: u32, outcome: Outcome, stable_session: Duration) -> 
     }
 }
 
+/// A task that is cancelled when its handle goes, instead of being left to run.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 type Sink = SplitSink<Socket, Message>;
 type Stream = SplitStream<Socket>;
 
@@ -202,6 +213,13 @@ impl Agent {
             warn!(
                 "the device key is stored without encryption: this build is for development \
                  only (ADR-0008)"
+            );
+        }
+        if self.url.security() == Security::PlainLoopback {
+            warn!(
+                "server_url is plain ws:// to this machine: the token and the handshake are not \
+                 encrypted, and any local process that takes the port first receives them. For \
+                 development only"
             );
         }
         self.collector.warm_up();
@@ -278,6 +296,7 @@ impl Agent {
                 error!(%error, "the device identity could not be read");
                 return Err(Outcome::Failed);
             }
+            // Only in a build that unwinds: a release build ends the process on a panic.
             Err(_) => {
                 error!("reading the device identity failed");
                 return Err(Outcome::Failed);
@@ -285,11 +304,30 @@ impl Agent {
         };
         let enrolling = credentials.enrollment().is_some();
 
-        let connected = timeout(self.timing.connect, transport::connect(&self.url, tls)).await;
+        let tls = match self.url.security() {
+            Security::Tls => match tls.config() {
+                Ok(config) => Some(config),
+                Err(error) => {
+                    warn!(server = %self.url, %error, "connection failed");
+                    return Err(Outcome::Failed);
+                }
+            },
+            Security::PlainLoopback => None,
+        };
+        // A task of its own, because checking a certificate can block the thread it runs on
+        // (see `transport::connect`). The deadline and the stop signal apply to it all the
+        // same, and dropping the guard cancels what is left of the attempt.
+        let mut attempt = AbortOnDrop(tokio::spawn(transport::connect(self.url.clone(), tls)));
+        let connected = timeout(self.timing.connect, &mut attempt.0).await;
         let (version, socket) = match connected {
-            Ok(Ok(connection)) => connection,
-            Ok(Err(error)) => {
+            Ok(Ok(Ok(connection))) => connection,
+            Ok(Ok(Err(error))) => {
                 warn!(server = %self.url, %error, "connection failed");
+                return Err(Outcome::Failed);
+            }
+            // Only in a build that unwinds: a release build ends the process on a panic.
+            Ok(Err(_)) => {
+                error!(server = %self.url, "connecting failed");
                 return Err(Outcome::Failed);
             }
             Err(_) => {
@@ -330,6 +368,7 @@ impl Agent {
                         error!(%error, "enrolled, and the device id could not be stored");
                         Err(Outcome::Failed)
                     }
+                    // Only in a build that unwinds, like the one above.
                     Err(_) => {
                         error!("enrolled, and storing the device id failed");
                         Err(Outcome::Failed)

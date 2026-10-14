@@ -49,8 +49,9 @@ impl Collector {
     }
 }
 
-/// A panic in an earlier reading leaves nothing half-written that matters: everything is
-/// read again each time.
+/// The lock of the probe. A release build ends the process on a panic, so a poisoned lock
+/// only happens in a build that unwinds, and even then nothing in it is half-written that
+/// matters: everything is read again each time.
 fn locked(probe: &Mutex<Option<Probe>>) -> std::sync::MutexGuard<'_, Option<Probe>> {
     probe.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -65,6 +66,7 @@ impl Collect for Collector {
         .await;
         match reading {
             Ok(reading) => Some(snapshot_of(reading, Utc::now())),
+            // Only in a build that unwinds: a release build ends the process on a panic.
             Err(_) => {
                 warn!("reading the machine's telemetry failed: this heartbeat is skipped");
                 None
