@@ -54,6 +54,7 @@ fn every_command_parses() {
     let device = DeviceId::from_uuid(Uuid::parse_str(CUSTOMER).unwrap());
     assert_eq!(parse(Vec::new()), Ok(Command::Serve));
     assert_eq!(parsed("--help"), Ok(Command::Help));
+    assert_eq!(parsed("migrate"), Ok(Command::Migrate));
     assert_eq!(
         parse([
             OsString::from("customer"),
@@ -127,6 +128,7 @@ fn anything_else_is_refused() {
         "customer",
         "customer create",
         "customer delete x",
+        "migrate now",
         &format!("token create {CUSTOMER}"),
         &format!("token create {CUSTOMER} --out"),
         &format!("token create {CUSTOMER} --out a --out b"),
@@ -347,4 +349,136 @@ async fn lists_show_one_line_per_item() {
     let (_, out) = run_on(&store, Command::TokenList { customer: None }).await;
     assert!(out.contains("1/2 used"), "{out}");
     assert!(out.ends_with("valid\n"), "{out}");
+}
+
+/// A store whose every call fails, the way a database does when its answer is lost after
+/// it committed: nobody can tell whether the change happened.
+struct Down;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the store is down")]
+struct DownError;
+
+impl DeviceStore for Down {
+    type Error = DownError;
+
+    async fn enroll(&self, _: EnrollRequest, _: DateTime<Utc>) -> Result<EnrollOutcome, DownError> {
+        Err(DownError)
+    }
+
+    async fn device(&self, _: DeviceId) -> Result<Option<crate::agents::Device>, DownError> {
+        Err(DownError)
+    }
+
+    async fn session_started(
+        &self,
+        _: DeviceId,
+        _: crate::agents::SessionId,
+        _: &crate::agents::AgentInfo,
+        _: DateTime<Utc>,
+    ) -> Result<Option<DeviceStatus>, DownError> {
+        Err(DownError)
+    }
+
+    async fn heartbeat(
+        &self,
+        _: DeviceId,
+        _: &ponte_protocol::TelemetrySnapshot,
+        _: DateTime<Utc>,
+    ) -> Result<Option<DeviceStatus>, DownError> {
+        Err(DownError)
+    }
+
+    async fn session_ended(
+        &self,
+        _: DeviceId,
+        _: crate::agents::SessionId,
+        _: DateTime<Utc>,
+    ) -> Result<(), DownError> {
+        Err(DownError)
+    }
+}
+
+impl DeviceAdmin for Down {
+    async fn add_customer(&self, _: &CustomerName) -> Result<Option<CustomerId>, DownError> {
+        Err(DownError)
+    }
+
+    async fn customers(&self) -> Result<Vec<crate::agents::Customer>, DownError> {
+        Err(DownError)
+    }
+
+    async fn issue_token(&self, _: TokenHash, _: TokenGrant) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn revoke_token(&self, _: &TokenHash) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn token(&self, _: &TokenHash) -> Result<Option<TokenInfo>, DownError> {
+        Err(DownError)
+    }
+
+    async fn tokens(&self, _: Option<CustomerId>) -> Result<Vec<TokenInfo>, DownError> {
+        Err(DownError)
+    }
+
+    async fn approve_device(&self, _: DeviceId) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn revoke_device(&self, _: DeviceId) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn device_record(&self, _: DeviceId) -> Result<Option<DeviceRecord>, DownError> {
+        Err(DownError)
+    }
+
+    async fn devices(&self, _: Option<CustomerId>) -> Result<Vec<DeviceRecord>, DownError> {
+        Err(DownError)
+    }
+}
+
+/// RF-40: a change that may have happened is audited as one, with its outcome unknown.
+/// Otherwise a lost answer leaves an approval, a revocation or a token with no record.
+#[tokio::test]
+async fn a_change_whose_outcome_is_unknown_is_still_audited() {
+    let (logs, _guard) = Logs::capture();
+    let device = DeviceId::new();
+    let path = fresh_path();
+    for command in [
+        Command::CustomerCreate {
+            name: "Acme Software".parse().unwrap(),
+        },
+        Command::TokenCreate {
+            customer: CustomerId::new(),
+            out: path.clone(),
+            uses: NonZeroU32::MIN,
+            hours: 1,
+        },
+        Command::DeviceApprove { device },
+        Command::DeviceRevoke { device },
+    ] {
+        let mut out = Vec::new();
+        let failed = run(&Down, command, &mut out, at(0)).await;
+        assert!(failed.is_err());
+        assert!(out.is_empty());
+    }
+    assert!(!path.exists());
+
+    let logs = logs.text();
+    for event in [
+        "customer_added",
+        "token_issued",
+        "device_approved",
+        "device_revoked",
+    ] {
+        let line = logs
+            .lines()
+            .find(|line| line.contains(event))
+            .unwrap_or_else(|| panic!("{event} not audited: {logs}"));
+        assert!(line.contains("outcome=Unknown"), "{line}");
+    }
 }

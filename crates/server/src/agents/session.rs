@@ -21,6 +21,7 @@ use axum::extract::ws::Message;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use ponte_protocol::{
     AgentToServer, DeviceId, MAX_HANDSHAKE_MESSAGE_BYTES, Nonce, ProtocolVersion, ServerToAgent,
+    TelemetrySnapshot,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -344,6 +345,12 @@ where
         };
         match message {
             AgentToServer::Heartbeat { telemetry } => {
+                if !is_possible(&telemetry) {
+                    if drops.log_this_one(id) {
+                        warn!(device = %id, "heartbeat dropped: a reading no machine can have");
+                    }
+                    continue;
+                }
                 match gateway.store.heartbeat(id, &telemetry, gateway.now()).await {
                     Ok(Some(DeviceStatus::Active | DeviceStatus::Pending)) => {
                         check_at = Instant::now() + interval;
@@ -366,6 +373,13 @@ where
             }
         }
     }
+}
+
+/// Whether every reading is one a machine can have. The wire format takes any number, and
+/// JSON turns a number past the range of an `f32` into infinity: a store writes that as
+/// `null` and cannot read it back.
+fn is_possible(telemetry: &TelemetrySnapshot) -> bool {
+    (0.0..=100.0).contains(&telemetry.cpu_percent)
 }
 
 /// Counts what a session dropped, so that only the first few are logged.
@@ -798,6 +812,31 @@ mod tests {
             store.record(id).unwrap().telemetry == Some(telemetry(5))
         })
         .await;
+    }
+
+    /// A reading no machine can have is not kept. `1e39` parses as an infinite `f32`, which
+    /// a store writes as `null` and can never read back: one device would break every
+    /// listing that holds it.
+    #[tokio::test(start_paused = true)]
+    async fn a_heartbeat_with_an_impossible_reading_is_dropped() {
+        let (gateway, store, device, id) = enrolled().await;
+        let peer = authenticate(&gateway, &device, id).await;
+        let (logs, _guard) = Logs::capture();
+
+        let normal = serde_json::to_string(&heartbeat(1)).unwrap();
+        let field = format!("\"cpu_percent\":{}", telemetry(1).cpu_percent);
+        assert!(normal.contains(&field), "{normal}");
+        for cpu in ["1e39", "-1e39", "-5", "100.5"] {
+            let impossible = normal.replace(&field, &format!("\"cpu_percent\":{cpu}"));
+            peer.send(Message::Text(impossible.into()));
+        }
+        peer.send(text(&heartbeat(2)));
+        eventually("the good heartbeat is kept", || {
+            store.record(id).unwrap().telemetry == Some(telemetry(2))
+        })
+        .await;
+        assert!(logs.text().contains("heartbeat dropped"), "{}", logs.text());
+        assert!(gateway.registry.current(id).is_some());
     }
 
     /// ADR-0006: after the handshake, a message the server cannot read is logged and

@@ -196,6 +196,25 @@ async fn pg_starting_the_server_marks_every_device_offline(
     assert_eq!(store.clear_online().await.unwrap(), 0);
 }
 
+/// `clear_online` assumes it is the only server: a second one, started by mistake, would
+/// mark every connected device offline. Only one may hold the claim.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_only_one_server_serves_a_database(pool: PgPoolOptions, options: PgConnectOptions) {
+    let first = store(pool.clone(), options.clone()).await;
+    let second = store(pool, options).await;
+
+    let claim = first.claim_server().await.unwrap();
+    let refused = second.claim_server().await.unwrap_err();
+    assert_eq!(refused.kind(), ErrorKind::AnotherServer);
+
+    drop(claim);
+    eventually("the claim is given back", || async {
+        second.claim_server().await.is_ok()
+    })
+    .await;
+}
+
 /// A row the code cannot read is an error, never a guess.
 #[sqlx::test]
 #[ignore = "needs PostgreSQL: DATABASE_URL"]
@@ -215,6 +234,40 @@ async fn pg_a_row_that_does_not_read_is_an_error(pool: PgPoolOptions, options: P
     assert!(!error.to_string().contains("break"), "{error}");
     // What the handshake reads does not include the labels.
     assert!(store.device(device_id).await.unwrap().is_some());
+}
+
+/// Telemetry written by an older server, or one that let an impossible reading through,
+/// costs that device its last reading, not every listing that holds it.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_telemetry_that_does_not_read_is_left_out(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let mut raw = PgConnection::connect_with(&options).await.unwrap();
+    let store = store(pool, options).await;
+    issue(&store, 1, 2).await;
+    let broken = enrolled(&store, 1, [10; 32]).await;
+    let fine = enrolled(&store, 1, [11; 32]).await;
+    sqlx::query(
+        "UPDATE devices SET telemetry = '{\"cpu_percent\": null, \"SECRET\": 1}' WHERE id = $1",
+    )
+    .bind(broken.as_uuid())
+    .execute(&mut raw)
+    .await
+    .unwrap();
+    let (logs, _guard) = Logs::capture();
+
+    let devices = store.devices(None).await.unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(devices.iter().all(|device| device.telemetry.is_none()));
+    let record = store.device_record(broken).await.unwrap().unwrap();
+    assert_eq!(record.telemetry, None);
+    assert!(store.device_record(fine).await.unwrap().is_some());
+
+    let logs = logs.text();
+    assert!(logs.contains(&broken.to_string()), "{logs}");
+    assert!(!logs.contains("SECRET"), "{logs}");
 }
 
 /// A database that does not answer frees the call within the limit. The handshake waits

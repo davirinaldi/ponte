@@ -42,33 +42,40 @@ async fn main() -> anyhow::Result<ExitCode> {
     }
 
     // No database, no server: there is nothing to check a device against (invariant 7).
-    let url =
-        std::env::var("DATABASE_URL").context("DATABASE_URL must name the PostgreSQL database")?;
+    // The value is never shown: it holds a password, and so may the reason it is unusable.
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        anyhow::bail!("DATABASE_URL must name the PostgreSQL database, as valid text");
+    };
     let store = PgStore::connect(&url).await?;
     drop(url);
-    store.migrate().await?;
 
-    if command == Command::Serve {
-        serve(store).await?;
-    } else {
-        let mut out = std::io::stdout().lock();
-        admin::run(&store, command, &mut out, Utc::now()).await?;
+    match command {
+        Command::Serve => serve(store).await?,
+        Command::Migrate => store.migrate().await?,
+        command => {
+            let mut out = std::io::stdout().lock();
+            admin::run(&store, command, &mut out, Utc::now()).await?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
 
 async fn serve(store: PgStore) -> anyhow::Result<()> {
+    // The port first: a second server started by mistake stops here, before it touches
+    // anything. The claim covers a second one on another port or host.
+    let bind = std::env::var("PONTE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
+    let listener = tokio::net::TcpListener::bind(&bind)
+        .await
+        .with_context(|| format!("binding {bind}"))?;
+    let _claim = store.claim_server().await?;
+    store.migrate().await?;
+
     // Sessions open when the server last stopped ended without a record.
     let cleared = store.clear_online().await?;
     info!(
         devices = cleared,
         "devices left online by the last run marked offline"
     );
-
-    let bind = std::env::var("PONTE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());
-    let listener = tokio::net::TcpListener::bind(&bind)
-        .await
-        .with_context(|| format!("binding {bind}"))?;
     info!(%bind, "server listening");
 
     axum::serve(listener, ponte_server::router_with(store))

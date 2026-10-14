@@ -48,3 +48,9 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
   the key under DPAPI for the SYSTEM account rather than for the whole machine (T6).
 - Lexical path checks alone do not stop junctions; the execution-time check lands with the
   first file primitive (milestone M2).
+- Until M3 the audit trail is log lines. What an operator does through the server's
+  subcommands (issue or revoke a token, approve or revoke a device) is written to the
+  stderr of that command, which the operator controls, so whoever runs the server must
+  capture it to storage the operator cannot rewrite. An insider who holds `DATABASE_URL`
+  can change the tables directly in any case: M3 brings a hash-chained audit log written
+  in the same transaction as the change, under credentials of its own (RF-40).

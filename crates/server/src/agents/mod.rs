@@ -35,7 +35,7 @@ use registry::Registry;
 
 pub use audit::TARGET as AUDIT_TARGET;
 
-pub use pg::{ErrorKind as PgErrorKind, PgStore, PgStoreError, SqlState};
+pub use pg::{ErrorKind as PgErrorKind, PgStore, PgStoreError, ServerClaim, SqlState};
 
 pub use store::{
     AgentInfo, Customer, CustomerId, CustomerName, Device, DeviceAdmin, DeviceRecord, DeviceStatus,

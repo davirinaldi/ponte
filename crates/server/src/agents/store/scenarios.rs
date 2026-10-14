@@ -28,6 +28,7 @@ macro_rules! for_each_scenario {
         $test!(a_repeated_enrollment_with_a_revoked_token_is_refused);
         $test!(a_key_enrolls_once);
         $test!(a_revoked_device_does_not_enroll_again);
+        $test!(revoking_a_device_takes_it_offline);
         $test!(only_a_pending_device_can_be_approved);
         $test!(telemetry_is_kept_for_an_active_device_only);
         $test!(a_replaced_session_does_not_mark_the_device_offline);
@@ -345,6 +346,27 @@ pub(crate) async fn a_revoked_device_does_not_enroll_again<S: DeviceAdmin>(store
         EnrollOutcome::Refused(EnrollRefusal::DeviceRevoked)
     );
     assert_eq!(uses_left(store, 1).await, Some(4));
+}
+
+/// A revoked device is never shown as connected, even if the end of its last session is
+/// never recorded. The session itself ends at its next status check.
+pub(crate) async fn revoking_a_device_takes_it_offline<S: DeviceAdmin>(store: &S) {
+    issue(store, 1, 1).await;
+    let device = enrolled(store, 1, 10).await;
+    let session = SessionId::new();
+    store
+        .session_started(device, session, &about(), at(1))
+        .await
+        .unwrap();
+    assert_eq!(record_of(store, device).await.online, Some(session));
+
+    assert!(store.revoke_device(device).await.unwrap());
+    let record = record_of(store, device).await;
+    assert_eq!(record.online, None);
+    assert_eq!(record.last_seen, Some(at(1)));
+    // The session's own end changes nothing more.
+    store.session_ended(device, session, at(2)).await.unwrap();
+    assert_eq!(record_of(store, device).await.last_seen, Some(at(1)));
 }
 
 pub(crate) async fn only_a_pending_device_can_be_approved<S: DeviceAdmin>(store: &S) {

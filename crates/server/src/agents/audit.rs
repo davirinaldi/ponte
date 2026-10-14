@@ -54,25 +54,41 @@ pub(crate) enum AuditEvent {
         reason: SessionEnd,
     },
     /// What an operator did, through the server's subcommands. There are no accounts yet,
-    /// so the actor is whoever runs them on the server host (`actor = "server_cli"`).
+    /// so the actor is whoever runs them on the server host (`actor = "server_cli"`). A
+    /// change the store may or may not have made is recorded too, as [`Outcome::Unknown`].
     CustomerAdded {
-        customer: CustomerId,
+        /// `None` when the store failed before it said which id it gave.
+        customer: Option<CustomerId>,
+        outcome: Outcome,
     },
     TokenIssued {
         token: TokenHash,
         customer: CustomerId,
         max_uses: NonZeroU32,
         expires_at: DateTime<Utc>,
+        outcome: Outcome,
     },
     TokenRevoked {
         token: TokenHash,
+        outcome: Outcome,
     },
     DeviceApproved {
         device: DeviceId,
+        outcome: Outcome,
     },
     DeviceRevoked {
         device: DeviceId,
+        outcome: Outcome,
     },
+}
+
+/// Whether an operator's change happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Done,
+    /// The store failed. A database can commit and lose its answer, so the change may
+    /// have happened all the same.
+    Unknown,
 }
 
 /// The actor of the events an operator causes, until there are accounts (M3).
@@ -115,15 +131,17 @@ pub(crate) fn record(event: &AuditEvent) {
         } => {
             info!(target: TARGET, event = "session_ended", %device, %session, ?reason);
         }
-        AuditEvent::CustomerAdded { customer } => {
+        AuditEvent::CustomerAdded { customer, outcome } => {
             // The id, not the name: the name is for people, the log is for finding things.
-            info!(target: TARGET, event = "customer_added", actor = OPERATOR, %customer);
+            let customer = customer.map(tracing::field::display);
+            info!(target: TARGET, event = "customer_added", actor = OPERATOR, customer, ?outcome);
         }
         AuditEvent::TokenIssued {
             token,
             customer,
             max_uses,
             expires_at,
+            outcome,
         } => {
             info!(
                 target: TARGET,
@@ -133,16 +151,17 @@ pub(crate) fn record(event: &AuditEvent) {
                 %customer,
                 max_uses = max_uses.get(),
                 %expires_at,
+                ?outcome,
             );
         }
-        AuditEvent::TokenRevoked { token } => {
-            info!(target: TARGET, event = "token_revoked", actor = OPERATOR, token_hash = %token.short());
+        AuditEvent::TokenRevoked { token, outcome } => {
+            info!(target: TARGET, event = "token_revoked", actor = OPERATOR, token_hash = %token.short(), ?outcome);
         }
-        AuditEvent::DeviceApproved { device } => {
-            info!(target: TARGET, event = "device_approved", actor = OPERATOR, %device);
+        AuditEvent::DeviceApproved { device, outcome } => {
+            info!(target: TARGET, event = "device_approved", actor = OPERATOR, %device, ?outcome);
         }
-        AuditEvent::DeviceRevoked { device } => {
-            info!(target: TARGET, event = "device_revoked", actor = OPERATOR, %device);
+        AuditEvent::DeviceRevoked { device, outcome } => {
+            info!(target: TARGET, event = "device_revoked", actor = OPERATOR, %device, ?outcome);
         }
     }
 }

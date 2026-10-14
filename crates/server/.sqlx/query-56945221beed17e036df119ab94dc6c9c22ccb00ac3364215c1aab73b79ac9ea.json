@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE devices SET status = 'revoked', online_session = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56945221beed17e036df119ab94dc6c9c22ccb00ac3364215c1aab73b79ac9ea"
+}

@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! ponte-server                                         serve agents (the default)
+//! ponte-server migrate                                 bring the schema up to date
 //! ponte-server customer create <name>
 //! ponte-server customer list
 //! ponte-server token create <customer-id> --out <file> [--uses N] [--hours H]
@@ -29,7 +30,7 @@ use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
 use ponte_protocol::{DeviceId, EnrollmentToken};
 use uuid::Uuid;
 
-use crate::agents::audit::{self, AuditEvent};
+use crate::agents::audit::{self, AuditEvent, Outcome};
 use crate::agents::{
     CustomerId, CustomerName, DeviceAdmin, DeviceRecord, TokenGrant, TokenHash, TokenInfo,
 };
@@ -38,6 +39,7 @@ use crate::agents::{
 pub const USAGE: &str = "\
 usage:
   ponte-server                                         serve agents
+  ponte-server migrate                                 bring the schema up to date
   ponte-server customer create <name>
   ponte-server customer list
   ponte-server token create <customer-id> --out <file> [--uses N] [--hours H]
@@ -47,7 +49,8 @@ usage:
   ponte-server device approve <device-id>
   ponte-server device revoke <device-id>
 
-DATABASE_URL names the PostgreSQL database. A token is written to the --out file only,
+DATABASE_URL names the PostgreSQL database; serving and migrate bring its schema up to
+date, the other subcommands only use it. A token is written to the --out file only,
 for the agent's enrollment_token_file; --uses is 1 to 10000 (default 1), --hours 1 to 720
 (default 24).";
 
@@ -62,6 +65,7 @@ const DEFAULT_HOURS: u32 = 24;
 pub enum Command {
     Serve,
     Help,
+    Migrate,
     CustomerCreate {
         name: CustomerName,
     },
@@ -116,6 +120,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
     match args.as_slice() {
         [] => Ok(Command::Serve),
         ["help" | "--help" | "-h"] => Ok(Command::Help),
+        ["migrate"] => Ok(Command::Migrate),
         ["customer", "create", name] => Ok(Command::CustomerCreate {
             name: name
                 .parse()
@@ -262,8 +267,8 @@ pub enum AdminError<E: std::error::Error + 'static> {
     Output(io::ErrorKind),
 }
 
-/// Runs one command other than [`Command::Serve`] and [`Command::Help`], writing what it
-/// shows to `out`.
+/// Runs one command other than [`Command::Serve`], [`Command::Help`] and
+/// [`Command::Migrate`], writing what it shows to `out`.
 pub async fn run<S: DeviceAdmin>(
     store: &S,
     command: Command,
@@ -273,14 +278,18 @@ pub async fn run<S: DeviceAdmin>(
     let store_failed = AdminError::Store;
     let written = |error: io::Error| AdminError::Output(error.kind());
     match command {
-        Command::Serve | Command::Help => {}
+        Command::Serve | Command::Help | Command::Migrate => {}
         Command::CustomerCreate { name } => {
-            let customer = store
-                .add_customer(&name)
-                .await
-                .map_err(store_failed)?
-                .ok_or(AdminError::CustomerExists)?;
-            audit::record(&AuditEvent::CustomerAdded { customer });
+            let added = store.add_customer(&name).await;
+            let customer = may_have_changed(added, || AuditEvent::CustomerAdded {
+                customer: None,
+                outcome: Outcome::Unknown,
+            })?
+            .ok_or(AdminError::CustomerExists)?;
+            audit::record(&AuditEvent::CustomerAdded {
+                customer: Some(customer),
+                outcome: Outcome::Done,
+            });
             writeln!(out, "{customer}").map_err(written)?;
         }
         Command::CustomerList => {
@@ -306,6 +315,7 @@ pub async fn run<S: DeviceAdmin>(
                 customer,
                 max_uses: uses,
                 expires_at: grant.expires_at,
+                outcome: Outcome::Done,
             });
             writeln!(
                 out,
@@ -331,10 +341,18 @@ pub async fn run<S: DeviceAdmin>(
             if matching.next().is_some() {
                 return Err(AdminError::AmbiguousToken);
             }
-            if !store.revoke_token(&token).await.map_err(store_failed)? {
+            let revoked = store.revoke_token(&token).await;
+            let unknown = || AuditEvent::TokenRevoked {
+                token,
+                outcome: Outcome::Unknown,
+            };
+            if !may_have_changed(revoked, unknown)? {
                 return Err(AdminError::UnknownToken);
             }
-            audit::record(&AuditEvent::TokenRevoked { token });
+            audit::record(&AuditEvent::TokenRevoked {
+                token,
+                outcome: Outcome::Done,
+            });
             writeln!(out, "token {} revoked", token.short()).map_err(written)?;
         }
         Command::DeviceList { customer } => {
@@ -343,18 +361,34 @@ pub async fn run<S: DeviceAdmin>(
             }
         }
         Command::DeviceApprove { device } => {
-            if !store.approve_device(device).await.map_err(store_failed)? {
+            let approved = store.approve_device(device).await;
+            let unknown = || AuditEvent::DeviceApproved {
+                device,
+                outcome: Outcome::Unknown,
+            };
+            if !may_have_changed(approved, unknown)? {
                 let known = store.device_record(device).await.map_err(store_failed)?;
                 return Err(known.map_or(AdminError::UnknownDevice, |_| AdminError::NotPending));
             }
-            audit::record(&AuditEvent::DeviceApproved { device });
+            audit::record(&AuditEvent::DeviceApproved {
+                device,
+                outcome: Outcome::Done,
+            });
             writeln!(out, "device {device} approved").map_err(written)?;
         }
         Command::DeviceRevoke { device } => {
-            if !store.revoke_device(device).await.map_err(store_failed)? {
+            let revoked = store.revoke_device(device).await;
+            let unknown = || AuditEvent::DeviceRevoked {
+                device,
+                outcome: Outcome::Unknown,
+            };
+            if !may_have_changed(revoked, unknown)? {
                 return Err(AdminError::UnknownDevice);
             }
-            audit::record(&AuditEvent::DeviceRevoked { device });
+            audit::record(&AuditEvent::DeviceRevoked {
+                device,
+                outcome: Outcome::Done,
+            });
             writeln!(
                 out,
                 "device {device} revoked: a session it has ends within a minute"
@@ -363,6 +397,19 @@ pub async fn run<S: DeviceAdmin>(
         }
     }
     Ok(())
+}
+
+/// The answer of a call that changes the store. When it failed, the change may have
+/// happened all the same (a database can commit and lose its answer), so `unknown` is
+/// audited before the error is returned (RF-40).
+fn may_have_changed<T, E: std::error::Error + 'static>(
+    result: Result<T, E>,
+    unknown: impl FnOnce() -> AuditEvent,
+) -> Result<T, AdminError<E>> {
+    result.map_err(|error| {
+        audit::record(&unknown());
+        AdminError::Store(error)
+    })
 }
 
 /// Makes a token, writes it to a new file at `path`, and issues it. If the store does not
@@ -390,6 +437,15 @@ async fn issue_to_file<S: DeviceAdmin>(
         }
         Err(error) => {
             let _ = std::fs::remove_file(path);
+            // The token may be in the store all the same. Nobody holds it any more, but the
+            // record says it was issued.
+            audit::record(&AuditEvent::TokenIssued {
+                token: hash,
+                customer: grant.customer,
+                max_uses: grant.max_uses,
+                expires_at: grant.expires_at,
+                outcome: Outcome::Unknown,
+            });
             Err(AdminError::Store(error))
         }
     }

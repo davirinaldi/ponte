@@ -91,10 +91,15 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   existing one). The terminal and the log get the first eight bytes of its hash, which is
   also how `token revoke` and audit events name it. Never print a token, never take one
   as an argument, never log one.
-- Everything that changes state is an audit event with `actor = "server_cli"` (RF-40).
+- Everything that changes state is an audit event with `actor = "server_cli"` (RF-40),
+  also when the store failed (`outcome=Unknown`): a database can commit and lose its
+  answer. Until M3 these lines go to the command's stderr, which must be captured (see
+  "Accepted risks" in `docs/threat-model.md`).
 - Answers go to stdout, the log to stderr. Errors name what failed, never a secret.
-- The server refuses to start without `DATABASE_URL` (invariant 7). It migrates the
-  schema and marks every device offline before it listens.
+- The server refuses to start without `DATABASE_URL` (invariant 7), and never shows its
+  value. Serving binds the port first, then claims the database (`claim_server`, an
+  advisory lock held for the life of the process), migrates, and marks every device
+  offline. Only serving and `migrate` change the schema; the other subcommands do not.
 
 ## Database (`src/agents/pg.rs`, `migrations/`)
 
@@ -113,9 +118,18 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
 - **`PgStoreError` names the operation and the kind of failure, never a value.** Never put
   a `sqlx::Error` in a log line or an error message: the database's text can quote the
   values of the statement, and the URL holds a password.
-- **Unknown values in a row are errors** (`CorruptRow`), never a default.
+- **Unknown values in a row are errors** (`CorruptRow`), never a default. The one
+  exception is stored telemetry: a reading that does not decode is left out of that
+  device's record, with a warning, so one device cannot break every listing. The session
+  drops a heartbeat with a reading no machine can have before it reaches the store.
+- **A database on another host needs `sslmode=verify-full`.** sqlx's default checks no
+  certificate and falls back to plain text without a word; `connect` refuses it.
+- **A connection given back to the pool is checked with a time limit** (`after_release`):
+  sqlx's own check has none, and on a network that drops packets every place in the pool
+  would wait for TCP to give up. Its error is fixed text, never the database's.
 - `clear_online` runs when the server starts: sessions that were open when it stopped
-  ended without a record. It assumes one server process per database.
+  ended without a record. It is only safe for the process that holds `claim_server`.
+  Revoking a device also marks it offline.
 
 Working with it (Docker running, Postgres from `deploy/docker-compose.yml`):
 
