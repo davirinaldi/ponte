@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pid AS \"pid!\", pg_postmaster_start_time() AS \"since!\"\n                           FROM pg_locks\n                           WHERE locktype = 'advisory' AND granted AND objsubid = 1\n                             AND pid IS NOT NULL\n                             AND database = (SELECT oid FROM pg_database\n                                             WHERE datname = current_database())\n                             AND classid = ($1::bigint >> 32)::oid\n                             AND objid = ($1::bigint & 4294967295)::oid",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pid!",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pg_locks",
+            "name": "pid"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "since!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "c3df1a138337d5ce0e69f28d6709ee8743443da83a42d9b0efe890a5c62973a5"
+}
