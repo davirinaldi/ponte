@@ -254,6 +254,15 @@ async fn start<'a, D: DeviceStore>(
         }
         Err(error) => {
             error!(device = %id, %error, "the device store failed at the start of a session");
+            // The store may have written before it failed. Ending this session is harmless
+            // if it did not: the store only ends the session it holds.
+            if let Err(error) = gateway
+                .store
+                .session_ended(id, session, gateway.now())
+                .await
+            {
+                error!(device = %id, %error, "the device store failed at the end of a session");
+            }
             return None;
         }
     };
@@ -1068,6 +1077,9 @@ mod tests {
         broken: AtomicBool,
         /// Recording the start of a session fails.
         no_sessions: AtomicBool,
+        /// The start of a session is recorded, and then the call fails anyway: a database
+        /// that committed and lost the answer on the way back.
+        start_then_fail: AtomicBool,
         /// The device is revoked just before the start of its session is recorded.
         revoke_at_start: AtomicBool,
         /// An enrollment is stored at once and answered half a minute later.
@@ -1095,6 +1107,7 @@ mod tests {
                 inner: inner.clone(),
                 broken: AtomicBool::new(false),
                 no_sessions: AtomicBool::new(false),
+                start_then_fail: AtomicBool::new(false),
                 revoke_at_start: AtomicBool::new(false),
                 slow_enroll: AtomicBool::new(false),
                 hold_next_start: AtomicBool::new(false),
@@ -1158,6 +1171,9 @@ mod tests {
                 permit.forget();
             }
             let started = self.inner.session_started(id, session, about, now).await;
+            if self.start_then_fail.load(Ordering::SeqCst) {
+                return Err(Broken);
+            }
             started.map_err(never)
         }
 
@@ -1203,6 +1219,25 @@ mod tests {
         let nonce = peer.challenge().await;
         peer.send(text(&device.hello(&nonce, id)));
         peer
+    }
+
+    /// A failed call to a database does not say whether it wrote. A session whose start
+    /// may have been recorded is ended in the store too, or the device would show as
+    /// online, under a session that never began, until it connects again.
+    #[tokio::test(start_paused = true)]
+    async fn a_session_whose_start_failed_is_not_left_online() {
+        let inner = store_with_token(1, 2);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+
+        gateway.store.start_then_fail.store(true, Ordering::SeqCst);
+        let mut peer = hello_at(&gateway, &device, id).await;
+        closed_at_once(&mut peer).await;
+        peer.finished().await;
+
+        assert_eq!(inner.record(id).unwrap().online, None);
+        assert_eq!(gateway.registry.current(id), None);
     }
 
     /// Invariant 7: when the server cannot check, the answer is no.

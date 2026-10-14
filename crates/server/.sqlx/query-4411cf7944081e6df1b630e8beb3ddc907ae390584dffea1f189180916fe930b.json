@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE enrollment_tokens SET uses = uses + 1\n             WHERE hash = $1 AND uses < max_uses RETURNING max_uses",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "max_uses",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "enrollment_tokens",
+            "name": "max_uses"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bytea"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4411cf7944081e6df1b630e8beb3ddc907ae390584dffea1f189180916fe930b"
+}

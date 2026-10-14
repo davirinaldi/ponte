@@ -80,3 +80,39 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
   its own, beside the one built from `RUST_LOG`: a directive could be outranked.
 - Tests run without a socket (`testkit::Peer`) and with a paused clock. Tests named
   `ws_loopback_*` bind `127.0.0.1` and cover only what needs a real socket.
+
+## Database (`src/agents/pg.rs`, `migrations/`)
+
+- **All SQL goes through the `query!` family of macros.** Never build SQL from strings,
+  never `format!` a value into a statement. The macros check every query against the
+  schema at build time; `.sqlx/` keeps what they checked, so builds without a database work
+  (CI sets `SQLX_OFFLINE=true`). Tests may use `sqlx::query` to break rows on purpose.
+- **Each rule of the store traits is one atomic step.** `enroll` is one transaction that
+  locks the token's row (`FOR UPDATE`) before anything else; every other call checks and
+  writes in one statement (`UPDATE ... CASE ... RETURNING status`). A constraint in the
+  schema backs each rule up (`UNIQUE (public_key)`, `uses <= max_uses`, the status values).
+- **The store has its own time limits** (`CALL_LIMIT` on every call, `statement_timeout`
+  and `idle_in_transaction_session_timeout` on every connection, `acquire_timeout` on the
+  pool). The handshake waits on the store outside its deadline, while holding a place among
+  the unauthenticated connections: never remove a limit.
+- **`PgStoreError` names the operation and the kind of failure, never a value.** Never put
+  a `sqlx::Error` in a log line or an error message: the database's text can quote the
+  values of the statement, and the URL holds a password.
+- **Unknown values in a row are errors** (`CorruptRow`), never a default.
+- `clear_online` runs when the server starts: sessions that were open when it stopped
+  ended without a record. It assumes one server process per database.
+
+Working with it (Docker running, Postgres from `deploy/docker-compose.yml`):
+
+```sh
+export DATABASE_URL=postgres://ponte:ponte@127.0.0.1:5432/ponte
+cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features rustls,postgres
+(cd crates/server && sqlx migrate run)                  # bring the dev database up to date
+cargo test -p ponte-server -- --ignored pg_             # tests that need the database
+(cd crates/server && cargo sqlx prepare)                # after changing any query: commit .sqlx/
+(cd crates/server && cargo sqlx prepare --check)        # .sqlx/ matches the queries
+```
+
+The `pg_*` tests are `#[ignore]`d so `cargo test` needs no database; `#[sqlx::test]` gives
+each one a fresh database, migrated. Every scenario in `store/scenarios.rs` runs on both
+stores. Never edit a merged migration: add a new one.

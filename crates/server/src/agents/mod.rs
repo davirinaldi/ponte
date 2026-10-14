@@ -6,13 +6,15 @@
 //! | `session` | One connection from the challenge to the last heartbeat |
 //! | `handshake` | Judges the first message. No socket |
 //! | `registry` | One session per device: a new one replaces the old one |
-//! | `store` | Tokens and devices: the [`DeviceStore`] trait and [`MemoryStore`] |
+//! | `store` | Tokens and devices: the [`DeviceStore`] and [`DeviceAdmin`] traits, [`MemoryStore`] |
+//! | `pg` | The same over PostgreSQL: [`PgStore`] |
 //! | `audit` | The events that change what the server holds about a device |
 //!
 //! Read `crates/server/AGENTS.md` before changing what is accepted, refused or logged here.
 
 mod audit;
 mod handshake;
+mod pg;
 mod registry;
 mod session;
 mod store;
@@ -32,6 +34,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use registry::Registry;
 
 pub use audit::TARGET as AUDIT_TARGET;
+
+pub use pg::{ErrorKind as PgErrorKind, PgStore, PgStoreError, SqlState};
 
 pub use store::{
     AgentInfo, Customer, CustomerId, CustomerName, Device, DeviceAdmin, DeviceRecord, DeviceStatus,

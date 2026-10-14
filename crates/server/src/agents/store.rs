@@ -79,6 +79,12 @@ impl TokenHash {
         Self(Sha256::digest(token.expose_secret()).into())
     }
 
+    /// A hash a store kept.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -212,8 +218,10 @@ pub trait DeviceStore: Send + Sync + 'static {
     /// they take over from each other, so the last call is the session that stays. That
     /// holds within one server process, which is all there is for now.
     ///
-    /// An error means nothing was written: the caller treats the session as never begun
-    /// and does not call [`DeviceStore::session_ended`] for it.
+    /// After an error the caller treats the session as never begun. A store may not know
+    /// whether it wrote (a database can commit and lose the answer), so the caller also
+    /// calls [`DeviceStore::session_ended`] for that session, which changes nothing if the
+    /// device is under another session or none.
     fn session_started(
         &self,
         id: DeviceId,
