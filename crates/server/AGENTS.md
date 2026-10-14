@@ -93,13 +93,15 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   as an argument, never log one.
 - Everything that changes state is an audit event with `actor = "server_cli"` (RF-40),
   also when the store failed (`outcome=Unknown`): a database can commit and lose its
-  answer. Until M3 these lines go to the command's stderr, which must be captured (see
+  answer. Some of those failures changed nothing (a refused statement, no connection),
+  and are recorded anyway: the generic code cannot tell them apart. Until M3 these lines go to the command's stderr, which must be captured (see
   "Accepted risks" in `docs/threat-model.md`).
 - Answers go to stdout, the log to stderr. Errors name what failed, never a secret.
 - The server refuses to start without `DATABASE_URL` (invariant 7), and never shows its
   value. Serving binds the port first, then claims the database (`claim_server`, an
   advisory lock held for the life of the process), migrates, and marks every device
-  offline. Only serving and `migrate` change the schema; the other subcommands do not.
+  offline. `hold_claim` checks the claim every `CLAIM_CHECK` and takes it again if the
+  database dropped it; if another server took it, this one stops. Only serving and `migrate` change the schema; the other subcommands do not.
 
 ## Database (`src/agents/pg.rs`, `migrations/`)
 
@@ -123,10 +125,16 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   device's record, with a warning, so one device cannot break every listing. The session
   drops a heartbeat with a reading no machine can have before it reaches the store.
 - **A database on another host needs `sslmode=verify-full`.** sqlx's default checks no
-  certificate and falls back to plain text without a word; `connect` refuses it.
+  certificate and falls back to plain text without a word; `connect` refuses it. The URL
+  may carry only the parameters in `URL_PARAMETERS`: sqlx logs the value of any other.
+- PostgreSQL 14 or newer (`idle_session_timeout` is set on every connection). A pooler in
+  transaction mode (PgBouncer) in front of it is not supported: the server's claim is a
+  session-level advisory lock.
 - **A connection given back to the pool is checked with a time limit** (`after_release`):
   sqlx's own check has none, and on a network that drops packets every place in the pool
-  would wait for TCP to give up. Its error is fixed text, never the database's.
+  would wait for TCP to give up. Its error is fixed text, never the database's. Two steps
+  of sqlx stay unbounded: its own ping after ours, and the close of a connection past
+  `MAX_LIFETIME`. Both follow a connection that just answered, so they are left as they are.
 - `clear_online` runs when the server starts: sessions that were open when it stopped
   ended without a record. It is only safe for the process that holds `claim_server`.
   Revoking a device also marks it offline.

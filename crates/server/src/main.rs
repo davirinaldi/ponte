@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use anyhow::Context;
 use chrono::Utc;
 use ponte_server::admin::{self, Command};
-use ponte_server::agents::PgStore;
+use ponte_server::agents::{CLAIM_CHECK, PgStore};
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -67,7 +67,7 @@ async fn serve(store: PgStore) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&bind)
         .await
         .with_context(|| format!("binding {bind}"))?;
-    let _claim = store.claim_server().await?;
+    let claim = store.claim_server().await?;
     store.migrate().await?;
 
     // Sessions open when the server last stopped ended without a record.
@@ -78,10 +78,15 @@ async fn serve(store: PgStore) -> anyhow::Result<()> {
     );
     info!(%bind, "server listening");
 
-    axum::serve(listener, ponte_server::router_with(store))
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("serving HTTP")?;
+    let server = axum::serve(listener, ponte_server::router_with(store.clone()))
+        .with_graceful_shutdown(shutdown_signal());
+    tokio::select! {
+        served = server => served.context("serving HTTP")?,
+        // Another server holds the database now: both serving it would undo each other.
+        lost = store.hold_claim(claim, CLAIM_CHECK) => {
+            return Err(lost).context("stopped serving");
+        }
+    }
     Ok(())
 }
 
