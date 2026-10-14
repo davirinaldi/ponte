@@ -107,8 +107,8 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   database only (`pg_locks` shows the whole cluster). If another server took it, or the
   database says `UNSURE_LIMIT` times in a row that it is held without showing one holder,
   this one stops, without recording the end of its sessions. A database that gives no
-  answer (slow, down, cut off) never stops it by itself; an error the database answers
-  with counts like an unknown holder. Only serving and `migrate` change the schema; the other subcommands do not.
+  answer (down, cut off, or overloaded: SQLSTATE classes 08, 53 and 57) never stops it by
+  itself; any other error the database answers with counts like an unknown holder. Only serving and `migrate` change the schema; the other subcommands do not.
 
 ## Database (`src/agents/pg.rs`, `migrations/`)
 
