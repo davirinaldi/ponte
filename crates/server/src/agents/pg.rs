@@ -272,24 +272,6 @@ impl PgStore {
         .await
     }
 
-    /// The tokens whose hash starts with `prefix`, the eight bytes audit events show.
-    pub async fn tokens_by_prefix(&self, prefix: [u8; 8]) -> Result<Vec<TokenHash>, PgStoreError> {
-        const OPERATION: &str = "find a token";
-        bounded(OPERATION, async {
-            let rows = sqlx::query!(
-                "SELECT hash FROM enrollment_tokens WHERE substring(hash FROM 1 FOR 8) = $1",
-                &prefix[..]
-            )
-            .fetch_all(&self.pool)
-            .await
-            .map_err(failed(OPERATION))?;
-            rows.iter()
-                .map(|row| token_hash(OPERATION, &row.hash))
-                .collect()
-        })
-        .await
-    }
-
     async fn enroll_in(
         tx: &mut Transaction<'static, Postgres>,
         request: &EnrollRequest,

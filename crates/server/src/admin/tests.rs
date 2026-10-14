@@ -1,0 +1,350 @@
+use std::ffi::OsString;
+use std::fs;
+use std::path::PathBuf;
+
+use ponte_protocol::{EnrollmentToken, PublicKey};
+
+use super::*;
+use crate::agents::testkit::{Logs, about, at, grant, token};
+use crate::agents::{DeviceStatus, DeviceStore, EnrollOutcome, EnrollRequest, MemoryStore};
+
+fn args(line: &str) -> Vec<OsString> {
+    line.split_whitespace().map(OsString::from).collect()
+}
+
+fn parsed(line: &str) -> Result<Command, UsageError> {
+    parse(args(line))
+}
+
+const CUSTOMER: &str = "0190f2c4-8d3a-7b1e-9c4d-5e6f7a8b9c0d";
+
+/// A path in the temporary directory that nothing uses yet.
+fn fresh_path() -> PathBuf {
+    std::env::temp_dir().join(format!("ponte-token-{}", Uuid::now_v7()))
+}
+
+async fn run_on(store: &MemoryStore, command: Command) -> (Result<(), String>, String) {
+    let mut out = Vec::new();
+    let result = run(store, command, &mut out, at(0))
+        .await
+        .map_err(|error| error.to_string());
+    (result, String::from_utf8(out).unwrap())
+}
+
+async fn customer(store: &MemoryStore) -> CustomerId {
+    let name = "Acme Software".parse().unwrap();
+    store.add_customer(&name).await.unwrap().unwrap()
+}
+
+async fn enrolled(store: &MemoryStore, token_seed: u8, key_seed: u8) -> DeviceId {
+    let request = EnrollRequest {
+        token: TokenHash::of(&token(token_seed)),
+        public_key: PublicKey::from_bytes([key_seed; 32]),
+        about: about(),
+    };
+    match store.enroll(request, at(0)).await.unwrap() {
+        EnrollOutcome::Enrolled { device_id, .. } => device_id,
+        EnrollOutcome::Refused(refusal) => panic!("{refusal:?}"),
+    }
+}
+
+#[test]
+fn every_command_parses() {
+    let customer = CustomerId::from_uuid(Uuid::parse_str(CUSTOMER).unwrap());
+    let device = DeviceId::from_uuid(Uuid::parse_str(CUSTOMER).unwrap());
+    assert_eq!(parse(Vec::new()), Ok(Command::Serve));
+    assert_eq!(parsed("--help"), Ok(Command::Help));
+    assert_eq!(
+        parse([
+            OsString::from("customer"),
+            OsString::from("create"),
+            OsString::from("Padaria São João")
+        ]),
+        Ok(Command::CustomerCreate {
+            name: "Padaria São João".parse().unwrap()
+        })
+    );
+    assert_eq!(parsed("customer list"), Ok(Command::CustomerList));
+    assert_eq!(
+        parsed(&format!("token create {CUSTOMER} --out t.txt")),
+        Ok(Command::TokenCreate {
+            customer,
+            out: PathBuf::from("t.txt"),
+            uses: NonZeroU32::MIN,
+            hours: 24,
+        })
+    );
+    assert_eq!(
+        parsed(&format!(
+            "token create {CUSTOMER} --hours 720 --uses 10000 --out t.txt"
+        )),
+        Ok(Command::TokenCreate {
+            customer,
+            out: PathBuf::from("t.txt"),
+            uses: NonZeroU32::new(10_000).unwrap(),
+            hours: 720,
+        })
+    );
+    assert_eq!(
+        parsed("token list"),
+        Ok(Command::TokenList { customer: None })
+    );
+    assert_eq!(
+        parsed(&format!("token list {CUSTOMER}")),
+        Ok(Command::TokenList {
+            customer: Some(customer)
+        })
+    );
+    assert_eq!(
+        parsed("token revoke 66687aadf862bd77"),
+        Ok(Command::TokenRevoke {
+            prefix: [0x66, 0x68, 0x7a, 0xad, 0xf8, 0x62, 0xbd, 0x77]
+        })
+    );
+    assert_eq!(
+        parsed(&format!("device list {CUSTOMER}")),
+        Ok(Command::DeviceList {
+            customer: Some(customer)
+        })
+    );
+    assert_eq!(
+        parsed(&format!("device approve {CUSTOMER}")),
+        Ok(Command::DeviceApprove { device })
+    );
+    assert_eq!(
+        parsed(&format!("device revoke {CUSTOMER}")),
+        Ok(Command::DeviceRevoke { device })
+    );
+}
+
+/// A command that is not exactly one of the usage does nothing: no guessing, no default
+/// that turns a typo into a token for a hundred machines.
+#[test]
+fn anything_else_is_refused() {
+    let upper = CUSTOMER.to_uppercase();
+    for line in [
+        "serve",
+        "customer",
+        "customer create",
+        "customer delete x",
+        &format!("token create {CUSTOMER}"),
+        &format!("token create {CUSTOMER} --out"),
+        &format!("token create {CUSTOMER} --out a --out b"),
+        &format!("token create {CUSTOMER} --out a --uses 0"),
+        &format!("token create {CUSTOMER} --out a --uses 10001"),
+        &format!("token create {CUSTOMER} --out a --uses -1"),
+        &format!("token create {CUSTOMER} --out a --hours 0"),
+        &format!("token create {CUSTOMER} --out a --hours 721"),
+        &format!("token create {CUSTOMER} --out a --force yes"),
+        &format!("token create {upper} --out a"),
+        "token create not-a-uuid --out a",
+        &format!("token list {CUSTOMER} {CUSTOMER}"),
+        "token revoke 66687AADF862BD77",
+        "token revoke 66687aadf862bd7",
+        "token revoke 66687aadf862bd770",
+        "token revoke 66687aadf862bd7g",
+        "device approve",
+        "device approve 1234",
+        &format!("device revoke {CUSTOMER} now"),
+    ] {
+        assert!(parsed(line).is_err(), "{line}");
+    }
+    let empty_name = [
+        OsString::from("customer"),
+        OsString::from("create"),
+        OsString::from(" "),
+    ];
+    assert_eq!(parse(empty_name), Err(UsageError::Invalid("customer name")));
+}
+
+/// The token goes to its file and nowhere else: not to the output, not to the log. The
+/// file holds exactly what the agent reads, and the store holds its hash.
+#[tokio::test]
+async fn a_token_is_written_to_a_new_file_only() {
+    let store = MemoryStore::new();
+    let customer = customer(&store).await;
+    let path = fresh_path();
+    let (logs, _guard) = Logs::capture();
+
+    let command = Command::TokenCreate {
+        customer,
+        out: path.clone(),
+        uses: NonZeroU32::new(3).unwrap(),
+        hours: 48,
+    };
+    let (result, out) = run_on(&store, command).await;
+    result.unwrap();
+
+    let written = fs::read_to_string(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    let hex = written.strip_suffix('\n').unwrap();
+    assert_eq!(hex.len(), 64);
+    let token: EnrollmentToken = hex.parse().unwrap();
+    let hash = TokenHash::of(&token);
+
+    let info = store.token(&hash).await.unwrap().unwrap();
+    assert_eq!(info.grant.customer, customer);
+    assert_eq!(info.grant.max_uses.get(), 3);
+    assert_eq!(info.grant.expires_at, at(48 * 60 * 60));
+    assert_eq!(info.uses, 0);
+
+    let logs = logs.text();
+    for shown in [&out, &logs] {
+        assert!(!shown.contains(hex), "the token: {shown}");
+        assert!(!shown.contains(&hex[..16]), "part of the token: {shown}");
+    }
+    assert!(out.contains(&hash.short()), "{out}");
+    assert!(logs.contains("token_issued"), "{logs}");
+    assert!(logs.contains("actor=\"server_cli\""), "{logs}");
+    assert!(logs.contains(&hash.short()), "{logs}");
+
+    // Two tokens are never the same.
+    let again = Command::TokenCreate {
+        customer,
+        out: path.clone(),
+        uses: NonZeroU32::MIN,
+        hours: 1,
+    };
+    run_on(&store, again).await.0.unwrap();
+    let second = fs::read_to_string(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert_ne!(second, written);
+}
+
+#[tokio::test]
+async fn an_existing_file_is_never_overwritten() {
+    let store = MemoryStore::new();
+    let customer = customer(&store).await;
+    let path = fresh_path();
+    fs::write(&path, "the agent's own file").unwrap();
+
+    let command = Command::TokenCreate {
+        customer,
+        out: path.clone(),
+        uses: NonZeroU32::MIN,
+        hours: 1,
+    };
+    let (result, out) = run_on(&store, command).await;
+    assert!(result.unwrap_err().contains("token file"));
+    assert_eq!(out, "");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "the agent's own file");
+    fs::remove_file(&path).unwrap();
+    assert!(store.tokens(None).await.unwrap().is_empty());
+}
+
+/// A token the store did not take enrolls nobody, and is not left on disk either.
+#[tokio::test]
+async fn a_token_for_a_customer_that_does_not_exist_leaves_no_file() {
+    let store = MemoryStore::new();
+    let path = fresh_path();
+    let command = Command::TokenCreate {
+        customer: CustomerId::new(),
+        out: path.clone(),
+        uses: NonZeroU32::MIN,
+        hours: 1,
+    };
+    let (result, _) = run_on(&store, command).await;
+    assert_eq!(result.unwrap_err(), "no customer with that id");
+    assert!(!path.exists());
+    assert!(store.tokens(None).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_token_is_revoked_by_the_prefix_of_its_hash() {
+    let store = MemoryStore::new();
+    store.add_token(&token(1), grant(1));
+    store.add_token(&token(2), grant(1));
+    let hash = TokenHash::of(&token(1));
+    let mut prefix = [0; 8];
+    prefix.copy_from_slice(&hash.as_bytes()[..8]);
+    let (logs, _guard) = Logs::capture();
+
+    let (result, out) = run_on(&store, Command::TokenRevoke { prefix }).await;
+    result.unwrap();
+    assert!(out.contains(&hash.short()), "{out}");
+    assert!(store.token(&hash).await.unwrap().unwrap().revoked);
+    let other = TokenHash::of(&token(2));
+    assert!(!store.token(&other).await.unwrap().unwrap().revoked);
+    assert!(logs.text().contains("token_revoked"), "{}", logs.text());
+
+    let nobody = Command::TokenRevoke { prefix: [0; 8] };
+    assert_eq!(
+        run_on(&store, nobody).await.0.unwrap_err(),
+        "no token starts with that prefix"
+    );
+}
+
+#[tokio::test]
+async fn devices_are_approved_and_revoked_by_id() {
+    let store = MemoryStore::new();
+    store.add_token(&token(1), grant(2));
+    let device = enrolled(&store, 1, 10).await;
+    let (logs, _guard) = Logs::capture();
+
+    let (result, _) = run_on(&store, Command::DeviceApprove { device }).await;
+    result.unwrap();
+    assert_eq!(store.record(device).unwrap().status, DeviceStatus::Active);
+    let (result, _) = run_on(&store, Command::DeviceApprove { device }).await;
+    assert_eq!(
+        result.unwrap_err(),
+        "the device is not pending: only a pending device can be approved"
+    );
+
+    let (result, _) = run_on(&store, Command::DeviceRevoke { device }).await;
+    result.unwrap();
+    assert_eq!(store.record(device).unwrap().status, DeviceStatus::Revoked);
+
+    let unknown = DeviceId::new();
+    for command in [
+        Command::DeviceApprove { device: unknown },
+        Command::DeviceRevoke { device: unknown },
+    ] {
+        let (result, _) = run_on(&store, command).await;
+        assert_eq!(result.unwrap_err(), "no device with that id");
+    }
+
+    let logs = logs.text();
+    assert_eq!(logs.matches("device_approved").count(), 1, "{logs}");
+    assert_eq!(logs.matches("device_revoked").count(), 1, "{logs}");
+}
+
+#[tokio::test]
+async fn lists_show_one_line_per_item() {
+    let store = MemoryStore::new();
+    let (result, out) = run_on(
+        &store,
+        Command::CustomerCreate {
+            name: "Acme Software".parse().unwrap(),
+        },
+    )
+    .await;
+    result.unwrap();
+    let customer = CustomerId::from_uuid(Uuid::parse_str(out.trim()).unwrap());
+    let (result, _) = run_on(
+        &store,
+        Command::CustomerCreate {
+            name: "Acme Software".parse().unwrap(),
+        },
+    )
+    .await;
+    assert_eq!(
+        result.unwrap_err(),
+        "a customer with that name already exists"
+    );
+
+    let (_, out) = run_on(&store, Command::CustomerList).await;
+    assert_eq!(out, format!("{customer}  Acme Software\n"));
+
+    store.add_token(&token(1), grant(2));
+    let device = enrolled(&store, 1, 10).await;
+    let (_, out) = run_on(&store, Command::DeviceList { customer: None }).await;
+    assert_eq!(out.lines().count(), 1, "{out}");
+    assert!(out.starts_with(&device.to_string()), "{out}");
+    assert!(
+        out.contains("pending  offline  last seen never  agent 0.1.0  Windows 11 Pro"),
+        "{out}"
+    );
+    let (_, out) = run_on(&store, Command::TokenList { customer: None }).await;
+    assert!(out.contains("1/2 used"), "{out}");
+    assert!(out.ends_with("valid\n"), "{out}");
+}

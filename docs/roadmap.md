@@ -118,5 +118,3 @@ Questions that were open, with the answer and the date.
 - Revoking a device ends its session at the next status check, up to a minute later. RF-04
   says "immediately": that takes the revocation and the session in the same process, which
   comes with the console.
-- When the server stops, open sessions are cut without their end being recorded. The store
-  has to clear "online" when the server starts.

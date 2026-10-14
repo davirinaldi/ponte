@@ -1,10 +1,12 @@
 //! Ponte control plane.
 //!
 //! Current state: health and version endpoints, and the agent endpoint (`GET /agent`) with
-//! enrollment, the device-key handshake and heartbeats, over a store that lives in memory.
-//! PostgreSQL, approvals, the audit log, MCP and helpdesk connectors arrive milestone by
-//! milestone (see `docs/roadmap.md`). Keep handlers thin: HTTP in, domain call, HTTP out.
+//! enrollment, the device-key handshake and heartbeats, over PostgreSQL; subcommands for
+//! the operator (`admin`). Approvals, the audit log, MCP and helpdesk connectors arrive
+//! milestone by milestone (see `docs/roadmap.md`). Keep handlers thin: HTTP in, domain
+//! call, HTTP out.
 
+pub mod admin;
 pub mod agents;
 
 use axum::{Json, Router, routing::get};
@@ -17,8 +19,9 @@ use tracing_subscriber::registry::LookupSpan;
 
 use agents::{DeviceStore, MemoryStore};
 
-/// Builds the HTTP router over a store that starts empty and lives in memory. Kept separate
-/// from `main` so tests can drive it in-process.
+/// Builds the HTTP router over a store that starts empty and lives in memory, for tests that
+/// drive it in-process without a database. The server itself uses [`router_with`] and a
+/// `PgStore`.
 ///
 /// No token exists in that store and there is no way to add one from outside, so agents can
 /// connect but none can enroll.
@@ -34,8 +37,13 @@ pub fn router_with<D: DeviceStore>(store: D) -> Router {
         .merge(agents::routes(store))
 }
 
-/// Builds the log filter of the server process from the value of `RUST_LOG`, or `info`
-/// when it is unset, empty or not valid. Put it on the layer that writes the log.
+/// What the log keeps when `RUST_LOG` says nothing useful. The database library tells at
+/// `info` what the database noticed, on every start; its warnings stay.
+const DEFAULT_DIRECTIVES: &str = "info,sqlx=warn";
+
+/// Builds the log filter of the server process from the value of `RUST_LOG`, or
+/// [`DEFAULT_DIRECTIVES`] when it is unset, empty or not valid. Put it on the layer that
+/// writes the log.
 ///
 /// Whatever the value says, audit events stay on. Until the audit log exists (M3) the lines
 /// under the `ponte::audit` target are the only record of who enrolled and who was refused,
@@ -46,8 +54,9 @@ where
 {
     let directives = directives
         .filter(|directives| !directives.trim().is_empty())
-        .unwrap_or("info");
-    let chosen = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or(DEFAULT_DIRECTIVES);
+    let chosen =
+        EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new(DEFAULT_DIRECTIVES));
     // A filter beside the one from the variable, not one more directive in it: a directive
     // can always be outranked by a more specific one.
     chosen.or(filter_fn(is_audit_event))
@@ -112,6 +121,22 @@ mod tests {
         let logs = logged(Some("warn"));
         assert!(logs.contains("a warn line"), "{logs}");
         assert!(!logs.contains("an info line"), "{logs}");
+    }
+
+    /// The database library tells at `info` what the database noticed, on every start.
+    /// By default only its warnings and errors are kept; `RUST_LOG` can ask for more.
+    #[test]
+    fn the_database_library_is_quieter_by_default() {
+        let lines = |directives| {
+            let (logs, _guard) = Logs::capture_with(directives);
+            info!(target: "sqlx::postgres::notice", "a notice");
+            warn!(target: "sqlx::query", "a slow statement");
+            logs.text()
+        };
+        let logs = lines(None);
+        assert!(!logs.contains("a notice"), "{logs}");
+        assert!(logs.contains("a slow statement"), "{logs}");
+        assert!(lines(Some("info")).contains("a notice"));
     }
 
     /// Until M3 these lines are the audit log. Asking for a quieter log must not lose them.
