@@ -107,6 +107,11 @@ Questions that were open, with the answer and the date.
   newest (what M1 does, and what lets a fleet reconnect in order) or drop the oldest (what
   makes a silent connection cheap to push out)? Planned for M5 with the other rate limits.
 - Nothing limits how often a connected device sends heartbeats, and each one is a write.
+- Connections that have not authenticated share the database pool with the sessions: a
+  stranger's `Hello` with a made-up id costs one query, like a real one. The 256-place cap
+  and the store's time limits bound it, and a healthy database answers in milliseconds.
+  While the database is down, each of those refusals is an `error` line. Give the handshake
+  a share of the pool of its own, and log store failures at a bounded rate?
 - Whoever holds a spent, expired or revoked token, or the key of a revoked device, gets one
   audit event per connection, as fast as they connect. Worth a line each today; in M3
   these become rows in an append-only table. Count them per token and per device instead?

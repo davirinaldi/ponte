@@ -62,6 +62,7 @@ run the server, Docker for PostgreSQL.
 cargo test --workspace
 docker compose -f deploy/docker-compose.yml up -d
 export DATABASE_URL=postgres://ponte:ponte@127.0.0.1:5432/ponte
+cargo run -p ponte-server -- migrate                            # creates the tables
 cargo run -p ponte-server -- customer create "Demo Customer"     # prints the customer id
 mkdir -p keys/agent-dev                                          # ignored by git
 cargo run -p ponte-server -- token create <customer-id> --out keys/agent-dev/enrollment-token

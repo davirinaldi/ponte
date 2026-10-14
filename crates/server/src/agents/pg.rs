@@ -23,9 +23,10 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use ponte_protocol::{DeviceId, Label, PublicKey, TelemetrySnapshot};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::types::Json;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{Connection, PgPool, Postgres, Transaction};
+use tracing::warn;
 use uuid::Uuid;
 
 use super::store::{
@@ -41,6 +42,15 @@ pub const POOL_SIZE: u32 = 16;
 /// How long a call waits for a free connection.
 const ACQUIRE_LIMIT: Duration = Duration::from_secs(3);
 
+/// How long a connection given back to the pool may take to answer a ping. Past it the
+/// connection is closed and its place freed.
+const RELEASE_CHECK_LIMIT: Duration = Duration::from_secs(2);
+
+/// Connections are replaced after this long, or after this long unused, so none outlives a
+/// change of the database's address by much.
+const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
+const IDLE_LIMIT: Duration = Duration::from_secs(10 * 60);
+
 /// What the database itself allows one statement, and a transaction left idle. Set on every
 /// connection, so a lock is never held for longer whatever happens to the server.
 const STATEMENT_LIMIT: &str = "5s";
@@ -52,6 +62,16 @@ pub const CALL_LIMIT: Duration = Duration::from_secs(8);
 
 /// The name of the constraint that says a key enrolls once (see the migration).
 const UNIQUE_PUBLIC_KEY: &str = "devices_public_key_key";
+
+/// The key of the advisory lock a serving process holds ([`PgStore::claim_server`]): the
+/// bytes of `ponte-sv` as a big-endian number.
+const SERVER_LOCK: i64 = 0x706f_6e74_652d_7376;
+
+/// This process serves the database. Dropping it gives the claim back.
+#[derive(Debug)]
+pub struct ServerClaim {
+    _connection: sqlx::PgConnection,
+}
 
 /// A store on a pool of connections to PostgreSQL. Clones share the pool.
 #[derive(Debug, Clone)]
@@ -78,6 +98,10 @@ impl PgStoreError {
 pub enum ErrorKind {
     #[error("the database URL is not valid")]
     InvalidUrl,
+    #[error("a database on another host needs sslmode=verify-full in its URL")]
+    InsecureTls,
+    #[error("another server is already serving this database")]
+    AnotherServer,
     #[error("no answer within {} seconds", CALL_LIMIT.as_secs())]
     TimedOut,
     #[error("no connection to the database was free in time")]
@@ -155,6 +179,24 @@ fn corrupt(operation: &'static str, what: &'static str) -> PgStoreError {
     }
 }
 
+/// A database on this machine may be reached any way. One elsewhere only over TLS with its
+/// certificate and name checked: the default, `prefer`, checks neither and falls back to
+/// plain text without a word (invariant 7).
+fn secure_enough(options: &PgConnectOptions) -> Result<(), PgStoreError> {
+    let host = options.get_host();
+    let local = options.get_socket().is_some()
+        || host.starts_with('/')
+        || matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]");
+    if local || matches!(options.get_ssl_mode(), PgSslMode::VerifyFull) {
+        Ok(())
+    } else {
+        Err(PgStoreError {
+            operation: "connect",
+            kind: ErrorKind::InsecureTls,
+        })
+    }
+}
+
 /// Runs `work` within [`CALL_LIMIT`]. A transaction cut short is rolled back.
 async fn bounded<T>(
     operation: &'static str,
@@ -223,6 +265,7 @@ impl PgStore {
         pool: PgPoolOptions,
         options: PgConnectOptions,
     ) -> Result<Self, PgStoreError> {
+        secure_enough(&options)?;
         let options = options.application_name("ponte-server").options([
             ("statement_timeout", STATEMENT_LIMIT),
             (
@@ -234,12 +277,63 @@ impl PgStore {
             pool.max_connections(POOL_SIZE)
                 .min_connections(0)
                 .acquire_timeout(ACQUIRE_LIMIT)
+                // A connection given back by a call that was cut short is checked before it
+                // is reused. sqlx's own check has no time limit: on a network path that
+                // drops packets, every place in the pool would wait for TCP to give up.
+                .after_release(|connection, _| {
+                    Box::pin(async move {
+                        match tokio::time::timeout(RELEASE_CHECK_LIMIT, connection.ping()).await {
+                            Ok(Ok(())) => Ok(true),
+                            // Fixed text: sqlx logs it, and the database's could quote values.
+                            Ok(Err(_)) | Err(_) => Err(sqlx::Error::Protocol(
+                                "the connection failed its check on release".to_owned(),
+                            )),
+                        }
+                    })
+                })
+                .max_lifetime(MAX_LIFETIME)
+                .idle_timeout(IDLE_LIMIT)
                 .connect_with(options)
                 .await
                 .map_err(failed("connect"))
         })
         .await?;
         Ok(Self { pool })
+    }
+
+    /// Claims the database for this server process, for as long as the claim lives.
+    ///
+    /// `clear_online` assumes one server per database: a second one started by mistake
+    /// would mark every connected device offline. The claim is a session-level advisory
+    /// lock held on a connection of its own, taken out of the pool; the database lets it go
+    /// when that connection closes, the process's end included.
+    pub async fn claim_server(&self) -> Result<ServerClaim, PgStoreError> {
+        const OPERATION: &str = "claim the database for this server";
+        bounded(OPERATION, async {
+            let mut connection = self
+                .pool
+                .acquire()
+                .await
+                .map_err(failed(OPERATION))?
+                .detach();
+            let claimed = sqlx::query_scalar!(
+                r#"SELECT pg_try_advisory_lock($1) AS "claimed!""#,
+                SERVER_LOCK
+            )
+            .fetch_one(&mut connection)
+            .await
+            .map_err(failed(OPERATION))?;
+            if !claimed {
+                return Err(PgStoreError {
+                    operation: OPERATION,
+                    kind: ErrorKind::AnotherServer,
+                });
+            }
+            Ok(ServerClaim {
+                _connection: connection,
+            })
+        })
+        .await
     }
 
     /// Brings the schema up to date. Safe to run while another process does the same.
@@ -520,7 +614,7 @@ struct DeviceRow {
     os: String,
     online_session: Option<Uuid>,
     last_seen: Option<DateTime<Utc>>,
-    telemetry: Option<Json<TelemetrySnapshot>>,
+    telemetry: Option<serde_json::Value>,
 }
 
 impl DeviceRow {
@@ -536,10 +630,22 @@ impl DeviceRow {
             },
             online: self.online_session.map(SessionId::from_uuid),
             last_seen: self.last_seen,
-            telemetry: self.telemetry.map(|Json(telemetry)| telemetry),
+            telemetry: self.telemetry.and_then(|stored| readable(self.id, stored)),
             enrolled_with: token_hash(operation, &self.enrolled_with)?,
         })
     }
+}
+
+/// Stored telemetry as the wire type, or `None` when it does not read: a reading this
+/// server would now refuse, or one written in an older format. It costs that device its
+/// last reading, never a listing of every device. Logged by id only: the stored text came
+/// from the machine.
+fn readable(id: Uuid, stored: serde_json::Value) -> Option<TelemetrySnapshot> {
+    serde_json::from_value(stored)
+        .inspect_err(|_| {
+            warn!(device = %id, "the stored telemetry of a device does not read; left out");
+        })
+        .ok()
 }
 
 /// One row of `enrollment_tokens`, as the queries below read it.
@@ -700,7 +806,7 @@ impl DeviceAdmin for PgStore {
         const OPERATION: &str = "revoke a device";
         bounded(OPERATION, async {
             let revoked = sqlx::query!(
-                "UPDATE devices SET status = 'revoked' WHERE id = $1",
+                "UPDATE devices SET status = 'revoked', online_session = NULL WHERE id = $1",
                 id.as_uuid(),
             )
             .execute(&self.pool)
@@ -718,7 +824,7 @@ impl DeviceAdmin for PgStore {
                 DeviceRow,
                 r#"SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,
                           online_session, last_seen,
-                          telemetry AS "telemetry: Json<TelemetrySnapshot>"
+                          telemetry
                    FROM devices WHERE id = $1"#,
                 id.as_uuid(),
             )
@@ -741,7 +847,7 @@ impl DeviceAdmin for PgStore {
                 DeviceRow,
                 r#"SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,
                           online_session, last_seen,
-                          telemetry AS "telemetry: Json<TelemetrySnapshot>"
+                          telemetry
                    FROM devices
                    WHERE $1::uuid IS NULL OR customer_id = $1
                    ORDER BY id"#,
@@ -839,6 +945,44 @@ mod tests {
         let error = failed("connect")(sqlx::Error::Configuration("postgres://u:pw@h".into()));
         assert_eq!(error.kind(), ErrorKind::Other);
         assert!(!error.to_string().contains("pw"), "{error}");
+    }
+
+    /// A database on another host is reached over TLS with its certificate checked, or not
+    /// at all: whoever sits on the path could otherwise read token hashes and answer that a
+    /// revoked device is active.
+    #[test]
+    fn a_remote_database_needs_a_verified_certificate() {
+        let check = |url: &str| -> Result<(), ErrorKind> {
+            let options = PgConnectOptions::from_str(url).unwrap();
+            secure_enough(&options).map_err(|error| error.kind())
+        };
+        for fine in [
+            "postgres://u:p@localhost/ponte",
+            "postgres://u:p@127.0.0.1:5432/ponte",
+            "postgres://u:p@[::1]/ponte",
+            "postgres://u:p@localhost/ponte?sslmode=disable",
+            "postgres:///ponte?host=/var/run/postgresql",
+            "postgres://u:p@db.example.com/ponte?sslmode=verify-full",
+        ] {
+            assert_eq!(check(fine), Ok(()), "{fine}");
+        }
+        for refused in [
+            "postgres://u:p@db.example.com/ponte",
+            "postgres://u:p@db.example.com/ponte?sslmode=prefer",
+            "postgres://u:p@db.example.com/ponte?sslmode=require",
+            "postgres://u:p@db.example.com/ponte?sslmode=verify-ca",
+            "postgres://u:p@10.0.0.5/ponte?sslmode=disable",
+            "postgres://u:p@localhost.example.com/ponte",
+        ] {
+            assert_eq!(check(refused), Err(ErrorKind::InsecureTls), "{refused}");
+        }
+    }
+
+    /// Refused before anything is sent.
+    #[tokio::test]
+    async fn connecting_to_a_remote_database_without_verification_is_refused() {
+        let refused = PgStore::connect("postgres://u:p@db.example.invalid/ponte").await;
+        assert_eq!(refused.unwrap_err().kind(), ErrorKind::InsecureTls);
     }
 
     #[test]

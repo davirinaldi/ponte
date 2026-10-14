@@ -43,6 +43,14 @@ jobs:
       - run: cargo test -p ponte-server -- --ignored pg_
         env:
           DATABASE_URL: postgres://ponte:ponte@localhost:5432/ponte
+      # .sqlx/ was made from the schema the migrations build: check every query against it.
+      - name: Queries match the migrated schema
+        run: |
+          cargo run -q -p ponte-server -- migrate
+          touch crates/server/src/agents/pg.rs
+          SQLX_OFFLINE=false cargo check -p ponte-server --all-targets
+        env:
+          DATABASE_URL: postgres://ponte:ponte@localhost:5432/ponte
 
   windows:
     name: Lint and test (windows-latest)

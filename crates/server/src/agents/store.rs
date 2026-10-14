@@ -298,7 +298,8 @@ pub trait DeviceAdmin: DeviceStore {
         id: DeviceId,
     ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
-    /// `false` if there is no such device. There is no way back (RF-04).
+    /// `false` if there is no such device. There is no way back (RF-04). The device is
+    /// shown offline at once; a session it has ends at its next status check.
     fn revoke_device(&self, id: DeviceId)
     -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
@@ -572,6 +573,7 @@ impl DeviceAdmin for MemoryStore {
         Ok(match self.lock().devices.get_mut(&id) {
             Some(device) => {
                 device.status = DeviceStatus::Revoked;
+                device.online = None;
                 true
             }
             None => false,

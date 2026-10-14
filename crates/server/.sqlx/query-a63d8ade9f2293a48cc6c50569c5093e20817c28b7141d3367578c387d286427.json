@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,\n                          online_session, last_seen,\n                          telemetry AS \"telemetry: Json<TelemetrySnapshot>\"\n                   FROM devices WHERE id = $1",
+  "query": "SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,\n                          online_session, last_seen,\n                          telemetry\n                   FROM devices\n                   WHERE $1::uuid IS NULL OR customer_id = $1\n                   ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -104,7 +104,7 @@
       },
       {
         "ordinal": 9,
-        "name": "telemetry: Json<TelemetrySnapshot>",
+        "name": "telemetry",
         "type_info": "Jsonb",
         "origin": {
           "Table": {
@@ -132,5 +132,5 @@
       true
     ]
   },
-  "hash": "64af37795b809643ea0bf7de31bbea2cecfede162c6023ef31643134de6e5aa4"
+  "hash": "a63d8ade9f2293a48cc6c50569c5093e20817c28b7141d3367578c387d286427"
 }
