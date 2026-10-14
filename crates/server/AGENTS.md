@@ -54,8 +54,10 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
   event (`Rejection::follows_a_real_credential`) that names the device, or the key and
   the hash prefix of the token. After `Welcome`, only the first few dropped messages of a
   session are logged.
-- **Limits are set on the socket**, both `max_message_size` and `max_frame_size`, and
-  connections that have not authenticated yet are counted and capped (`Limits`).
+- **Limits are set on the socket** (`ws::limited`): `max_message_size`, `max_frame_size` and
+  what may wait to be written. axum leaves the last one unbounded, and a peer that pings
+  without reading would fill the memory with the pongs it is owed. Connections that have
+  not authenticated yet are counted and capped (`Limits`).
 - **Revocation does not wait for the device.** A session reads the device's status again at
   least every `Limits::status_check`, with or without a heartbeat, and ends when the device
   is revoked. The store has the last word when a session starts, too.

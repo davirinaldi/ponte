@@ -27,6 +27,8 @@ uuid.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 tokio = { workspace = true, features = ["io-util", "test-util"] }
+# The library under axum's WebSocket, driven by hand to test the socket limits.
+tokio-tungstenite.workspace = true
 tower.workspace = true
 
 [lints]
