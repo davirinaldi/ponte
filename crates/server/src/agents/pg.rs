@@ -108,9 +108,21 @@ enum Verdict {
 fn judge(ours: &Holder, holder: Option<Holder>) -> Verdict {
     match holder {
         Some(holder) if holder.since.is_some() && holder == *ours => Verdict::Ours,
+        // Our pid with no start: our own session leaving while the lookup ran (it lets go
+        // of its locks before it leaves the activity view), or a stranger. No proof.
+        Some(holder) if holder.pid == ours.pid && holder.since.is_none() => Verdict::Unsure,
         Some(_) => Verdict::Another,
         None => Verdict::Unsure,
     }
+}
+
+/// Whether the database gave no answer at all: then nobody knows more than before, and a
+/// check neither counts nor clears. An error the database answered with is not that.
+fn no_answer(error: &PgStoreError) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::TimedOut | ErrorKind::PoolTimedOut | ErrorKind::Connection
+    )
 }
 
 /// What became of a claim whose connection did not answer.
@@ -120,8 +132,9 @@ enum Regained {
     Taken(ServerClaim),
     /// Its own session still holds the lock: the answer was only slow.
     Ours(ServerClaim),
-    /// The database is in trouble (no connection, a query that timed out). Nobody else
-    /// can take the claim while that lasts: check again later.
+    /// The database gave no answer (no connection, a query that timed out): check again
+    /// later. If only this server is cut off, another may take the claim meanwhile; this
+    /// one cannot write either, and the first check that gets through says `Lost`.
     Waiting(ServerClaim),
     /// The database answered that the lock is held, and showed no single holder.
     Unsure(ServerClaim),
@@ -457,11 +470,16 @@ impl PgStore {
                     kind: ErrorKind::AnotherServer,
                 });
             }
+            // Without its start, the session could never be told from another one later,
+            // and the first slow answer would stop the server. Better now, at the start.
+            let Some(since) = claimed.since else {
+                return Err(corrupt(OPERATION, "session start"));
+            };
             Ok(ServerClaim {
                 connection,
                 holder: Holder {
                     pid: claimed.pid,
-                    since: claimed.since,
+                    since: Some(since),
                 },
             })
         })
@@ -543,7 +561,11 @@ impl PgStore {
                     Ok(_) => None,
                     Err(error) => {
                         warn!(%error, "finding who holds the claim on the database failed");
-                        return Regained::Waiting(claim);
+                        return if no_answer(error) {
+                            Regained::Waiting(claim)
+                        } else {
+                            Regained::Unsure(claim)
+                        };
                     }
                 };
                 match judge(&claim.holder, holder) {
@@ -557,7 +579,11 @@ impl PgStore {
             }
             Err(error) => {
                 warn!(%error, "claiming the database again failed; retrying");
-                Regained::Waiting(claim)
+                if no_answer(&error) {
+                    Regained::Waiting(claim)
+                } else {
+                    Regained::Unsure(claim)
+                }
             }
         }
     }
