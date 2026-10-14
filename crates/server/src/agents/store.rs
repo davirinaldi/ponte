@@ -179,12 +179,15 @@ pub trait DeviceStore: Send + Sync + 'static {
 
     /// Spends one use of the token and stores the key as a new device, in one atomic step.
     ///
-    /// Rules every store follows:
-    /// - A token that is unknown, revoked or expired at `now` does nothing at all.
-    /// - The same token with the same key again gives the same device and spends nothing:
-    ///   the answer to the first attempt may have been lost on the way. Not for a device
-    ///   that was revoked since.
-    /// - A key enrolls once. Under any other token it is refused.
+    /// Rules every store follows, checked in this order:
+    /// - A token that is unknown or revoked does nothing at all. Revoking is a person
+    ///   saying no, to the machines that already enrolled with it too.
+    /// - A key enrolls once. Under any other token it is refused, and so is the key of a
+    ///   device that was revoked.
+    /// - The same token with the same key again gives the same device and spends nothing,
+    ///   even after the deadline: the answer to the first attempt may have been lost on the
+    ///   way, and only the holder of the key can ask.
+    /// - Otherwise a token that expired at `now`, or has no use left, does nothing at all.
     /// - The device starts [`DeviceStatus::Active`] if the token was issued for one machine
     ///   and [`DeviceStatus::Pending`] otherwise (RF-49).
     fn enroll(
@@ -381,10 +384,8 @@ impl DeviceStore for MemoryStore {
         if token.revoked {
             return refused(EnrollRefusal::RevokedToken);
         }
-        if now >= token.grant.expires_at {
-            return refused(EnrollRefusal::ExpiredToken);
-        }
 
+        // Before the deadline: a repetition creates nothing and spends nothing.
         if let Some(device_id) = inner.keys.get(&request.public_key).copied() {
             let Some(device) = inner.devices.get(&device_id) else {
                 // The index and the devices went apart. Refuse instead of guessing.
@@ -404,6 +405,9 @@ impl DeviceStore for MemoryStore {
             });
         }
 
+        if now >= token.grant.expires_at {
+            return refused(EnrollRefusal::ExpiredToken);
+        }
         if token.uses >= token.grant.max_uses.get() {
             return refused(EnrollRefusal::ExhaustedToken);
         }
@@ -677,15 +681,61 @@ mod tests {
             assert_eq!(enrolled(&store, 2, 20).await, other);
         }
         assert_eq!(store.uses_left(&TokenHash::of(&token(2))), Some(2));
+    }
 
-        // Only while the token is good.
-        let late = store.enroll(request(1, 10), at(100)).await.unwrap();
-        assert_eq!(late, EnrollOutcome::Refused(EnrollRefusal::ExpiredToken));
-        store.revoke_token(&TokenHash::of(&token(1)));
+    /// The machine may come back after the deadline: it stored its key, sent `Enroll`, and
+    /// lost the answer. Giving it back the device it already has creates nothing and spends
+    /// nothing, and only the holder of that key can ask.
+    #[tokio::test]
+    async fn a_repeated_enrollment_after_the_deadline_gives_the_same_device() {
+        let store = MemoryStore::new();
+        store.add_token(&token(1), grant(2));
+        let first = enrolled(&store, 1, 10).await;
+
+        for late in [at(100), at(1_000_000)] {
+            let again = store.enroll(request(1, 10), late).await.unwrap();
+            let EnrollOutcome::Enrolled {
+                device_id,
+                repeated,
+                ..
+            } = again
+            else {
+                panic!("{again:?}");
+            };
+            assert_eq!(device_id, first);
+            assert!(repeated);
+        }
+        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(1));
+
+        // A key the token never enrolled is still too late.
+        let new_key = store.enroll(request(1, 11), at(100)).await.unwrap();
+        assert_eq!(new_key, EnrollOutcome::Refused(EnrollRefusal::ExpiredToken));
+        assert_eq!(store.uses_left(&TokenHash::of(&token(1))), Some(1));
+
+        // And a revoked device stays out, late or not.
+        store.revoke_device(first);
+        let revoked = store.enroll(request(1, 10), at(100)).await.unwrap();
         assert_eq!(
-            enroll(&store, 1, 10).await,
-            EnrollOutcome::Refused(EnrollRefusal::RevokedToken)
+            revoked,
+            EnrollOutcome::Refused(EnrollRefusal::DeviceRevoked)
         );
+    }
+
+    /// Revoking a token is a person saying no. That holds for the machines that already
+    /// enrolled with it and ask again, too.
+    #[tokio::test]
+    async fn a_repeated_enrollment_with_a_revoked_token_is_refused() {
+        let store = MemoryStore::new();
+        store.add_token(&token(1), grant(1));
+        let device = enrolled(&store, 1, 10).await;
+
+        store.revoke_token(&TokenHash::of(&token(1)));
+        for now in [at(0), at(100)] {
+            let again = store.enroll(request(1, 10), now).await.unwrap();
+            assert_eq!(again, EnrollOutcome::Refused(EnrollRefusal::RevokedToken));
+        }
+        // The device itself is not revoked by that: it keeps its key and connects.
+        assert_eq!(store.record(device).unwrap().status, DeviceStatus::Active);
     }
 
     #[tokio::test]

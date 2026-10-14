@@ -21,15 +21,18 @@ approval, without any screen sharing. Each milestone should end with something w
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
   service control and file primitives; resolved-path re-check; preconditions and
   verification; idempotent `RequestId`; device key under DPAPI, in a data directory only
-  SYSTEM and administrators can open, with renames written through to the disk. No agent
-  is installed outside a lab before that.
+  SYSTEM and administrators can open, with renames written through to the disk; key bytes
+  wiped with `zeroize`; service stop bounded by `shutdown_timeout`. No agent is installed
+  outside a lab before that.
 - [ ] **M3 Approvals and audit**: approval queue; hash-chained audit log; fake-erp failure
   modes. *Post: why typed actions are the defence against prompt injection.*
 - [ ] **M4 MCP and helpdesk**: MCP tools; decision layer with a classifier provider and LLM
   fallback; Zammad connector; demo clip end to end. Session helper with consent prompt.
   *Post: the 60-second demo.*
-- [ ] **M5 Hardening**: MSI installer, auto-update, swarm load test (10k agents), calibration
-  report, opt-in pin of the server key (ADR-0009), threat model review.
+- [ ] **M5 Hardening**: MSI installer with an explicit "enroll again" action, a random
+  delay when the agent process starts (a fleet restarting together), auto-update, swarm
+  load test (10k agents), calibration report, opt-in pin of the server key (ADR-0009),
+  threat model review.
   *Post: 10,000 simulated agents on one small server.*
 
 ## Phase 2: view the screen
@@ -40,6 +43,29 @@ approval, without any screen sharing. Each milestone should end with something w
 ## Phase 3: full control
 
 - [ ] Input injection, clipboard, file transfer, multi-party sessions, recording, login/UAC.
+
+## Decided
+
+Questions that were open, with the answer and the date.
+
+- **2026-10-14. A repeated enrollment is honoured after the token's deadline, not after the
+  token is revoked.** The agent stores its key, sends `Enroll` and may lose the answer. A
+  repetition with the same token and key gives back the device that already exists: it
+  creates nothing, spends no use, and only the holder of the key can ask, so the deadline
+  has nothing left to protect. Revoking a token is a person saying no, and it holds for
+  the machines that enrolled with it too. A revoked device stays refused. Repetitions are
+  audited like first enrollments.
+- **2026-10-14. TLS 1.3 only (RNF-01).** rustls with TLS 1.2 would be safe, but no customer
+  is known to sit behind a proxy that stops at 1.2. If a pilot meets one, an ADR adds an
+  explicit `allow_tls12` option to the agent's configuration, never on by default.
+- **2026-10-14. Enrolling again stays manual on the agent**: remove its data directory and
+  bring a new token. Enrolling again by itself whenever a new token file appears would turn
+  every re-run of the installer into a second device. The installer of M5 gets an explicit
+  "enroll again" action that does it.
+- **2026-10-14. A test over `wss://` comes with the end-to-end step of M1**, with a
+  certificate made on the spot (`rcgen`, `ring` feature, as a dev-dependency): a refused
+  certificate, a refused TLS 1.2 server and an accepted connection to a root trusted in the
+  test only.
 
 ## Open questions
 
@@ -89,22 +115,6 @@ approval, without any screen sharing. Each milestone should end with something w
   connection that died without a close stays "online" until the device connects again or
   the session reaches its time limit. The agent already answers pings, so the server can
   start sending them; a heartbeat deadline needs the server to know the agent's interval.
-- How does a device enroll again? An agent that is revoked, or that the server forgot, is
-  refused for ever with no reason given, and keeps its identity: it cannot tell a
-  revocation from a bad day. Today someone removes the agent's data directory and brings a
-  new token. Should a new token file on an enrolled machine start a new enrollment by
-  itself? That lets the installer repair a machine, and lets a re-run of the installer
-  turn one device into two.
-- An enrollment whose answer was lost is repeated with the same token and key, and the
-  server gives the same device back. Only while the token is still good, though: the server
-  checks the deadline and revocation first. A machine that comes back after that is
-  refused for ever, and its device stays on the server, enrolled and never connected.
-  Should the repeat be honoured after the deadline? After a revocation?
-- The agent speaks TLS 1.3 only (RNF-01), and ADR-0009 wants it to work behind proxies that
-  inspect TLS. A proxy that stops at TLS 1.2 cannot be both. Which one gives?
-- No test connects over `wss://`: the loopback tests use plain `ws://`, and TLS was checked
-  by hand in M1 (a public host, a self-signed certificate, a TLS 1.2 server). A test needs a
-  certificate made on the spot, which means a new dev-dependency.
 - Revoking a device ends its session at the next status check, up to a minute later. RF-04
   says "immediately": that takes the revocation and the session in the same process, which
   comes with the console.
