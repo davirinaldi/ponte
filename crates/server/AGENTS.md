@@ -21,12 +21,16 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
 
 - **No version, no connection.** axum's `protocols()` completes the upgrade even when no
   subprotocol matched. `ws.rs` checks `selected_protocol()` and answers 400 instead. Offer
-  the versions newest first.
+  the versions newest first. A request with an `Origin` header comes from a browser and is
+  refused with 403.
 - **Before authentication, one message.** The server sends `Challenge` and accepts exactly
   one `Enroll` or `Hello`, as text, within `MAX_HANDSHAKE_MESSAGE_BYTES` and the handshake
   deadline. Anything else ends the connection, ping and binary frames included. The "log it
   and keep running" of ADR-0006 starts after `Welcome`, and `Enroll` or `Hello` after
   `Welcome` ends the session.
+- **The deadline is for the peer, not for the store.** It covers sending the challenge and
+  reading the answer. Once the message is in, the store call runs to its end: cut short, it
+  could leave a device enrolled with no audit event, at a moment the peer picked.
 - **Every refusal looks the same.** The server closes with no code and no text, at once,
   whatever was wrong. The reason goes to the log as a `Rejection`. Never add a message, a
   close code, a delay or a different HTTP status for one reason only: that turns the
@@ -40,14 +44,30 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
   A frame before authentication is whatever a stranger sent, and `Enroll` holds a token. A
   message that fails to parse is logged by `error.classify()` only: the error's text can
   repeat what the peer wrote. The tests in `session.rs` read the logs to check this.
+- **Dependencies do not log for us.** The WebSocket library writes every frame it reads to
+  the `log` crate at `trace`. The workspace builds `tracing-subscriber` without its
+  `tracing-log` feature, so none of that reaches the output. `tests/agent_logs.rs` fails
+  if it ever does. Do not turn the feature back on to see a dependency's logs.
+- **A stranger gets no log line at the default level.** A refusal anyone can cause is
+  logged at `debug`. A refusal that followed a real token or a real device key is an audit
+  event (`Rejection::follows_a_real_credential`). After `Welcome`, only the first few
+  dropped messages of a session are logged.
 - **Limits are set on the socket**, both `max_message_size` and `max_frame_size`, and
   connections that have not authenticated yet are counted and capped (`Limits`).
-- **One session per device.** A new one replaces the old one and the takeover is audited.
-  A session also ends at a time limit, so the key is proven again.
+- **Revocation does not wait for the device.** A session reads the device's status again at
+  least every `Limits::status_check`, with or without a heartbeat, and ends when the device
+  is revoked. The store has the last word when a session starts, too.
+- **One session per device, started one at a time.** A session is recorded in the store
+  first and takes the device's place in the registry second, both under
+  `Registry::starting`. The old session is only replaced once the store accepted the new
+  one, and the takeover is audited. A session also ends at a time limit, so the key is
+  proven again.
 - **A store keeps the hash of a token, never the token** (`TokenHash`), and follows the
   rules written on `DeviceStore`: enrollment is atomic and repeatable, a key enrolls once,
-  and telemetry of a device that is not active is dropped (RF-49).
+  telemetry of a device that is not active is dropped (RF-49), and its error type never
+  carries the values of a call.
 - Audit events go through `audit::record`. Until the audit log exists (M3) they are log
-  lines under the `ponte::audit` target.
+  lines under the `ponte::audit` target, which `log_filter` keeps on whatever `RUST_LOG`
+  says.
 - Tests run without a socket (`testkit::Peer`) and with a paused clock. Tests named
   `ws_loopback_*` bind `127.0.0.1` and cover only what needs a real socket.

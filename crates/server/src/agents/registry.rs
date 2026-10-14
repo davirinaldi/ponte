@@ -4,8 +4,12 @@
 //! over and the old one is told to stop: the old connection is usually already dead and the
 //! server has not noticed yet. If it is not dead, two machines hold the same key, and
 //! whoever is watching the audit log wants to know.
+//!
+//! The store also records which session a device is online under. The two agree because
+//! the sessions of one device start one at a time: see [`Registry::starting`].
 
 use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ponte_protocol::DeviceId;
@@ -13,9 +17,25 @@ use tokio::sync::Notify;
 
 use super::store::SessionId;
 
-#[derive(Debug, Default)]
+/// How many sessions can be starting at the same moment. Two devices that share a lock
+/// only wait for each other for the length of one store call.
+const START_LOCKS: usize = 64;
+
+#[derive(Debug)]
 pub(crate) struct Registry {
     sessions: Mutex<HashMap<DeviceId, Entry>>,
+    starting: Box<[tokio::sync::Mutex<()>]>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::default(),
+            starting: (0..START_LOCKS)
+                .map(|_| tokio::sync::Mutex::default())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -39,6 +59,21 @@ impl Registry {
         // Nothing panics while holding the lock, and the map is whole between any two
         // statements that touch it.
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Waits for the turn of `device` to start a session. Hold the guard from the moment
+    /// the store is told about the new session until [`Registry::register`] returned.
+    ///
+    /// Without it two connections of one device could reach the store in one order and the
+    /// registry in the other. The store would then show the device under the session that
+    /// lost, and offline as soon as that one ended, while the winner is still connected.
+    pub(crate) async fn starting(&self, device: DeviceId) -> tokio::sync::MutexGuard<'_, ()> {
+        let mut hasher = DefaultHasher::new();
+        device.hash(&mut hasher);
+        let locks = self.starting.len() as u64;
+        // The remainder is below `START_LOCKS`, so it always fits.
+        let index = usize::try_from(hasher.finish() % locks).unwrap_or(0);
+        self.starting[index].lock().await
     }
 
     /// Makes `session` the one that speaks for `device`. Returns its place and the session
@@ -160,5 +195,40 @@ mod tests {
         drop(first);
         assert!(registry.current(one).is_none());
         assert!(registry.current(other).is_some());
+    }
+    /// The turn is what keeps the store and the registry in the same order.
+    #[tokio::test(start_paused = true)]
+    async fn the_sessions_of_one_device_start_one_at_a_time() {
+        let registry = Registry::default();
+        let device = DeviceId::new();
+
+        let turn = registry.starting(device).await;
+        let waits = timeout(Duration::from_secs(1), registry.starting(device)).await;
+        assert!(
+            waits.is_err(),
+            "a second session started alongside the first"
+        );
+
+        drop(turn);
+        let next = timeout(Duration::from_secs(1), registry.starting(device)).await;
+        assert!(next.is_ok(), "the turn was never passed on");
+    }
+
+    /// Enough locks that devices seldom share one, and the same lock every time for the
+    /// same device.
+    #[tokio::test(start_paused = true)]
+    async fn starting_devices_wait_only_for_the_few_that_share_their_lock() {
+        let registry = Registry::default();
+        let held = registry.starting(DeviceId::new()).await;
+
+        let mut free = 0;
+        for _ in 0..200 {
+            let other = timeout(Duration::from_secs(1), registry.starting(DeviceId::new()));
+            if other.await.is_ok() {
+                free += 1;
+            }
+        }
+        assert!(free >= 180, "only {free} of 200 devices could start");
+        drop(held);
     }
 }

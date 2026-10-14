@@ -23,13 +23,18 @@ use ponte_protocol::{
     AgentToServer, DeviceId, MAX_HANDSHAKE_MESSAGE_BYTES, Nonce, ProtocolVersion, ServerToAgent,
 };
 use tokio::sync::OwnedSemaphorePermit;
-use tokio::time::{sleep, timeout};
-use tracing::{error, info, warn};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
+use tracing::{debug, error, info, warn};
 
 use super::Gateway;
 use super::audit::{self, AuditEvent};
 use super::handshake::{self, Accepted, Rejection};
-use super::store::{AgentInfo, Device, DeviceStatus, DeviceStore, SessionId};
+use super::registry::Registration;
+use super::store::{AgentInfo, DeviceStatus, DeviceStore, SessionId};
+
+/// How many dropped messages of one session get a log line each. A device that keeps
+/// sending what the server cannot read stays connected (ADR-0006), without filling the log.
+const DROPS_LOGGED: u32 = 8;
 
 /// Why an authenticated session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,23 +67,35 @@ pub(crate) async fn run<D, St, Si, E>(
     Si: Sink<Message> + Unpin,
 {
     let limits = gateway.limits;
-    // One deadline for the whole handshake, the store included: a peer cannot stretch it
-    // by sending slowly.
-    let outcome = timeout(
-        limits.handshake,
-        handshake(gateway, version, &mut stream, &mut sink),
-    )
-    .await
-    .unwrap_or(Err(Rejection::TimedOut.into()));
+    // The deadline covers what the peer controls: sending its one message. Judging that
+    // message is the server's own work and is never cut short. A store call dropped
+    // halfway could leave a device enrolled that nobody was told about, the audit log
+    // included, and the peer would get to choose the moment.
+    let first = timeout(limits.handshake, first_message(&mut stream, &mut sink))
+        .await
+        .unwrap_or(Err(Rejection::TimedOut));
+    let outcome = match first {
+        Ok((nonce, message)) => {
+            let claimed = match &message {
+                AgentToServer::Hello { device_id, .. } => Some(*device_id),
+                _ => None,
+            };
+            handshake::answer(&gateway.store, version, &nonce, message, gateway.now())
+                .await
+                .map_err(|reason| (reason, claimed))
+        }
+        Err(reason) => Err((reason, None)),
+    };
 
     match outcome {
         Ok(Accepted::Authenticated { device, about }) => {
             drop(permit);
-            session(gateway, version, device, &about, &mut stream, &mut sink).await;
+            session(gateway, version, device.id, &about, &mut stream, &mut sink).await;
         }
         Ok(Accepted::Enrolled {
             device_id,
             customer,
+            public_key,
             status,
             repeated,
         }) => {
@@ -88,56 +105,48 @@ pub(crate) async fn run<D, St, Si, E>(
                 audit::record(&AuditEvent::DeviceEnrolled {
                     device: device_id,
                     customer,
+                    public_key,
                     status,
                 });
             }
             // If this is lost on the way the agent enrolls again and gets the same answer.
             let _ = send(&mut sink, &ServerToAgent::Enrolled { device_id }).await;
-            close(limits.close, &mut stream, &mut sink).await;
-            drop(permit);
         }
-        Err(Refused { reason, claimed }) => {
-            info!(
-                ?reason,
-                claimed_device = claimed.map(tracing::field::display),
-                version = version.number(),
-                "handshake refused"
-            );
-            close(limits.close, &mut stream, &mut sink).await;
-            drop(permit);
-        }
+        Err((reason, claimed)) => refused(reason, claimed, version),
     }
+    close(limits.close, &mut stream, &mut sink).await;
 }
 
-/// A handshake that failed, with what the log wants to know about it.
-struct Refused {
-    reason: Rejection,
-    /// The id a `Hello` came with. A claim and nothing more: no key was proven.
-    claimed: Option<DeviceId>,
-}
-
-impl From<Rejection> for Refused {
-    fn from(reason: Rejection) -> Self {
-        Self {
+/// Records a refused handshake. `claimed` is the id a `Hello` came with: proven if the
+/// refusal came after the signature was checked, and a claim and nothing more otherwise.
+fn refused(reason: Rejection, claimed: Option<DeviceId>, version: ProtocolVersion) {
+    if reason.follows_a_real_credential() {
+        audit::record(&AuditEvent::HandshakeRefused {
             reason,
-            claimed: None,
-        }
+            device: claimed,
+        });
+    } else {
+        // Anyone who reaches the port can cause these, as often as they like, so they are
+        // not worth a line at the default level.
+        debug!(
+            ?reason,
+            claimed_device = claimed.map(tracing::field::display),
+            version = version.number(),
+            "handshake refused"
+        );
     }
 }
 
-/// Sends the challenge and judges the one message that may answer it.
-async fn handshake<D, St, Si, E>(
-    gateway: &Gateway<D>,
-    version: ProtocolVersion,
+/// Sends the challenge and reads the one message that may answer it.
+async fn first_message<St, Si, E>(
     stream: &mut St,
     sink: &mut Si,
-) -> Result<Accepted, Refused>
+) -> Result<(Nonce, AgentToServer), Rejection>
 where
-    D: DeviceStore,
     St: Stream<Item = Result<Message, E>> + Unpin,
     Si: Sink<Message> + Unpin,
 {
-    // Kept here and nowhere else: when the connection goes, so does the nonce.
+    // Kept by the caller and nowhere else: when the connection goes, so does the nonce.
     let nonce = fresh_nonce()?;
     send(sink, &ServerToAgent::Challenge { nonce })
         .await
@@ -145,25 +154,16 @@ where
 
     let text = match stream.next().await {
         Some(Ok(Message::Text(text))) => text,
-        Some(Ok(Message::Close(_)) | Err(_)) | None => {
-            return Err(Rejection::Disconnected.into());
-        }
+        Some(Ok(Message::Close(_)) | Err(_)) | None => return Err(Rejection::Disconnected),
         // Binary, and ping and pong too: before the handshake there is one thing to say.
-        Some(Ok(_)) => return Err(Rejection::NotText.into()),
+        Some(Ok(_)) => return Err(Rejection::NotText),
     };
     if text.len() > MAX_HANDSHAKE_MESSAGE_BYTES {
-        return Err(Rejection::TooLarge.into());
+        return Err(Rejection::TooLarge);
     }
     let message = serde_json::from_str::<AgentToServer>(text.as_str())
         .map_err(|error| Rejection::Unparseable(error.classify()))?;
-
-    let claimed = match &message {
-        AgentToServer::Hello { device_id, .. } => Some(*device_id),
-        _ => None,
-    };
-    handshake::answer(&gateway.store, version, &nonce, message, gateway.now())
-        .await
-        .map_err(|reason| Refused { reason, claimed })
+    Ok((nonce, message))
 }
 
 /// 32 bytes from the operating system. If it has none to give, nobody gets a challenge:
@@ -177,11 +177,12 @@ fn fresh_nonce() -> Result<Nonce, Rejection> {
     Ok(Nonce::from_bytes(bytes))
 }
 
-/// Everything after `Hello` was accepted, until the session ends.
+/// Everything after `Hello` was accepted, until the session ends. The caller closes the
+/// connection.
 async fn session<D, St, Si, E>(
     gateway: &Gateway<D>,
     version: ProtocolVersion,
-    device: Device,
+    id: DeviceId,
     about: &AgentInfo,
     stream: &mut St,
     sink: &mut Si,
@@ -190,51 +191,19 @@ async fn session<D, St, Si, E>(
     St: Stream<Item = Result<Message, E>> + Unpin,
     Si: Sink<Message> + Unpin,
 {
-    let id = device.id;
     let session = SessionId::new();
-    let (registration, replaced) = gateway.registry.register(id, session);
-    if let Some(old) = replaced {
-        audit::record(&AuditEvent::SessionReplaced {
-            device: id,
-            old,
-            new: session,
-        });
-    }
+    let Some(registration) = start(gateway, version, id, session, about).await else {
+        return;
+    };
 
-    let end = match gateway
-        .store
-        .session_started(id, session, about, gateway.now())
-        .await
-    {
-        Ok(()) => {
-            audit::record(&AuditEvent::SessionStarted {
-                device: id,
-                session,
-            });
-            info!(
-                device = %id,
-                %session,
-                status = ?device.status,
-                version = version.number(),
-                agent_version = %about.agent_version,
-                os = %about.os,
-                "agent connected"
-            );
-            if send(sink, &ServerToAgent::Welcome {}).await.is_ok() {
-                let limit = gateway.limits.session;
-                tokio::select! {
-                    end = serve(gateway, &device, stream) => end,
-                    () = registration.replaced() => SessionEnd::Replaced,
-                    () = sleep(limit) => SessionEnd::Expired,
-                }
-            } else {
-                SessionEnd::Disconnected
-            }
+    let end = if send(sink, &ServerToAgent::Welcome {}).await.is_ok() {
+        tokio::select! {
+            end = serve(gateway, id, stream) => end,
+            () = registration.replaced() => SessionEnd::Replaced,
+            () = sleep(gateway.limits.session) => SessionEnd::Expired,
         }
-        Err(error) => {
-            error!(device = %id, %error, "the device store failed at the start of a session");
-            SessionEnd::StoreFailed
-        }
+    } else {
+        SessionEnd::Disconnected
     };
 
     // The place in the registry goes first, so a session that starts now is not mistaken
@@ -252,23 +221,105 @@ async fn session<D, St, Si, E>(
         session,
         reason: end,
     });
-    close(gateway.limits.close, stream, sink).await;
+}
+
+/// Records the new session in the store, then gives it the device's place in the registry.
+/// `None` if the store refused it or failed: then nothing was replaced and nobody is
+/// welcomed.
+async fn start<'a, D: DeviceStore>(
+    gateway: &'a Gateway<D>,
+    version: ProtocolVersion,
+    id: DeviceId,
+    session: SessionId,
+    about: &AgentInfo,
+) -> Option<Registration<'a>> {
+    // Held across both steps, so two connections of one device reach the store and the
+    // registry in the same order. See `Registry::starting`.
+    let _turn = gateway.registry.starting(id).await;
+
+    let started = gateway
+        .store
+        .session_started(id, session, about, gateway.now())
+        .await;
+    let status = match started {
+        Ok(Some(status @ (DeviceStatus::Active | DeviceStatus::Pending))) => status,
+        Ok(Some(DeviceStatus::Revoked) | None) => {
+            // Revoked after the handshake looked. The signature was good, so the id is
+            // proven and this is the key of a revoked device in use.
+            audit::record(&AuditEvent::HandshakeRefused {
+                reason: Rejection::RevokedDevice,
+                device: Some(id),
+            });
+            return None;
+        }
+        Err(error) => {
+            error!(device = %id, %error, "the device store failed at the start of a session");
+            return None;
+        }
+    };
+
+    // Only now, with the store's word for it, does the session that was there have to go.
+    let (registration, replaced) = gateway.registry.register(id, session);
+    if let Some(old) = replaced {
+        audit::record(&AuditEvent::SessionReplaced {
+            device: id,
+            old,
+            new: session,
+        });
+    }
+    audit::record(&AuditEvent::SessionStarted {
+        device: id,
+        session,
+    });
+    info!(
+        device = %id,
+        %session,
+        ?status,
+        version = version.number(),
+        agent_version = %about.agent_version,
+        os = %about.os,
+        "agent connected"
+    );
+    Some(registration)
 }
 
 /// Reads what the agent sends until something ends the session.
-async fn serve<D, St, E>(gateway: &Gateway<D>, device: &Device, stream: &mut St) -> SessionEnd
+async fn serve<D, St, E>(gateway: &Gateway<D>, id: DeviceId, stream: &mut St) -> SessionEnd
 where
     D: DeviceStore,
     St: Stream<Item = Result<Message, E>> + Unpin,
 {
-    let id = device.id;
+    let interval = gateway.limits.status_check;
+    // The device's status is read again at least this often: by a heartbeat, or without
+    // one. A revoked device is out by then whatever it sends, or does not send (RF-04).
+    let mut check_at = Instant::now() + interval;
+    let mut drops = Drops::default();
+
     loop {
-        let text = match stream.next().await {
+        let frame = tokio::select! {
+            frame = stream.next() => frame,
+            () = sleep_until(check_at) => {
+                match gateway.store.device(id).await {
+                    Ok(Some(device)) if device.status != DeviceStatus::Revoked => {
+                        check_at = Instant::now() + interval;
+                        continue;
+                    }
+                    Ok(_) => return SessionEnd::Revoked,
+                    Err(error) => {
+                        error!(device = %id, %error, "the device store failed on a status check");
+                        return SessionEnd::StoreFailed;
+                    }
+                }
+            }
+        };
+        let text = match frame {
             Some(Ok(Message::Text(text))) => text,
             Some(Ok(Message::Close(_)) | Err(_)) | None => return SessionEnd::Disconnected,
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
             Some(Ok(Message::Binary(_))) => {
-                warn!(device = %id, "frame dropped: not text");
+                if drops.log_this_one(id) {
+                    warn!(device = %id, "frame dropped: not text");
+                }
                 continue;
             }
         };
@@ -276,14 +327,18 @@ where
             Ok(message) => message,
             Err(error) => {
                 // ADR-0006: logged and dropped. Only the kind of error, never its text.
-                warn!(device = %id, category = ?error.classify(), "message dropped: it does not parse");
+                if drops.log_this_one(id) {
+                    warn!(device = %id, category = ?error.classify(), "message dropped: it does not parse");
+                }
                 continue;
             }
         };
         match message {
             AgentToServer::Heartbeat { telemetry } => {
                 match gateway.store.heartbeat(id, &telemetry, gateway.now()).await {
-                    Ok(Some(DeviceStatus::Active | DeviceStatus::Pending)) => {}
+                    Ok(Some(DeviceStatus::Active | DeviceStatus::Pending)) => {
+                        check_at = Instant::now() + interval;
+                    }
                     Ok(Some(DeviceStatus::Revoked) | None) => return SessionEnd::Revoked,
                     Err(error) => {
                         error!(device = %id, %error, "the device store failed on a heartbeat");
@@ -293,12 +348,29 @@ where
             }
             AgentToServer::ActionResult(result) => {
                 // The server sends no actions yet (M2), so nothing can be answering one.
-                warn!(device = %id, request = %result.request_id, "action result dropped: nothing was asked");
+                if drops.log_this_one(id) {
+                    warn!(device = %id, request = %result.request_id, "action result dropped: nothing was asked");
+                }
             }
             AgentToServer::Enroll { .. } | AgentToServer::Hello { .. } => {
                 return SessionEnd::HandshakeRepeated;
             }
         }
+    }
+}
+
+/// Counts what a session dropped, so that only the first few are logged.
+#[derive(Default)]
+struct Drops(u32);
+
+impl Drops {
+    /// Whether this drop still gets a line. The first one that does not gets a notice.
+    fn log_this_one(&mut self, id: DeviceId) -> bool {
+        self.0 = self.0.saturating_add(1);
+        if self.0 == DROPS_LOGGED + 1 {
+            warn!(device = %id, "further drops are no longer logged for this session");
+        }
+        self.0 <= DROPS_LOGGED
     }
 }
 
@@ -346,6 +418,7 @@ mod tests {
         ActionOutcome, ActionResult, AgentToServer, DeviceId, MAX_HANDSHAKE_MESSAGE_BYTES, Nonce,
         PublicKey, RequestId, ServerToAgent, TelemetrySnapshot, enroll_transcript,
     };
+    use tokio::sync::Semaphore;
     use tokio::time::Instant;
 
     use super::*;
@@ -983,13 +1056,21 @@ mod tests {
         }
     }
 
-    /// A store that works until it is told to break.
+    /// A store that works until it is told to misbehave.
     struct Flaky {
         inner: MemoryStore,
         /// Every call fails.
         broken: AtomicBool,
-        /// Only recording the start of a session fails.
+        /// Recording the start of a session fails.
         no_sessions: AtomicBool,
+        /// The device is revoked just before the start of its session is recorded.
+        revoke_at_start: AtomicBool,
+        /// An enrollment is stored at once and answered half a minute later.
+        slow_enroll: AtomicBool,
+        /// The next start of a session waits here for a permit, after saying so in `held`.
+        hold_next_start: AtomicBool,
+        held: AtomicBool,
+        release: Semaphore,
     }
 
     #[derive(Debug)]
@@ -1004,6 +1085,19 @@ mod tests {
     impl std::error::Error for Broken {}
 
     impl Flaky {
+        fn over(inner: &MemoryStore) -> Self {
+            Self {
+                inner: inner.clone(),
+                broken: AtomicBool::new(false),
+                no_sessions: AtomicBool::new(false),
+                revoke_at_start: AtomicBool::new(false),
+                slow_enroll: AtomicBool::new(false),
+                hold_next_start: AtomicBool::new(false),
+                held: AtomicBool::new(false),
+                release: Semaphore::new(0),
+            }
+        }
+
         fn check(&self) -> Result<(), Broken> {
             if self.broken.load(Ordering::SeqCst) {
                 Err(Broken)
@@ -1027,7 +1121,11 @@ mod tests {
             now: DateTime<Utc>,
         ) -> Result<EnrollOutcome, Broken> {
             self.check()?;
-            self.inner.enroll(request, now).await.map_err(never)
+            let outcome = self.inner.enroll(request, now).await;
+            if self.slow_enroll.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            outcome.map_err(never)
         }
 
         async fn device(&self, id: DeviceId) -> Result<Option<Device>, Broken> {
@@ -1041,10 +1139,18 @@ mod tests {
             session: SessionId,
             about: &AgentInfo,
             now: DateTime<Utc>,
-        ) -> Result<(), Broken> {
+        ) -> Result<Option<DeviceStatus>, Broken> {
             self.check()?;
             if self.no_sessions.load(Ordering::SeqCst) {
                 return Err(Broken);
+            }
+            if self.revoke_at_start.load(Ordering::SeqCst) {
+                self.inner.revoke_device(id);
+            }
+            if self.hold_next_start.swap(false, Ordering::SeqCst) {
+                self.held.store(true, Ordering::SeqCst);
+                let permit = self.release.acquire().await.map_err(|_| Broken)?;
+                permit.forget();
             }
             let started = self.inner.session_started(id, session, about, now).await;
             started.map_err(never)
@@ -1073,42 +1179,59 @@ mod tests {
         }
     }
 
+    /// Enrolls `device` at a gateway over a [`Flaky`] store.
+    async fn enroll_at(gateway: &Arc<Gateway<Flaky>>, device: &TestDevice) -> DeviceId {
+        let mut peer = Peer::connect(gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&device.enroll(&nonce, &token(1))));
+        let Some(Sent::Message(ServerToAgent::Enrolled { device_id })) = peer.receive().await
+        else {
+            panic!("not enrolled");
+        };
+        closed_at_once(&mut peer).await;
+        device_id
+    }
+
+    /// Says `Hello` as `device` on a new connection, without waiting for the answer.
+    async fn hello_at(gateway: &Arc<Gateway<Flaky>>, device: &TestDevice, id: DeviceId) -> Peer {
+        let mut peer = Peer::connect(gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&device.hello(&nonce, id)));
+        peer
+    }
+
     /// Invariant 7: when the server cannot check, the answer is no.
     #[tokio::test(start_paused = true)]
     async fn a_store_that_fails_lets_nobody_in_and_keeps_nobody() {
         let inner = store_with_token(1, 2);
-        let flaky = Flaky {
-            inner: inner.clone(),
-            broken: AtomicBool::new(false),
-            no_sessions: AtomicBool::new(false),
-        };
-        let gateway = gateway_with(flaky, Limits::default());
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
         let device = TestDevice::new(10);
-        let id = {
-            let mut peer = Peer::connect(&gateway);
-            let nonce = peer.challenge().await;
-            peer.send(text(&device.enroll(&nonce, &token(1))));
-            let Some(Sent::Message(ServerToAgent::Enrolled { device_id })) = peer.receive().await
-            else {
-                panic!("not enrolled");
-            };
-            device_id
-        };
+        let id = enroll_at(&gateway, &device).await;
 
-        // It cannot record that a session began: the session never begins.
-        gateway.store.no_sessions.store(true, Ordering::SeqCst);
-        let mut peer = Peer::connect(&gateway);
-        let nonce = peer.challenge().await;
-        peer.send(text(&device.hello(&nonce, id)));
-        closed_at_once(&mut peer).await;
-        peer.finished().await;
-        assert_eq!(gateway.registry.current(id), None);
-        gateway.store.no_sessions.store(false, Ordering::SeqCst);
+        // It cannot record that a session began: the session never begins, and the one
+        // the device already has is left alone.
+        let mut first = hello_at(&gateway, &device, id).await;
+        assert_eq!(
+            first.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+        let session = gateway.registry.current(id);
+        {
+            let (logs, _guard) = Logs::capture();
+            gateway.store.no_sessions.store(true, Ordering::SeqCst);
+            let mut peer = hello_at(&gateway, &device, id).await;
+            closed_at_once(&mut peer).await;
+            peer.finished().await;
+            gateway.store.no_sessions.store(false, Ordering::SeqCst);
+            assert!(!logs.text().contains("session_replaced"), "{}", logs.text());
+        }
+        assert!(session.is_some());
+        assert_eq!(gateway.registry.current(id), session);
+        assert_eq!(inner.record(id).unwrap().online, session);
+        first.finished().await;
 
         // It breaks in the middle of a session: the session ends.
-        let mut peer = Peer::connect(&gateway);
-        let nonce = peer.challenge().await;
-        peer.send(text(&device.hello(&nonce, id)));
+        let mut peer = hello_at(&gateway, &device, id).await;
         assert_eq!(
             peer.receive().await,
             Some(Sent::Message(ServerToAgent::Welcome {}))
@@ -1139,5 +1262,245 @@ mod tests {
             logs.text()
         );
         assert_eq!(inner.uses_left(&TokenHash::of(&token(1))), Some(1));
+    }
+
+    /// RF-04: revocation does not wait for the device to say something. A stolen key that
+    /// authenticates and then keeps quiet, or sends anything but heartbeats, is out at
+    /// the next check.
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_device_that_sends_no_heartbeat_is_dropped_at_the_next_check() {
+        let (gateway, store, device, id) = enrolled().await;
+        let (logs, _guard) = Logs::capture();
+        let mut peer = authenticate(&gateway, &device, id).await;
+        let started = Instant::now();
+
+        store.revoke_device(id);
+        peer.send(Message::Ping(Vec::new().into()));
+        peer.send(Message::Text("not a heartbeat".into()));
+        peer.send(Message::Binary(vec![0].into()));
+        assert_eq!(peer.rest().await, [Sent::Closed]);
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        peer.finished().await;
+
+        assert_eq!(store.record(id).unwrap().online, None);
+        assert_eq!(gateway.registry.current(id), None);
+        assert!(logs.text().contains("reason=Revoked"), "{}", logs.text());
+    }
+
+    /// The check does nothing to a device in good standing, and a heartbeat counts as one.
+    #[tokio::test(start_paused = true)]
+    async fn a_quiet_device_in_good_standing_stays_connected() {
+        let (gateway, store, device, id) = enrolled().await;
+        let mut peer = authenticate(&gateway, &device, id).await;
+
+        tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+        peer.send(text(&heartbeat(7)));
+        eventually("the session is still there", || {
+            store.record(id).unwrap().telemetry == Some(telemetry(7))
+        })
+        .await;
+        assert!(gateway.registry.current(id).is_some());
+        peer.finished().await;
+    }
+
+    /// The handshake reads the status, and a moment later the session starts. A device
+    /// revoked in between gets no `Welcome` and never shows as connected.
+    #[tokio::test(start_paused = true)]
+    async fn a_device_revoked_while_its_session_starts_is_not_welcomed() {
+        let inner = store_with_token(1, 1);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+        let (logs, _guard) = Logs::capture();
+
+        gateway.store.revoke_at_start.store(true, Ordering::SeqCst);
+        let mut peer = hello_at(&gateway, &device, id).await;
+        closed_at_once(&mut peer).await;
+        peer.finished().await;
+
+        assert_eq!(inner.record(id).unwrap().online, None);
+        assert_eq!(gateway.registry.current(id), None);
+        let logs = logs.text();
+        assert!(logs.contains("handshake_refused"), "{logs}");
+        assert!(logs.contains("reason=RevokedDevice"), "{logs}");
+        assert!(!logs.contains("session_started"), "{logs}");
+    }
+
+    /// Two connections of one device at the same moment, and a store that takes its time
+    /// with the first. Whatever the order, the store and the registry must end up naming
+    /// the same session: otherwise the device shows as offline while it is connected.
+    #[tokio::test(start_paused = true)]
+    async fn two_sessions_of_one_device_start_one_after_the_other() {
+        let inner = store_with_token(1, 1);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+
+        gateway.store.hold_next_start.store(true, Ordering::SeqCst);
+        let mut first = hello_at(&gateway, &device, id).await;
+        eventually("the first session is being recorded", || {
+            gateway.store.held.load(Ordering::SeqCst)
+        })
+        .await;
+        let mut second = hello_at(&gateway, &device, id).await;
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+        }
+        gateway.store.release.add_permits(1);
+
+        assert_eq!(
+            second.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+        // The first one was welcomed and then replaced.
+        let rest = first.rest().await;
+        assert_eq!(
+            rest,
+            [Sent::Message(ServerToAgent::Welcome {}), Sent::Closed]
+        );
+        first.finished().await;
+
+        let session = gateway.registry.current(id);
+        assert!(session.is_some());
+        assert_eq!(inner.record(id).unwrap().online, session);
+        second.send(text(&heartbeat(3)));
+        eventually("the session that stayed works", || {
+            inner.record(id).unwrap().telemetry == Some(telemetry(3))
+        })
+        .await;
+        second.finished().await;
+        assert_eq!(inner.record(id).unwrap().online, None);
+    }
+
+    /// The deadline is for the peer. Once its message is in, judging it is the server's
+    /// own work and is not cut short: an enrollment stored and then abandoned would be a
+    /// device nobody was told about, the audit log included.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_store_does_not_lose_an_enrollment_to_the_deadline() {
+        let inner = store_with_token(1, 1);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        gateway.store.slow_enroll.store(true, Ordering::SeqCst);
+        let device = TestDevice::new(10);
+        let (logs, _guard) = Logs::capture();
+        let started = Instant::now();
+
+        let mut peer = Peer::connect(&gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&device.enroll(&nonce, &token(1))));
+        let Some(Sent::Message(ServerToAgent::Enrolled { device_id })) = peer.receive().await
+        else {
+            panic!("not enrolled: {}", logs.text());
+        };
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        closed_at_once(&mut peer).await;
+
+        assert!(inner.record(device_id).is_some());
+        let logs = logs.text();
+        let enrolled = logs
+            .lines()
+            .find(|line| line.contains("device_enrolled"))
+            .unwrap_or_else(|| panic!("not audited: {logs}"));
+        assert!(
+            enrolled.contains(&format!("device={device_id}")),
+            "{enrolled}"
+        );
+        assert!(
+            enrolled.contains(&format!("public_key={}", device.public_key())),
+            "{enrolled}"
+        );
+    }
+
+    /// A refusal that followed a real token or a real key is what a leak looks like, and
+    /// goes to the audit log. A refusal anyone can cause does not: the audit log is not
+    /// for strangers to write in.
+    #[tokio::test(start_paused = true)]
+    async fn refusals_after_a_real_token_or_key_are_audited() {
+        let store = store_with_token(1, 1);
+        let gateway = gateway(store.clone());
+        let device = TestDevice::new(10);
+        let id = enroll(&gateway, &device, 1).await;
+        let stranger = TestDevice::new(11);
+        let elsewhere = Nonce::from_bytes([7; 32]);
+        let audited = |logs: &Logs| {
+            let logs = logs.text();
+            logs.lines()
+                .find(|line| line.contains("ponte::audit") && line.contains("handshake_refused"))
+                .map(str::to_owned)
+        };
+
+        // The token is spent: whoever sends it again has a copy of it.
+        let (logs, guard) = Logs::capture();
+        let mut peer = Peer::connect(&gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&stranger.enroll(&nonce, &token(1))));
+        closed_at_once(&mut peer).await;
+        let line = audited(&logs).unwrap_or_else(|| panic!("not audited: {}", logs.text()));
+        assert!(line.contains("reason=Enrollment(ExhaustedToken)"), "{line}");
+        drop(guard);
+
+        // The device is revoked: whoever says hello with its key has the key.
+        store.revoke_device(id);
+        let (logs, guard) = Logs::capture();
+        let mut peer = Peer::connect(&gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&device.hello(&nonce, id)));
+        closed_at_once(&mut peer).await;
+        let line = audited(&logs).unwrap_or_else(|| panic!("not audited: {}", logs.text()));
+        assert!(line.contains("reason=RevokedDevice"), "{line}");
+        assert!(line.contains(&format!("device={id}")), "{line}");
+        drop(guard);
+
+        // Things anyone can send, as often as they like.
+        let (logs, _guard) = Logs::capture();
+        for frame in [
+            Message::Text("hello?".into()),
+            text(&stranger.hello(&elsewhere, id)),
+            text(&stranger.hello(&elsewhere, DeviceId::new())),
+            text(&stranger.enroll(&elsewhere, &token(1))),
+        ] {
+            let mut peer = Peer::connect(&gateway);
+            peer.challenge().await;
+            peer.send(frame);
+            closed_at_once(&mut peer).await;
+            peer.finished().await;
+        }
+        let mut peer = Peer::connect(&gateway);
+        let nonce = peer.challenge().await;
+        peer.send(text(&stranger.enroll(&nonce, &token(9))));
+        closed_at_once(&mut peer).await;
+        peer.finished().await;
+        assert_eq!(audited(&logs), None, "{}", logs.text());
+        assert!(logs.text().contains("handshake refused"), "{}", logs.text());
+    }
+
+    /// ADR-0006 keeps the session open for an agent that sends what the server cannot
+    /// read. It does not owe that agent a log line for each message.
+    #[tokio::test(start_paused = true)]
+    async fn only_the_first_dropped_messages_of_a_session_are_logged() {
+        let (gateway, store, device, id) = enrolled().await;
+        let (logs, _guard) = Logs::capture();
+        let peer = authenticate(&gateway, &device, id).await;
+
+        for _ in 0..50 {
+            peer.send(Message::Text("not json".into()));
+            peer.send(Message::Binary(vec![0].into()));
+        }
+        peer.send(text(&heartbeat(1)));
+        eventually("the heartbeat after the noise is recorded", || {
+            store.record(id).unwrap().telemetry == Some(telemetry(1))
+        })
+        .await;
+
+        let logs = logs.text();
+        let dropped = logs
+            .lines()
+            .filter(|line| line.contains("dropped:"))
+            .count();
+        assert_eq!(dropped, 8, "{logs}");
+        let notices = logs
+            .lines()
+            .filter(|line| line.contains("no longer logged"))
+            .count();
+        assert_eq!(notices, 1, "{logs}");
     }
 }

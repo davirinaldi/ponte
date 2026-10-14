@@ -29,6 +29,7 @@ pub(crate) enum Accepted {
     Enrolled {
         device_id: DeviceId,
         customer: CustomerId,
+        public_key: PublicKey,
         status: DeviceStatus,
         repeated: bool,
     },
@@ -62,8 +63,31 @@ pub(crate) enum Rejection {
     ServerFailure,
 }
 
-/// A valid key nobody enrolled with, to spend the time of a verification on when there is
-/// no stored key to check (RFC 8032, test 1). Its private half is public knowledge, so a
+impl Rejection {
+    /// Whether the peer showed something real before it was refused: a token the server
+    /// issued, or the key of a device it knows. That is what a leaked token or a stolen key
+    /// looks like from here, so these refusals are audited. The others can be produced by
+    /// anyone who reaches the port.
+    pub(crate) fn follows_a_real_credential(self) -> bool {
+        match self {
+            Self::RevokedDevice => true,
+            Self::Enrollment(refusal) => refusal != EnrollRefusal::UnknownToken,
+            Self::TimedOut
+            | Self::Disconnected
+            | Self::NotText
+            | Self::TooLarge
+            | Self::Unparseable(_)
+            | Self::NotAHandshake
+            | Self::UnusableKey
+            | Self::BadSignature
+            | Self::UnknownDevice
+            | Self::ServerFailure => false,
+        }
+    }
+}
+
+/// A valid key nobody can enroll with, to spend the time of a verification on when there
+/// is no stored key to check (RFC 8032, test 1). Its private half is public knowledge, so a
 /// signature that verifies under it proves nothing and is never treated as if it did.
 const DECOY_KEY: [u8; 32] = [
     0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
@@ -110,6 +134,7 @@ pub(crate) async fn answer<D: DeviceStore>(
                 } => Ok(Accepted::Enrolled {
                     device_id,
                     customer,
+                    public_key,
                     status,
                     repeated,
                 }),
@@ -133,7 +158,7 @@ pub(crate) async fn answer<D: DeviceStore>(
             let verified = match &stored_key {
                 Some(key) => verify(key, &transcript, &signature),
                 None => {
-                    if let Some(decoy) = usable_key(&PublicKey::from_bytes(DECOY_KEY)) {
+                    if let Ok(decoy) = VerifyingKey::from_bytes(&DECOY_KEY) {
                         // The result is dropped on purpose: see `DECOY_KEY`.
                         let _ = verify(&decoy, &transcript, &signature);
                     }
@@ -144,6 +169,12 @@ pub(crate) async fn answer<D: DeviceStore>(
             let Some(device) = device else {
                 return Err(Rejection::UnknownDevice);
             };
+            // The signature covers the id that was asked for. A store that answers with
+            // another device would turn a proof for one into a session for the other.
+            if device.id != device_id {
+                error!(asked = %device_id, got = %device.id, "the device store answered with another device");
+                return Err(Rejection::ServerFailure);
+            }
             verified?;
             // After the signature: only the device itself gets far enough to be told apart
             // in the log as revoked.
@@ -161,9 +192,13 @@ pub(crate) async fn answer<D: DeviceStore>(
     }
 }
 
-// The key as something to verify with, unless it is malformed or weak. A weak key makes
-/// signatures that verify for many messages, so one never becomes an identity.
+/// The key as something to verify with, unless it is malformed, weak or the decoy. A weak
+/// key makes signatures that verify for many messages, and anyone can sign with the decoy,
+/// so neither ever becomes an identity.
 fn usable_key(key: &PublicKey) -> Option<VerifyingKey> {
+    if key.as_bytes() == &DECOY_KEY {
+        return None;
+    }
     VerifyingKey::from_bytes(key.as_bytes())
         .ok()
         .filter(|key| !key.is_weak())
@@ -605,8 +640,8 @@ mod tests {
             _: SessionId,
             _: &AgentInfo,
             _: DateTime<Utc>,
-        ) -> Result<(), Infallible> {
-            Ok(())
+        ) -> Result<Option<DeviceStatus>, Infallible> {
+            Ok(Some(self.0.status))
         }
 
         async fn heartbeat(
@@ -638,7 +673,9 @@ mod tests {
             "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
         ));
         assert_eq!(decoy.public_key().as_bytes(), &DECOY_KEY);
-        assert!(usable_key(&PublicKey::from_bytes(DECOY_KEY)).is_some());
+        // A real key, so checking against it costs what any other check costs.
+        assert!(VerifyingKey::from_bytes(&DECOY_KEY).is_ok_and(|key| !key.is_weak()));
+        assert!(usable_key(&decoy.public_key()).is_none());
 
         let id = DeviceId::new();
         let message = || decoy.hello(&nonce(1), id);
@@ -650,8 +687,8 @@ mod tests {
             Err(Rejection::UnknownDevice)
         );
 
-        // Someone has it, but the key in the store is damaged.
-        for stored in [[0; 32], [0xff; 32]] {
+        // Someone has it, but the key in the store is damaged, or is the decoy itself.
+        for stored in [[0; 32], [0xff; 32], DECOY_KEY] {
             let store = OneDevice(Device {
                 id,
                 customer: CustomerId::new(),
@@ -661,14 +698,67 @@ mod tests {
             assert_eq!(judge(&store, message()).await, Err(Rejection::BadSignature));
         }
 
-        // The decoy is a key like any other once it is the one in the store.
-        let store = OneDevice(Device {
-            id,
-            customer: CustomerId::new(),
-            public_key: decoy.public_key(),
-            status: DeviceStatus::Active,
-        });
-        assert!(judge(&store, message()).await.is_ok());
+        // And it never gets into a store through the front door.
+        let store = store_with_token(1, 1);
+        assert_eq!(
+            judge(&store, decoy.enroll(&nonce(1), &token(1))).await,
+            Err(Rejection::UnusableKey)
+        );
+        assert_eq!(uses_left(&store, 1), Some(1));
+    }
+
+    /// The proof is for the id in the message. If the store hands back some other device,
+    /// that proof must not open a session as it.
+    #[tokio::test]
+    async fn a_store_that_answers_with_another_device_lets_nobody_in() {
+        let device = TestDevice::new(10);
+        let (asked, other) = (DeviceId::new(), DeviceId::new());
+        let stored = |id| {
+            OneDevice(Device {
+                id,
+                customer: CustomerId::new(),
+                public_key: device.public_key(),
+                status: DeviceStatus::Active,
+            })
+        };
+
+        let message = || device.hello(&nonce(1), asked);
+        assert!(judge(&stored(asked), message()).await.is_ok());
+        assert_eq!(
+            judge(&stored(other), message()).await,
+            Err(Rejection::ServerFailure)
+        );
+    }
+
+    /// The audit log gets the refusals that say a token or a key is in the wrong hands,
+    /// and none of the ones anyone on the network can cause at will.
+    #[test]
+    fn only_refusals_after_a_real_credential_are_for_the_audit_log() {
+        for audited in [
+            Rejection::RevokedDevice,
+            Rejection::Enrollment(EnrollRefusal::RevokedToken),
+            Rejection::Enrollment(EnrollRefusal::ExpiredToken),
+            Rejection::Enrollment(EnrollRefusal::ExhaustedToken),
+            Rejection::Enrollment(EnrollRefusal::KeyAlreadyEnrolled),
+            Rejection::Enrollment(EnrollRefusal::DeviceRevoked),
+        ] {
+            assert!(audited.follows_a_real_credential(), "{audited:?}");
+        }
+        for anyone in [
+            Rejection::TimedOut,
+            Rejection::Disconnected,
+            Rejection::NotText,
+            Rejection::TooLarge,
+            Rejection::Unparseable(Category::Syntax),
+            Rejection::NotAHandshake,
+            Rejection::UnusableKey,
+            Rejection::BadSignature,
+            Rejection::UnknownDevice,
+            Rejection::Enrollment(EnrollRefusal::UnknownToken),
+            Rejection::ServerFailure,
+        ] {
+            assert!(!anyone.follows_a_real_credential(), "{anyone:?}");
+        }
     }
 
     #[test]
