@@ -70,8 +70,11 @@ const SERVER_LOCK: i64 = 0x706f_6e74_652d_7376;
 /// This process serves the database. Dropping it gives the claim back.
 #[derive(Debug)]
 pub struct ServerClaim {
-    _connection: sqlx::PgConnection,
+    connection: sqlx::PgConnection,
 }
+
+/// How often a serving process checks that it still holds its claim ([`PgStore::hold_claim`]).
+pub const CLAIM_CHECK: Duration = Duration::from_secs(30);
 
 /// A store on a pool of connections to PostgreSQL. Clones share the pool.
 #[derive(Debug, Clone)]
@@ -179,6 +182,38 @@ fn corrupt(operation: &'static str, what: &'static str) -> PgStoreError {
     }
 }
 
+/// The parameters a database URL may carry. sqlx logs the name and the value of any other,
+/// and a mistyped `password` is still a password; `options` could set anything at all.
+const URL_PARAMETERS: [&str; 11] = [
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "sslmode",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "application_name",
+];
+
+/// Whether every parameter in the query of `url` is one of [`URL_PARAMETERS`], spelled
+/// exactly so.
+fn known_parameters_only(url: &str) -> bool {
+    let Some((_, query)) = url.split_once('?') else {
+        return true;
+    };
+    let query = query.split_once('#').map_or(query, |(query, _)| query);
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .all(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            URL_PARAMETERS.contains(&key)
+        })
+}
+
 /// A database on this machine may be reached any way. One elsewhere only over TLS with its
 /// certificate and name checked: the default, `prefer`, checks neither and falls back to
 /// plain text without a word (invariant 7).
@@ -253,10 +288,14 @@ impl PgStore {
     /// Connects to the database at `url`, with the limits of this module on every
     /// connection. Fails at once if the database cannot be reached.
     pub async fn connect(url: &str) -> Result<Self, PgStoreError> {
-        let options = PgConnectOptions::from_str(url).map_err(|_| PgStoreError {
+        let invalid = PgStoreError {
             operation: "connect",
             kind: ErrorKind::InvalidUrl,
-        })?;
+        };
+        if !known_parameters_only(url) {
+            return Err(invalid);
+        }
+        let options = PgConnectOptions::from_str(url).map_err(|_| invalid)?;
         Self::connect_with(PgPoolOptions::new(), options).await
     }
 
@@ -268,6 +307,9 @@ impl PgStore {
         secure_enough(&options)?;
         let options = options.application_name("ponte-server").options([
             ("statement_timeout", STATEMENT_LIMIT),
+            // A connection that waits is not ended for it: the claim's only answers pings.
+            // (PostgreSQL 14 or newer: older ones refuse the parameter.)
+            ("idle_session_timeout", "0"),
             (
                 "idle_in_transaction_session_timeout",
                 IDLE_IN_TRANSACTION_LIMIT,
@@ -329,11 +371,37 @@ impl PgStore {
                     kind: ErrorKind::AnotherServer,
                 });
             }
-            Ok(ServerClaim {
-                _connection: connection,
-            })
+            Ok(ServerClaim { connection })
         })
         .await
+    }
+
+    /// Keeps the claim for as long as this process serves, and returns only if it is lost
+    /// for good: another server holds it now.
+    ///
+    /// The database ends the claim's session without a word when it restarts, when an
+    /// administrator ends it, or when something on the network drops an idle connection;
+    /// the lock goes with it. Every `every`, the claim's connection is checked, which also
+    /// keeps it from looking idle. A lost claim is taken again. While the database cannot
+    /// be reached the check goes on: nobody else can take the claim then either.
+    pub async fn hold_claim(&self, claim: ServerClaim, every: Duration) -> PgStoreError {
+        let mut claim = claim;
+        loop {
+            tokio::time::sleep(every).await;
+            let ping = tokio::time::timeout(RELEASE_CHECK_LIMIT, claim.connection.ping()).await;
+            if matches!(ping, Ok(Ok(()))) {
+                continue;
+            }
+            warn!("the connection holding this server's claim on the database was lost");
+            match self.claim_server().await {
+                Ok(again) => {
+                    claim = again;
+                    warn!("this server's claim on the database was taken again");
+                }
+                Err(error) if error.kind() == ErrorKind::AnotherServer => return error,
+                Err(error) => warn!(%error, "claiming the database again failed; retrying"),
+            }
+        }
     }
 
     /// Brings the schema up to date. Safe to run while another process does the same.
@@ -975,6 +1043,34 @@ mod tests {
             "postgres://u:p@localhost.example.com/ponte",
         ] {
             assert_eq!(check(refused), Err(ErrorKind::InsecureTls), "{refused}");
+        }
+    }
+
+    /// sqlx logs the value of a parameter it does not know, and a mistyped `password` is
+    /// still a password. Only the parameters the server needs are taken.
+    #[tokio::test]
+    async fn a_url_with_a_parameter_the_server_does_not_take_is_refused() {
+        for refused in [
+            "postgres://u@localhost/ponte?passwrd=SECRET",
+            "postgres://u@localhost/ponte?sslmode=disable&sslpassword=SECRET",
+            "postgres://u@localhost/ponte?options=-c%20statement_timeout%3D0",
+            "postgres://u@localhost/ponte?ssl-mode=disable",
+            "postgres://u@localhost/ponte?SSLMODE=disable",
+            "postgres://u@localhost/ponte?=SECRET",
+        ] {
+            let error = PgStore::connect(refused).await.unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::InvalidUrl, "{refused}");
+            assert!(!error.to_string().contains("SECRET"), "{error}");
+        }
+        for taken in [
+            "postgres://u:p@localhost/ponte",
+            "postgres://u:p@localhost/ponte?",
+            "postgres://u:p@localhost/ponte?sslmode=disable&application_name=x",
+            "postgres:///ponte?host=/var/run/postgresql&user=u&dbname=ponte&port=5433",
+            "postgres://u@db.example.com/ponte?sslmode=verify-full&sslrootcert=ca.pem\
+             &sslcert=c.pem&sslkey=k.pem&hostaddr=192.0.2.1&password=p",
+        ] {
+            assert!(known_parameters_only(taken), "{taken}");
         }
     }
 

@@ -215,6 +215,69 @@ async fn pg_only_one_server_serves_a_database(pool: PgPoolOptions, options: PgCo
     .await;
 }
 
+/// The database can drop the claim's connection (a restart, an administrator, an idle
+/// limit). The server takes the claim again if nobody else did, and stops if somebody did.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_a_lost_claim_is_taken_again_or_the_server_stops(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let mut admin = PgConnection::connect_with(&options).await.unwrap();
+    let first = store(pool.clone(), options.clone()).await;
+    let second = store(pool, options).await;
+    let end_claims = async |admin: &mut PgConnection| {
+        sqlx::query(
+            "SELECT pg_terminate_backend(pid) FROM pg_locks \
+             WHERE locktype = 'advisory' AND pid <> pg_backend_pid()",
+        )
+        .execute(admin)
+        .await
+        .unwrap();
+    };
+
+    let claim = first.claim_server().await.unwrap();
+    let watch = tokio::spawn({
+        let first = first.clone();
+        async move { first.hold_claim(claim, Duration::from_millis(50)).await }
+    });
+
+    // Lost, and nobody else took it: taken again.
+    end_claims(&mut admin).await;
+    let mut held = false;
+    for _ in 0..200 {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted",
+        )
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+        // The old session may still be on its way out: wait for one holder, a new one.
+        if count == 1 && !watch.is_finished() {
+            held = true;
+            sleep(Duration::from_millis(200)).await;
+            break;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert!(held, "the claim was not taken again");
+    assert_eq!(
+        second.claim_server().await.unwrap_err().kind(),
+        ErrorKind::AnotherServer
+    );
+    assert!(!watch.is_finished());
+
+    // Lost, and another server took it first: the watch ends, and says why.
+    end_claims(&mut admin).await;
+    let taken = second.claim_server().await;
+    let lost = tokio::time::timeout(Duration::from_secs(5), watch)
+        .await
+        .expect("the watch never noticed")
+        .unwrap();
+    assert!(taken.is_ok());
+    assert_eq!(lost.kind(), ErrorKind::AnotherServer);
+}
+
 /// A row the code cannot read is an error, never a guess.
 #[sqlx::test]
 #[ignore = "needs PostgreSQL: DATABASE_URL"]
