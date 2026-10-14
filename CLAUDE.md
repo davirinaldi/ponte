@@ -19,7 +19,9 @@ Everything above is shared with other agents. This section only adds Claude Code
 - `/adr <title>`: record an architecture decision from the template.
 - `/ship-check`: run every check from the definition of done and summarise.
 - `security-reviewer` subagent: ask it to review any diff that touches actions, policy,
-  the agent, MCP or auth. It has not seen your reasoning, which is the point.
+  the agent, the server's handshake, store or database, MCP, auth, dependencies or CI. It
+  has not seen your reasoning, which is the point. For a fix commit, ask for a re-review
+  of that commit with the earlier findings.
 
 ### Guard rails already configured
 
