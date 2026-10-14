@@ -81,6 +81,16 @@ impl TokenHash {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// The first eight bytes in hex, for a log line: enough to find the token in a store,
+    /// and of no use to anyone who wants the token itself.
+    #[must_use]
+    pub fn short(&self) -> String {
+        self.0[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
 }
 
 impl fmt::Debug for TokenHash {
@@ -194,7 +204,11 @@ pub trait DeviceStore: Send + Sync + 'static {
     /// happen in one atomic step.
     ///
     /// The caller starts the sessions of one device one at a time, in the order in which
-    /// they take over from each other, so the last call is the session that stays.
+    /// they take over from each other, so the last call is the session that stays. That
+    /// holds within one server process, which is all there is for now.
+    ///
+    /// An error means nothing was written: the caller treats the session as never begun
+    /// and does not call [`DeviceStore::session_ended`] for it.
     fn session_started(
         &self,
         id: DeviceId,
@@ -533,6 +547,7 @@ mod tests {
         ];
         assert_eq!(hash.as_bytes(), &expected);
         assert_eq!(format!("{hash:?}"), "TokenHash(..)");
+        assert_eq!(hash.short(), "66687aadf862bd77");
 
         let store = MemoryStore::new();
         store.add_token(&token(1), grant(1));

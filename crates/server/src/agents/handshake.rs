@@ -37,6 +37,37 @@ pub(crate) enum Accepted {
     Authenticated { device: Device, about: AgentInfo },
 }
 
+/// What a first message says about who sent it, kept for the log. How much of it is proven
+/// depends on how far the handshake got: see [`Rejection::follows_a_real_credential`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Claim {
+    /// The id a `Hello` came with.
+    pub(crate) device: Option<DeviceId>,
+    /// The key an `Enroll` came with.
+    pub(crate) public_key: Option<PublicKey>,
+    /// The hash of the token an `Enroll` came with. Never the token.
+    pub(crate) token: Option<TokenHash>,
+}
+
+impl Claim {
+    pub(crate) fn of(message: &AgentToServer) -> Self {
+        match message {
+            AgentToServer::Hello { device_id, .. } => Self {
+                device: Some(*device_id),
+                ..Self::default()
+            },
+            AgentToServer::Enroll {
+                token, public_key, ..
+            } => Self {
+                public_key: Some(*public_key),
+                token: Some(TokenHash::of(token)),
+                ..Self::default()
+            },
+            AgentToServer::Heartbeat { .. } | AgentToServer::ActionResult(_) => Self::default(),
+        }
+    }
+}
+
 /// Why a handshake was refused. Never sent to the peer, and safe to log: no variant holds
 /// anything the peer wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +99,10 @@ impl Rejection {
     /// issued, or the key of a device it knows. That is what a leaked token or a stolen key
     /// looks like from here, so these refusals are audited. The others can be produced by
     /// anyone who reaches the port.
+    ///
+    /// When this is true the signature was already verified, so everything in the
+    /// [`Claim`] of the message is proven: the device is the one whose key signed, and the
+    /// enrolling peer holds the private half of the key it sent.
     pub(crate) fn follows_a_real_credential(self) -> bool {
         match self {
             Self::RevokedDevice => true,
@@ -148,22 +183,19 @@ pub(crate) async fn answer<D: DeviceStore>(
             signature,
         } => {
             let device = store.device(device_id).await.map_err(store_failed::<D>)?;
-            let stored_key = device
-                .as_ref()
-                .and_then(|device| usable_key(&device.public_key));
             let transcript = hello_transcript(version, nonce, device_id);
 
-            // One verification on every path, so the time it takes to refuse does not tell
-            // an id nobody has from one whose signature was wrong.
-            let verified = match &stored_key {
-                Some(key) => verify(key, &transcript, &signature),
-                None => {
-                    if let Ok(decoy) = VerifyingKey::from_bytes(&DECOY_KEY) {
-                        // The result is dropped on purpose: see `DECOY_KEY`.
-                        let _ = verify(&decoy, &transcript, &signature);
-                    }
-                    Err(Rejection::BadSignature)
-                }
+            // The same work on every path, so the time it takes to refuse does not tell an
+            // id nobody has from one whose signature was wrong: when there is no stored key
+            // the decoy takes its place, and is parsed and checked like any other.
+            let stored = device.as_ref().map(|device| device.public_key);
+            let candidate = stored.unwrap_or(PublicKey::from_bytes(DECOY_KEY));
+            let checked = parse_key(&candidate).map(|key| verify(&key, &transcript, &signature));
+            // What a check against the decoy says is dropped: see `DECOY_KEY`.
+            let trusted = stored.is_some() && !is_decoy(&candidate);
+            let verified = match checked {
+                Some(result) if trusted => result,
+                _ => Err(Rejection::BadSignature),
             };
 
             let Some(device) = device else {
@@ -196,9 +228,18 @@ pub(crate) async fn answer<D: DeviceStore>(
 /// key makes signatures that verify for many messages, and anyone can sign with the decoy,
 /// so neither ever becomes an identity.
 fn usable_key(key: &PublicKey) -> Option<VerifyingKey> {
-    if key.as_bytes() == &DECOY_KEY {
+    if is_decoy(key) {
         return None;
     }
+    parse_key(key)
+}
+
+fn is_decoy(key: &PublicKey) -> bool {
+    key.as_bytes() == &DECOY_KEY
+}
+
+/// The bytes as a key that is on the curve and not weak. Says nothing about whose it is.
+fn parse_key(key: &PublicKey) -> Option<VerifyingKey> {
     VerifyingKey::from_bytes(key.as_bytes())
         .ok()
         .filter(|key| !key.is_weak())

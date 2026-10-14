@@ -1,11 +1,14 @@
 use anyhow::Context;
 use tracing::{info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Layer, fmt};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let directives = std::env::var("RUST_LOG").ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(ponte_server::log_filter(directives.as_deref()))
+    tracing_subscriber::registry()
+        .with(fmt::layer().with_filter(ponte_server::log_filter(directives.as_deref())))
         .init();
 
     let bind = std::env::var("PONTE_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned());

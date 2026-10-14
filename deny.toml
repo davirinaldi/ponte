@@ -29,6 +29,9 @@ deny = [
   # TLS goes through rustls. See AGENTS.md.
   { name = "openssl" },
   { name = "openssl-sys" },
+  # Sends what dependencies write through the `log` crate to our output. The WebSocket
+  # library writes every frame there, enrollment tokens included. See the root Cargo.toml.
+  { name = "tracing-log" },
 ]
 
 [sources]

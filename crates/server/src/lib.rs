@@ -9,7 +9,11 @@ pub mod agents;
 
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
+use tracing::{Level, Metadata, Subscriber};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{FilterExt, filter_fn};
+use tracing_subscriber::layer::Filter;
+use tracing_subscriber::registry::LookupSpan;
 
 use agents::{DeviceStore, MemoryStore};
 
@@ -31,19 +35,26 @@ pub fn router_with<D: DeviceStore>(store: D) -> Router {
 }
 
 /// Builds the log filter of the server process from the value of `RUST_LOG`, or `info`
-/// when it is unset, empty or not valid.
+/// when it is unset, empty or not valid. Put it on the layer that writes the log.
 ///
 /// Whatever the value says, audit events stay on. Until the audit log exists (M3) the lines
 /// under the `ponte::audit` target are the only record of who enrolled and who was refused,
-/// and `RUST_LOG=warn` must not be a way to lose it.
-pub fn log_filter(directives: Option<&str>) -> EnvFilter {
-    // The last directive for a target wins, and a longer target wins over a shorter one.
-    let audit = format!("{}=info", agents::AUDIT_TARGET);
+/// and asking for a quieter log must not be a way to lose it.
+pub fn log_filter<S>(directives: Option<&str>) -> impl Filter<S> + Send + Sync + 'static
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
     let directives = directives
         .filter(|directives| !directives.trim().is_empty())
         .unwrap_or("info");
-    EnvFilter::try_new(format!("{directives},{audit}"))
-        .unwrap_or_else(|_| EnvFilter::new(format!("info,{audit}")))
+    let chosen = EnvFilter::try_new(directives).unwrap_or_else(|_| EnvFilter::new("info"));
+    // A filter beside the one from the variable, not one more directive in it: a directive
+    // can always be outranked by a more specific one.
+    chosen.or(filter_fn(is_audit_event))
+}
+
+fn is_audit_event(metadata: &Metadata<'_>) -> bool {
+    metadata.target() == agents::AUDIT_TARGET && *metadata.level() <= Level::INFO
 }
 
 async fn healthz() -> &'static str {
@@ -73,7 +84,7 @@ mod tests {
     /// What reaches the log under `directives`, out of one line per level and one audit
     /// event.
     fn logged(directives: Option<&str>) -> String {
-        let (logs, _guard) = Logs::capture_with(log_filter(directives));
+        let (logs, _guard) = Logs::capture_with(directives);
         debug!("a debug line");
         info!("an info line");
         warn!("a warn line");
@@ -116,6 +127,11 @@ mod tests {
             Some("ponte::audit=error,info"),
             Some("ponte_server=trace,off"),
             Some("not a filter!"),
+            // Directives that name a field outrank the ones that do not.
+            Some("ponte::audit[{event}]=off"),
+            Some("warn,ponte::audit[{event}]=off"),
+            Some("off,ponte::audit[{event}]=error"),
+            Some("[{event}]=off"),
         ] {
             let logs = logged(directives);
             assert!(logs.contains("an audit event"), "{directives:?}: {logs}");
