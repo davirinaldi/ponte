@@ -107,6 +107,23 @@ impl Default for Timing {
     }
 }
 
+/// The runtime the agent runs on: two worker threads, whatever the machine has.
+///
+/// Checking a server certificate can hold the thread it runs on for as long as the system's
+/// verifier takes (see `transport::connect`). With a single worker, which is what a
+/// one-core machine would get by default, that would stop every timer with it: the
+/// connection deadline, the stop signal, the shutdown. The second worker keeps them going.
+/// More than two is of no use to one connection.
+///
+/// # Errors
+/// The operating system refused the threads.
+pub fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+}
+
 /// Runs the agent until `shutdown` completes: connects, enrolls if it has to, keeps a
 /// session going and connects again whenever it ends.
 ///
@@ -211,8 +228,9 @@ impl Agent {
     async fn run(&self, mut stopped: watch::Receiver<bool>) {
         if !keystore::PROTECTED {
             warn!(
-                "the device key is stored without encryption: this build is for development \
-                 only (ADR-0008)"
+                "the device key is stored without encryption, and the key and the token keep \
+                 the permissions of their folder: any local user who can read it can copy \
+                 them. This build is for development only (ADR-0008)"
             );
         }
         if self.url.security() == Security::PlainLoopback {
@@ -429,6 +447,25 @@ mod tests {
     fn enrolling_neither_adds_a_failure_nor_forgives_the_earlier_ones() {
         assert_eq!(failures_after(0, Outcome::Enrolled, STABLE), 0);
         assert_eq!(failures_after(5, Outcome::Enrolled, STABLE), 5);
+    }
+
+    /// A task that holds its thread, as a certificate check can, must not stop the clock
+    /// for the rest of the agent. Two workers see to that, on any machine.
+    #[test]
+    fn a_task_that_blocks_its_thread_does_not_stop_the_deadlines() {
+        let runtime = runtime().unwrap();
+        runtime.block_on(async {
+            let start = std::time::Instant::now();
+            let blocked = tokio::spawn(async {
+                std::thread::sleep(Duration::from_secs(2));
+            });
+            assert!(timeout(Duration::from_millis(200), blocked).await.is_err());
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                start.elapsed()
+            );
+        });
     }
 
     #[test]

@@ -21,7 +21,8 @@ approval, without any screen sharing. Each milestone should end with something w
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
   service control and file primitives; resolved-path re-check; preconditions and
   verification; idempotent `RequestId`; device key under DPAPI, in a data directory only
-  SYSTEM and administrators can open, with renames written through to the disk.
+  SYSTEM and administrators can open, with renames written through to the disk. No agent
+  is installed outside a lab before that.
 - [ ] **M3 Approvals and audit**: approval queue; hash-chained audit log; fake-erp failure
   modes. *Post: why typed actions are the defence against prompt injection.*
 - [ ] **M4 MCP and helpdesk**: MCP tools; decision layer with a classifier provider and LLM
