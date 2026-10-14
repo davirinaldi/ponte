@@ -15,6 +15,7 @@ publish = false
 ponte-protocol = { path = "crates/protocol" }
 ponte-actions = { path = "crates/actions" }
 ponte-decision = { path = "crates/decision" }
+ponte-server = { path = "crates/server" }
 
 # Shared external crates. Add new ones here, then reference them with `workspace = true`.
 anyhow = "1"
@@ -24,11 +25,19 @@ ed25519-dalek = "3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4"
 http-body-util = "0.1"
+# The agent picks the crypto provider and the certificate verifier itself (ADR-0009), so
+# rustls comes without its defaults: no aws-lc-rs, no TLS 1.2 (RNF-01), no logging.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-platform-verifier = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+# Only what the telemetry snapshot reads. Never `user`, `network` or `component`.
+sysinfo = { version = "0.39", default-features = false, features = ["disk", "system"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+# TLS without a built-in root store: the agent hands in its own `rustls::ClientConfig`.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls"] }
 toml = "0.9"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"

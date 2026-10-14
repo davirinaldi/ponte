@@ -14,6 +14,8 @@ approval, without any screen sharing. Each milestone should end with something w
   Postgres; reconnect with backoff and jitter. Dependencies agreed for this milestone:
   `tokio-tungstenite` with rustls, `sysinfo`, `sqlx` and an ed25519 crate (`ed25519-dalek`),
   plus three small ones other crates already brought in: `getrandom`, `sha2`, `futures-util`.
+  The agent also names `rustls` (to pick the `ring` provider and TLS 1.3) and
+  `rustls-platform-verifier` (ADR-0009).
   *Post: Rust agent footprint (binary size, idle RAM).*
 - [ ] **M2 Signed actions on Windows**: ed25519 manifest signing (offline key) and agent-side
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
