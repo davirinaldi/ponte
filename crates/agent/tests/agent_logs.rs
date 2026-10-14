@@ -19,6 +19,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ponte_server::agents::DeviceAdmin;
 use tokio::time::sleep;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -77,7 +78,7 @@ async fn ws_loopback_the_log_holds_no_token_no_key_and_no_frame_even_at_trace() 
     })
     .await;
     let key = machine.key_file().unwrap();
-    assert!(store.revoke_device(id));
+    assert!(store.revoke_device(id).await.unwrap());
     eventually("the agent was refused", || {
         captured.text().contains("did not accept this device")
     })

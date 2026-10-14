@@ -72,7 +72,9 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
 - **A store keeps the hash of a token, never the token** (`TokenHash`), and follows the
   rules written on `DeviceStore`: enrollment is atomic and repeatable, a key enrolls once,
   telemetry of a device that is not active is dropped (RF-49), and its error type never
-  carries the values of a call.
+  carries the values of a call. What an operator does (customers, tokens, approving and
+  revoking) is `DeviceAdmin`, a separate trait the connection code never asks for. A rule
+  of either trait is a scenario in `store/scenarios.rs`, and every store runs the list.
 - Audit events go through `audit::record`. Until the audit log exists (M3) they are log
   lines under the `ponte::audit` target. `log_filter` lets them through with a filter of
   its own, beside the one built from `RUST_LOG`: a directive could be outranked.

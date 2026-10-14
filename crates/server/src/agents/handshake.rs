@@ -270,7 +270,7 @@ mod tests {
     use ponte_protocol::{ActionOutcome, ActionResult, RequestId, TelemetrySnapshot};
 
     use super::*;
-    use crate::agents::store::{MemoryStore, SessionId};
+    use crate::agents::store::{DeviceAdmin, MemoryStore, SessionId};
     use crate::agents::testkit::{
         TestDevice, about, at, store_with_token, telemetry, token, version,
     };
@@ -362,7 +362,7 @@ mod tests {
             Err(Rejection::Enrollment(EnrollRefusal::ExpiredToken))
         );
 
-        store.revoke_token(&TokenHash::of(&token(1)));
+        store.revoke_token(&TokenHash::of(&token(1))).await.unwrap();
         assert_eq!(
             judge(&store, message()).await,
             Err(Rejection::Enrollment(EnrollRefusal::RevokedToken))
@@ -626,7 +626,7 @@ mod tests {
         let store = store_with_token(1, 1);
         let device = TestDevice::new(10);
         let id = enroll(&store, &device, 1).await;
-        store.revoke_device(id);
+        store.revoke_device(id).await.unwrap();
 
         assert_eq!(
             judge(&store, device.hello(&nonce(1), id)).await,
