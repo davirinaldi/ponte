@@ -278,6 +278,33 @@ async fn pg_a_lost_claim_is_taken_again_or_the_server_stops(
     assert_eq!(lost.kind(), ErrorKind::AnotherServer);
 }
 
+/// A ping can be slow while the claim's session is alive and still holds the lock. That
+/// is this server's own claim, not another server's, and must not stop it.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_a_slow_claim_is_not_mistaken_for_another_server(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let first = store(pool.clone(), options.clone()).await;
+    let second = store(pool, options).await;
+    let claim = first.claim_server().await.unwrap();
+
+    // What `hold_claim` does after a ping that did not answer in time.
+    let kept = first.regain(claim).await.unwrap();
+    assert_eq!(
+        second.claim_server().await.unwrap_err().kind(),
+        ErrorKind::AnotherServer
+    );
+
+    // And it is still a claim that can be lost to another server.
+    drop(kept);
+    eventually("the claim is given back", || async {
+        second.claim_server().await.is_ok()
+    })
+    .await;
+}
+
 /// A row the code cannot read is an error, never a guess.
 #[sqlx::test]
 #[ignore = "needs PostgreSQL: DATABASE_URL"]

@@ -5,7 +5,7 @@ use anyhow::Context;
 use chrono::Utc;
 use ponte_server::admin::{self, Command};
 use ponte_server::agents::{CLAIM_CHECK, PgStore};
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt};
@@ -84,6 +84,9 @@ async fn serve(store: PgStore) -> anyhow::Result<()> {
         served = server => served.context("serving HTTP")?,
         // Another server holds the database now: both serving it would undo each other.
         lost = store.hold_claim(claim, CLAIM_CHECK) => {
+            // Sessions are cut without their end recorded: the other server cleared
+            // "online" when it started, and this line says why the session events stop.
+            error!(%lost, "another server holds the database now; this one stops");
             return Err(lost).context("stopped serving");
         }
     }

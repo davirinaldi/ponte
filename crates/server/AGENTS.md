@@ -101,7 +101,9 @@ issues and revokes tokens, and approves and revokes devices (`ponte-server help`
   value. Serving binds the port first, then claims the database (`claim_server`, an
   advisory lock held for the life of the process), migrates, and marks every device
   offline. `hold_claim` checks the claim every `CLAIM_CHECK` and takes it again if the
-  database dropped it; if another server took it, this one stops. Only serving and `migrate` change the schema; the other subcommands do not.
+  database dropped it. A slow answer is not a lost claim: if the lock is still held by
+  this server's own session (`pg_locks`), the claim is kept. If another server took it,
+  this one stops, without recording the end of its sessions. Only serving and `migrate` change the schema; the other subcommands do not.
 
 ## Database (`src/agents/pg.rs`, `migrations/`)
 

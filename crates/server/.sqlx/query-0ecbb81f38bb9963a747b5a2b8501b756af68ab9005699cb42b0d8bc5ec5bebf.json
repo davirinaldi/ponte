@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pid FROM pg_locks\n                         WHERE locktype = 'advisory' AND granted AND objsubid = 1\n                           AND classid = ($1::bigint >> 32)::oid\n                           AND objid = ($1::bigint & 4294967295)::oid",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pid",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "pg_locks",
+            "name": "pid"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0ecbb81f38bb9963a747b5a2b8501b756af68ab9005699cb42b0d8bc5ec5bebf"
+}
