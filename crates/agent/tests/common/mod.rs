@@ -12,14 +12,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use chrono::{TimeDelta, Utc};
+use futures_util::StreamExt;
 use ponte_agent::{AgentConfig, Timing};
-use ponte_protocol::{DeviceId, EnrollmentToken, Nonce, PublicKey, ServerToAgent};
+use ponte_protocol::{
+    AgentToServer, DeviceId, EnrollmentToken, Nonce, ProtocolVersion, PublicKey, ServerToAgent,
+};
 use ponte_server::agents::{CustomerId, DeviceRecord, MemoryStore, TokenGrant};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
 
 /// Nothing here should take long. A test that waits this much is stuck.
 pub async fn soon<T>(what: impl Future<Output = T>) -> T {
@@ -236,8 +241,78 @@ pub fn challenge() -> Message {
     Message::text(serde_json::to_string(&challenge).unwrap())
 }
 
+/// A listener whose connections take in only a few kilobytes that nobody reads, so what
+/// the other side sends after that waits on the other side, not in this kernel's buffers.
+pub fn listen_with_a_small_window() -> (TcpListener, SocketAddr) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.set_recv_buffer_size(4 * 1024).unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = socket.listen(16).unwrap();
+    let addr = listener.local_addr().unwrap();
+    (listener, addr)
+}
+
 pub async fn listen() -> (TcpListener, SocketAddr) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     (listener, addr)
+}
+
+pub fn newest() -> String {
+    ProtocolVersion::supported().next().unwrap().subprotocol()
+}
+
+/// A WebSocket server that answers every upgrade by selecting `select`, one header per
+/// name, whatever was offered, and then hands the connection to `then`.
+pub async fn fake_server<F, Fut>(select: &[&str], then: F) -> SocketAddr
+where
+    F: Fn(WebSocketStream<TcpStream>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    fake_server_on(listen().await, select, then)
+}
+
+/// [`fake_server`] on a listener of the caller's.
+// The signature of the callback is the library's: it is the one that makes the error large.
+#[allow(clippy::result_large_err)]
+pub fn fake_server_on<F, Fut>(
+    (listener, addr): (TcpListener, SocketAddr),
+    select: &[&str],
+    then: F,
+) -> SocketAddr
+where
+    F: Fn(WebSocketStream<TcpStream>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    let select: Vec<String> = select.iter().map(|name| (*name).to_owned()).collect();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let select = select.clone();
+            let callback = move |_: &Request, mut response: Response| {
+                for name in &select {
+                    response
+                        .headers_mut()
+                        .append("sec-websocket-protocol", name.parse().unwrap());
+                }
+                Ok::<_, ErrorResponse>(response)
+            };
+            if let Ok(socket) = accept_hdr_async(stream, callback).await {
+                then(socket).await;
+            }
+        }
+    });
+    addr
+}
+
+/// The next message the agent sends on `socket`, if it sends one before it leaves.
+pub async fn message(socket: &mut WebSocketStream<TcpStream>) -> Option<AgentToServer> {
+    loop {
+        match timeout(Duration::from_secs(10), socket.next()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                return Some(serde_json::from_str(text.as_str()).unwrap());
+            }
+            Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => {}
+            _ => return None,
+        }
+    }
 }

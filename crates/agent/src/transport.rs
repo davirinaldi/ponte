@@ -62,7 +62,7 @@ pub(crate) enum ConnectError {
 pub(crate) struct Tls(Option<Arc<ClientConfig>>);
 
 impl Tls {
-    fn config(&mut self) -> Result<Arc<ClientConfig>, ConnectError> {
+    pub(crate) fn config(&mut self) -> Result<Arc<ClientConfig>, ConnectError> {
         if let Some(config) = &self.0 {
             return Ok(Arc::clone(config));
         }
@@ -80,15 +80,19 @@ fn client_config() -> Result<ClientConfig, rustls::Error> {
         .with_no_client_auth())
 }
 
-/// Opens the connection and returns it with the version the two sides agreed on.
+/// Opens the connection and returns it with the version the two sides agreed on. `tls` is
+/// the configuration for a `wss://` URL, and `None` for a plain one.
+///
+/// Checking the certificate can block the thread this runs on: the system's verifier may
+/// fetch what it is missing, under deadlines of its own. Run it as a task of its own, so
+/// that the caller's deadline and stop signal still apply.
 pub(crate) async fn connect(
-    url: &ServerUrl,
-    tls: &mut Tls,
+    url: ServerUrl,
+    tls: Option<Arc<ClientConfig>>,
 ) -> Result<(ProtocolVersion, Socket), ConnectError> {
-    let tls = match url.security() {
-        Security::Tls => Some(tls.config()?),
-        Security::PlainLoopback => None,
-    };
+    if (url.security() == Security::Tls) != tls.is_some() {
+        return Err(ConnectError::NotEncrypted);
+    }
     let stream = TcpStream::connect((url.host(), url.port()))
         .await
         .map_err(|error| ConnectError::Unreachable(error.kind()))?;
@@ -106,13 +110,10 @@ pub(crate) async fn connect(
     let _ = stream.set_nodelay(true);
 
     let offered: Vec<ProtocolVersion> = ProtocolVersion::supported().collect();
-    let request = upgrade_request(url, &offered)?;
-    let limits = WebSocketConfig::default()
-        .max_message_size(Some(MAX_MESSAGE_BYTES))
-        .max_frame_size(Some(MAX_MESSAGE_BYTES));
+    let request = upgrade_request(&url, &offered)?;
     // The connector is always given: the library never gets to pick a TLS setup itself.
     let (socket, response) =
-        client_async_tls_with_config(request, stream, Some(limits), Some(connector))
+        client_async_tls_with_config(request, stream, Some(socket_limits()), Some(connector))
             .await
             .map_err(classify)?;
 
@@ -124,6 +125,20 @@ pub(crate) async fn connect(
     let version =
         negotiated_version(&offered, response.headers()).ok_or(ConnectError::NoVersion)?;
     Ok((version, socket))
+}
+
+/// What may wait to be written, in bytes: one message of the largest size and room to spare.
+const MAX_WRITE_BUFFER_BYTES: usize = MAX_MESSAGE_BYTES + 64 * 1024;
+
+/// Limits in both directions. Without one on writing, a server that stops reading and
+/// keeps sending pings fills the agent's memory with the pongs it owes: each ping read is
+/// a pong queued. With it, a pong that does not fit waits in the one place the library
+/// keeps for it, and the agent's next frame fails at once.
+fn socket_limits() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_MESSAGE_BYTES))
+        .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
 }
 
 /// The upgrade request: the URL and the versions on offer, newest first. No `Origin`.
@@ -179,16 +194,16 @@ fn classify(error: WsError) -> ConnectError {
     }
 }
 
-/// An error of a library as one short line. Such a text can repeat what the other side
-/// sent, a name out of a certificate for example, and it goes to the log: ADR-0009 wants
-/// the certificate problem named there.
+/// An error of a library as one short line of printable ASCII. Such a text can repeat what
+/// the other side sent, a name out of a certificate for example, and it goes to the log:
+/// ADR-0009 wants the certificate problem named there, and nothing else to come with it.
 fn bounded(error: &dyn fmt::Display) -> String {
     const MAX_CHARS: usize = 200;
     error
         .to_string()
         .chars()
         .take(MAX_CHARS)
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if c.is_ascii_graphic() { c } else { ' ' })
         .collect()
 }
 
@@ -348,6 +363,20 @@ mod tests {
         }
     }
 
+    /// The library refuses, with a panic, limits where the most that may wait to be written
+    /// is not above what it writes at once. In a release build a panic ends the process.
+    #[test]
+    fn the_socket_limits_are_ones_the_library_accepts() {
+        use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketContext};
+
+        let limits = socket_limits();
+        assert_eq!(limits.max_message_size, Some(MAX_MESSAGE_BYTES));
+        assert_eq!(limits.max_frame_size, Some(MAX_MESSAGE_BYTES));
+        assert_eq!(limits.max_write_buffer_size, MAX_WRITE_BUFFER_BYTES);
+        assert!(limits.max_write_buffer_size > limits.write_buffer_size);
+        let _ = WebSocketContext::new(Role::Client, Some(limits));
+    }
+
     /// The configuration builds on the machine that runs the tests, with the system's
     /// verifier and without a default provider installed for the process.
     #[test]
@@ -362,12 +391,17 @@ mod tests {
     #[test]
     fn errors_of_libraries_become_one_short_line() {
         let long = format!(
-            "certificate for evil\r\n2026-01-01 INFO all good\u{1b}[2J {}",
+            "certificate for evil\r\n2026-01-01 INFO all good\u{1b}[2J \u{202e}exe.txt\u{200b} {}",
             "x".repeat(500)
         );
         let line = bounded(&long);
         assert_eq!(line.chars().count(), 200);
-        assert!(!line.chars().any(char::is_control));
+        // Not only control characters: text that reads right to left, or that cannot be
+        // seen, can make a log line say something else too.
+        assert!(
+            line.chars().all(|c| c == ' ' || c.is_ascii_graphic()),
+            "{line}"
+        );
         assert!(line.starts_with("certificate for evil  2026-01-01 INFO all good"));
     }
 

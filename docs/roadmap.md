@@ -20,7 +20,8 @@ approval, without any screen sharing. Each milestone should end with something w
 - [ ] **M2 Signed actions on Windows**: ed25519 manifest signing (offline key) and agent-side
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
   service control and file primitives; resolved-path re-check; preconditions and
-  verification; idempotent `RequestId`; device key under DPAPI.
+  verification; idempotent `RequestId`; device key under DPAPI, in a data directory only
+  SYSTEM and administrators can open, with renames written through to the disk.
 - [ ] **M3 Approvals and audit**: approval queue; hash-chained audit log; fake-erp failure
   modes. *Post: why typed actions are the defence against prompt injection.*
 - [ ] **M4 MCP and helpdesk**: MCP tools; decision layer with a classifier provider and LLM
@@ -93,6 +94,11 @@ approval, without any screen sharing. Each milestone should end with something w
   new token. Should a new token file on an enrolled machine start a new enrollment by
   itself? That lets the installer repair a machine, and lets a re-run of the installer
   turn one device into two.
+- An enrollment whose answer was lost is repeated with the same token and key, and the
+  server gives the same device back. Only while the token is still good, though: the server
+  checks the deadline and revocation first. A machine that comes back after that is
+  refused for ever, and its device stays on the server, enrolled and never connected.
+  Should the repeat be honoured after the deadline? After a revocation?
 - The agent speaks TLS 1.3 only (RNF-01), and ADR-0009 wants it to work behind proxies that
   inspect TLS. A proxy that stops at TLS 1.2 cannot be both. Which one gives?
 - No test connects over `wss://`: the loopback tests use plain `ws://`, and TLS was checked

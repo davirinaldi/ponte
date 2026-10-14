@@ -46,7 +46,8 @@ keep the agent's half, and most of them exist because the server is not trusted 
   exists for `wss://` or for `ws://` to `localhost`, and the transport checks the address it
   connected to. TLS is 1.3 only (RNF-01), with the provider named in the code and the
   operating system's verifier. Always hand the connector to the WebSocket library: it must
-  never build a TLS configuration of its own. Redirects are not followed.
+  never build a TLS configuration of its own. The verifier can block the thread it runs
+  on, so the connection is made on a task of its own. Redirects are not followed.
 - **Every failure before `Welcome` is the same failure.** A refused upgrade (503, 400), a
   certificate that does not verify and a close without a message all mean: wait and come
   back (`backoff.rs`). The server never says why it refused, so the agent never guesses,
@@ -54,7 +55,9 @@ keep the agent's half, and most of them exist because the server is not trusted 
   (`Timing::stable_session`) starts the count of failures again.
 - **The agent pings, the server does not.** Only after `Welcome`: before it, the server ends
   the connection on anything but the answer to its challenge. Any frame is a sign of life,
-  and `Timing::silence` without one ends the session. Every send has a deadline.
+  and `Timing::silence` without one ends the session. Every send has a deadline, and what
+  waits to be written has a limit (`transport::socket_limits`): otherwise a server that
+  stops reading and keeps pinging fills the memory with the pongs it is owed.
 - **Never log a frame, a message, a token, a transcript, or the text of a parse error.**
   `Enroll` holds the token and the rest is text the server chose. Log `error.classify()`,
   an id, a count. Errors of libraries go through `transport::bounded`. The workspace is
