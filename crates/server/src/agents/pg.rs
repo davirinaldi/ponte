@@ -139,9 +139,10 @@ enum Regained {
     Taken(ServerClaim),
     /// Its own session still holds the lock: the answer was only slow.
     Ours(ServerClaim),
-    /// The database gave no answer (no connection, a query that timed out): check again
-    /// later. If only this server is cut off, another may take the claim meanwhile; this
-    /// one cannot write either, and the first check that gets through says `Lost`.
+    /// The database gave no answer (see [`no_answer`]): check again later. If only this
+    /// server is cut off, or refused new connections, another may take the claim
+    /// meanwhile; this one soon cannot write either (connections already open last at most
+    /// `MAX_LIFETIME`), and the first check that gets through says `Lost`.
     Waiting(ServerClaim),
     /// The database answered, and the answer proves nothing: see [`Verdict::Unsure`],
     /// and an error that is not [`no_answer`].
