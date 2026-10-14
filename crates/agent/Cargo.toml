@@ -33,8 +33,9 @@ tracing-subscriber.workspace = true
 # Keep them under [target.'cfg(windows)'.dependencies] so the crate still builds on Linux CI.
 
 [dev-dependencies]
+axum.workspace = true
 ponte-server.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["io-util", "test-util"] }
 
 [lints]
 workspace = true
