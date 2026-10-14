@@ -92,16 +92,14 @@ pub(crate) async fn connect(
     let stream = TcpStream::connect((url.host(), url.port()))
         .await
         .map_err(|error| ConnectError::Unreachable(error.kind()))?;
-    let connector = match &tls {
-        Some(config) => Connector::Rustls(Arc::clone(config)),
+    let encrypted = tls.is_some();
+    let connector = match tls {
+        Some(config) => Connector::Rustls(config),
         None => {
             let peer = stream
                 .peer_addr()
                 .map_err(|error| ConnectError::Unreachable(error.kind()))?;
-            if !is_loopback(peer.ip()) {
-                return Err(ConnectError::NotLoopback);
-            }
-            Connector::Plain
+            plain_to(peer.ip())?
         }
     };
     // Messages are small and each one matters now: no waiting to fill a packet.
@@ -120,7 +118,7 @@ pub(crate) async fn connect(
 
     // The library decides between TLS and plain by the URL's scheme, as this module did.
     // Should the two ever disagree, nothing has been sent yet but the upgrade request.
-    if tls.is_some() && !matches!(socket.get_ref(), MaybeTlsStream::Rustls(_)) {
+    if encrypted && !matches!(socket.get_ref(), MaybeTlsStream::Rustls(_)) {
         return Err(ConnectError::NotEncrypted);
     }
     let version =
@@ -154,6 +152,15 @@ fn negotiated_version(offered: &[ProtocolVersion], answer: &HeaderMap) -> Option
     };
     let version = ProtocolVersion::from_subprotocol(name.to_str().ok()?)?;
     offered.contains(&version).then_some(version)
+}
+
+/// The connector for a connection without TLS, which only this machine gets: the name in
+/// the URL was `localhost`, and a name can resolve to anything.
+fn plain_to(peer: IpAddr) -> Result<Connector, ConnectError> {
+    if !is_loopback(peer) {
+        return Err(ConnectError::NotLoopback);
+    }
+    Ok(Connector::Plain)
 }
 
 /// Whether `address` is this machine. An IPv4 address written as IPv6 counts as what it is.
@@ -317,6 +324,27 @@ mod tests {
             "::ffff:128.0.0.1",
         ] {
             assert!(!is_loopback(remote.parse().unwrap()), "{remote}");
+        }
+    }
+
+    /// `localhost` is a name, and the answer to a name can be forged or misconfigured. If
+    /// it leads anywhere else, nothing is sent: not the upgrade, let alone a token.
+    #[test]
+    fn a_plain_connection_is_refused_unless_it_reached_this_machine() {
+        for local in ["127.0.0.1", "::1"] {
+            assert!(matches!(
+                plain_to(local.parse().unwrap()),
+                Ok(Connector::Plain)
+            ));
+        }
+        for remote in ["192.0.2.1", "10.0.0.1", "2001:db8::1", "::ffff:192.0.2.1"] {
+            assert!(
+                matches!(
+                    plain_to(remote.parse().unwrap()),
+                    Err(ConnectError::NotLoopback)
+                ),
+                "{remote}"
+            );
         }
     }
 
