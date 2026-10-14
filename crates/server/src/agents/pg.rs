@@ -72,11 +72,74 @@ const SERVER_LOCK: i64 = 0x706f_6e74_652d_7376;
 pub struct ServerClaim {
     connection: sqlx::PgConnection,
     /// The database session that holds the lock, to tell it from another server's.
-    session: i32,
+    holder: Holder,
 }
 
 /// How often a serving process checks that it still holds its claim ([`PgStore::hold_claim`]).
 pub const CLAIM_CHECK: Duration = Duration::from_secs(30);
+
+/// How many checks in a row may end without knowing who holds the claim before the server
+/// stops: the database answers, says the lock is taken, and does not say by whom.
+const UNSURE_LIMIT: u32 = 3;
+
+// The query that finds the holder splits the key into two `oid`s, which must not be negative.
+const _: () = assert!(SERVER_LOCK > 0);
+
+/// One database session, for as long as it lives. A pid alone is not enough: after the
+/// database restarts, a new session can get the pid of one that is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Holder {
+    pid: i32,
+    /// When the database server the session lives in started.
+    since: DateTime<Utc>,
+}
+
+/// Whether the session holding the lock is the one that took the claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Ours,
+    Another,
+    /// The database says the lock is held, and shows no holder.
+    Unsure,
+}
+
+fn judge(ours: &Holder, holder: Option<Holder>) -> Verdict {
+    match holder {
+        Some(holder) if holder == *ours => Verdict::Ours,
+        Some(_) => Verdict::Another,
+        None => Verdict::Unsure,
+    }
+}
+
+/// What became of a claim whose connection did not answer.
+#[derive(Debug)]
+enum Regained {
+    /// Taken again on a new connection: the old session was gone.
+    Taken(ServerClaim),
+    /// Still held by its own session, or the database cannot be reached and nobody else
+    /// can take it either: check again later.
+    Kept(ServerClaim),
+    /// The lock is held and the database did not say by whom.
+    Unsure(ServerClaim),
+    /// Another session holds the lock.
+    Lost(PgStoreError),
+}
+
+/// Checks in a row that ended [`Regained::Unsure`].
+#[derive(Debug, Default)]
+struct Doubt(u32);
+
+impl Doubt {
+    /// Counts one more, and says whether that is one too many.
+    fn one_more(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= UNSURE_LIMIT
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
 
 /// A store on a pool of connections to PostgreSQL. Clones share the pool.
 #[derive(Debug, Clone)]
@@ -361,7 +424,8 @@ impl PgStore {
                 .map_err(failed(OPERATION))?
                 .detach();
             let claimed = sqlx::query!(
-                r#"SELECT pg_try_advisory_lock($1) AS "claimed!", pg_backend_pid() AS "session!""#,
+                r#"SELECT pg_try_advisory_lock($1) AS "claimed!", pg_backend_pid() AS "pid!",
+                          pg_postmaster_start_time() AS "since!""#,
                 SERVER_LOCK
             )
             .fetch_one(&mut connection)
@@ -375,77 +439,107 @@ impl PgStore {
             }
             Ok(ServerClaim {
                 connection,
-                session: claimed.session,
+                holder: Holder {
+                    pid: claimed.pid,
+                    since: claimed.since,
+                },
             })
         })
         .await
     }
 
     /// Keeps the claim for as long as this process serves, and returns only if it is lost
-    /// for good: another server holds it now.
+    /// for good: another server holds it now, or the database keeps saying it is held
+    /// without saying by whom.
     ///
     /// The database ends the claim's session without a word when it restarts, when an
     /// administrator ends it, or when something on the network drops an idle connection;
     /// the lock goes with it. Every `every`, the claim's connection is checked, which also
-    /// keeps it from looking idle. A lost claim is taken again. While the database cannot
-    /// be reached the check goes on: nobody else can take the claim then either.
+    /// keeps it from looking idle. A lost claim is taken again; a slow answer is not a lost
+    /// claim. While the database cannot be reached the check goes on: nobody else can take
+    /// the claim then either.
     pub async fn hold_claim(&self, claim: ServerClaim, every: Duration) -> PgStoreError {
         let mut claim = claim;
+        let mut doubt = Doubt::default();
         loop {
             tokio::time::sleep(every).await;
             let ping = tokio::time::timeout(RELEASE_CHECK_LIMIT, claim.connection.ping()).await;
             if matches!(ping, Ok(Ok(()))) {
+                doubt.clear();
                 continue;
             }
             warn!("the connection holding this server's claim on the database did not answer");
             claim = match self.regain(claim).await {
-                Ok(kept) => kept,
-                Err(error) => return error,
+                Regained::Taken(claim) | Regained::Kept(claim) => {
+                    doubt.clear();
+                    claim
+                }
+                Regained::Unsure(claim) => {
+                    if doubt.one_more() {
+                        return PgStoreError {
+                            operation: "keep the claim on the database",
+                            kind: ErrorKind::AnotherServer,
+                        };
+                    }
+                    claim
+                }
+                Regained::Lost(error) => return error,
             };
         }
     }
 
-    /// What follows a claim whose connection did not answer: the claim taken again on a
-    /// new connection, or the same one if its session still holds the lock (a slow answer
-    /// is not a lost claim), or `AnotherServer` if another session holds it. While the
-    /// database cannot be reached, the same claim, to be checked again.
-    #[doc(hidden)]
-    pub async fn regain(&self, claim: ServerClaim) -> Result<ServerClaim, PgStoreError> {
+    /// What follows a claim whose connection did not answer: see [`Regained`].
+    async fn regain(&self, claim: ServerClaim) -> Regained {
         const OPERATION: &str = "find who holds the claim on the database";
         match self.claim_server().await {
             Ok(again) => {
                 warn!("this server's claim on the database was taken again");
-                Ok(again)
+                Regained::Taken(again)
             }
             Err(error) if error.kind() == ErrorKind::AnotherServer => {
+                // Advisory locks belong to one database, but `pg_locks` shows the whole
+                // cluster: the same key may be held in another database.
                 let holder = bounded(OPERATION, async {
-                    sqlx::query_scalar!(
-                        "SELECT pid FROM pg_locks
-                         WHERE locktype = 'advisory' AND granted AND objsubid = 1
-                           AND classid = ($1::bigint >> 32)::oid
-                           AND objid = ($1::bigint & 4294967295)::oid",
+                    sqlx::query!(
+                        r#"SELECT pid AS "pid!", pg_postmaster_start_time() AS "since!"
+                           FROM pg_locks
+                           WHERE locktype = 'advisory' AND granted AND objsubid = 1
+                             AND pid IS NOT NULL
+                             AND database = (SELECT oid FROM pg_database
+                                             WHERE datname = current_database())
+                             AND classid = ($1::bigint >> 32)::oid
+                             AND objid = ($1::bigint & 4294967295)::oid"#,
                         SERVER_LOCK
                     )
-                    .fetch_optional(&self.pool)
+                    .fetch_all(&self.pool)
                     .await
                     .map_err(failed(OPERATION))
                 })
                 .await;
-                match holder {
-                    Ok(Some(Some(pid))) if pid == claim.session => {
-                        warn!("this server's own session still holds its claim; keeping it");
-                        Ok(claim)
-                    }
-                    Ok(_) => Err(error),
+                let holder = match holder.as_deref() {
+                    Ok([row]) => Some(Holder {
+                        pid: row.pid,
+                        since: row.since,
+                    }),
+                    // Nobody, or more holders than one lock can have: no answer to trust.
+                    Ok(_) => None,
                     Err(error) => {
-                        warn!(%error, "checking the claim on the database failed; retrying");
-                        Ok(claim)
+                        warn!(%error, "the claim on the database is held, by nobody known");
+                        return Regained::Unsure(claim);
                     }
+                };
+                match judge(&claim.holder, holder) {
+                    Verdict::Ours => {
+                        warn!("this server's own session still holds its claim; keeping it");
+                        Regained::Kept(claim)
+                    }
+                    Verdict::Another => Regained::Lost(error),
+                    Verdict::Unsure => Regained::Unsure(claim),
                 }
             }
             Err(error) => {
                 warn!(%error, "claiming the database again failed; retrying");
-                Ok(claim)
+                Regained::Kept(claim)
             }
         }
     }

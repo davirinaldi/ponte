@@ -229,7 +229,8 @@ async fn pg_a_lost_claim_is_taken_again_or_the_server_stops(
     let end_claims = async |admin: &mut PgConnection| {
         sqlx::query(
             "SELECT pg_terminate_backend(pid) FROM pg_locks \
-             WHERE locktype = 'advisory' AND pid <> pg_backend_pid()",
+             WHERE locktype = 'advisory' AND pid <> pg_backend_pid() \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
         )
         .execute(admin)
         .await
@@ -247,7 +248,8 @@ async fn pg_a_lost_claim_is_taken_again_or_the_server_stops(
     let mut held = false;
     for _ in 0..200 {
         let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted",
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted \
+             AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
         )
         .fetch_one(&mut admin)
         .await
@@ -289,9 +291,25 @@ async fn pg_a_slow_claim_is_not_mistaken_for_another_server(
     let first = store(pool.clone(), options.clone()).await;
     let second = store(pool, options).await;
     let claim = first.claim_server().await.unwrap();
+    // The same key held in another database of the cluster is another lock, and must not
+    // be taken for the holder of this one: here, the database the tests are made from.
+    let mut elsewhere = PgConnection::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_try_advisory_lock($1)")
+        .bind(SERVER_LOCK)
+        .execute(&mut elsewhere)
+        .await
+        .unwrap();
 
-    // What `hold_claim` does after a ping that did not answer in time.
-    let kept = first.regain(claim).await.unwrap();
+    // What `hold_claim` does after a ping that did not answer in time, more than once.
+    let mut kept = claim;
+    for _ in 0..5 {
+        kept = match first.regain(kept).await {
+            Regained::Kept(claim) => claim,
+            other => panic!("{other:?}"),
+        };
+    }
     assert_eq!(
         second.claim_server().await.unwrap_err().kind(),
         ErrorKind::AnotherServer
@@ -303,6 +321,42 @@ async fn pg_a_slow_claim_is_not_mistaken_for_another_server(
         second.claim_server().await.is_ok()
     })
     .await;
+}
+
+/// What decides whether a claim is still this server's: the session holding the lock,
+/// named by its pid and the start of the database server it lives in.
+#[test]
+fn only_the_session_that_took_the_claim_counts_as_this_server() {
+    let ours = Holder {
+        pid: 72,
+        since: at(0),
+    };
+    assert!(matches!(judge(&ours, Some(ours)), Verdict::Ours));
+    // Same pid, but the database restarted: a new session that took the pid back.
+    let reborn = Holder {
+        pid: 72,
+        since: at(60),
+    };
+    assert!(matches!(judge(&ours, Some(reborn)), Verdict::Another));
+    let other = Holder {
+        pid: 79,
+        since: at(0),
+    };
+    assert!(matches!(judge(&ours, Some(other)), Verdict::Another));
+    // Nobody holds it, as far as the database says: look again.
+    assert!(matches!(judge(&ours, None), Verdict::Unsure));
+}
+
+/// Not knowing who holds the claim is not a reason to keep serving for ever.
+#[test]
+fn doubt_about_the_claim_ends_after_a_few_checks() {
+    let mut doubt = Doubt::default();
+    for _ in 1..UNSURE_LIMIT {
+        assert!(!doubt.one_more());
+    }
+    assert!(doubt.one_more());
+    doubt.clear();
+    assert!(!doubt.one_more());
 }
 
 /// A row the code cannot read is an error, never a guess.
