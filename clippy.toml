@@ -8,4 +8,7 @@ allow-print-in-tests = true
 disallowed-methods = [
     { path = "rustls::ConfigBuilder::dangerous", reason = "the agent verifies servers with the system's verifier only (ADR-0009)" },
     { path = "rustls_platform_verifier::Verifier::new_with_extra_roots", reason = "a root added in code is trusted on every machine (ADR-0009)" },
+    { path = "rustls::ClientConfig::dangerous", reason = "the agent verifies servers with the system's verifier only (ADR-0009)" },
+    { path = "rustls::ConfigBuilder::with_root_certificates", reason = "roots in code replace the system's store (ADR-0009)" },
+    { path = "rustls::ConfigBuilder::with_webpki_verifier", reason = "the agent verifies servers with the system's verifier only (ADR-0009)" },
 ]
