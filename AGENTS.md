@@ -111,6 +111,7 @@ Code, comments, docs and commit messages in English. User-facing UI text in pt-B
 
 ## Where to find more
 
+- Run it all locally, step by step: `docs/walkthrough.md`
 - Requirements with IDs: `docs/requirements.md`
 - How the pieces fit: `docs/architecture.md`
 - Threats and mitigations: `docs/threat-model.md`

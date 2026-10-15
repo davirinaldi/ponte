@@ -5,6 +5,11 @@ point-of-sale PCs, so bugs here are expensive and visible.
 
 - **Resource budget (RNF-12):** under 1% CPU and 40 MB RAM at idle, binary under 15 MB.
   Justify any dependency by its size; check with `cargo bloat` when in doubt.
+  `scripts/measure-agent.ps1` measures it (numbers in `docs/roadmap.md`, M1).
+- **Build a release of the agent on its own** (`cargo build --release -p ponte-agent`). A
+  build that includes the server unifies features: sqlx brings rustls's `tls12`, and with
+  it 64 KB of TLS 1.2 code the configuration never enables. CI checks the agent's own
+  build has neither `tls12` nor a test-only crate.
 - **Never panic, never exit on bad input.** Reject, log, keep running. The service manager
   restarts a crashed agent, but a crash loop on 10,000 machines is an incident.
 - **Outbound connections only.** No listening sockets, no local HTTP server.
