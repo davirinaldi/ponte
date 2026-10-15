@@ -48,6 +48,11 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
   them, and can create files beside them. M2 gives the data directory an access list of
   its own (SYSTEM and administrators only), refuses one that others can write to, and keeps
   the key under DPAPI for the SYSTEM account rather than for the whole machine (T6).
+- One host can hold the 256 places for connections that have not authenticated, by opening
+  them and saying nothing, and keep every agent of the fleet from reconnecting for as long
+  as it goes on (T13). Each place is held for the 10-second handshake deadline at most, so
+  it takes a steady stream. A limit per source address comes with the other rate limits in
+  M5; it needs a decision about which address to trust behind a proxy (see the roadmap).
 - Lexical path checks alone do not stop junctions; the execution-time check lands with the
   first file primitive (milestone M2).
 - Until M3 the audit trail is log lines. What an operator does through the server's
