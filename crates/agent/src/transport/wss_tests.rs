@@ -221,9 +221,13 @@ async fn ws_loopback_wss_refuses_a_certificate_from_an_authority_that_copies_a_t
     let server = TlsServer::start(impostor.leaf("localhost"), &[&rustls::version::TLS13]);
 
     let problem = refused(&server, agent_trusting(&trusted)).await;
-    // Windows and webpki tell this one in words of their own.
+    // Windows and webpki tell this one in words of their own, but it is about who signed:
+    // the name, the dates and the version are as good as in the twin that connects.
     assert!(problem.starts_with("the "), "{problem}");
     assert!(problem.contains("certificate"), "{problem}");
+    for other in ["another name", "expired", "not valid yet", "TLS 1.3"] {
+        assert!(!problem.contains(other), "{problem}");
+    }
 }
 
 #[tokio::test]

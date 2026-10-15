@@ -1,3 +1,11 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-print-in-tests = true
+
+# The agent's TLS checks the server with the operating system's verifier and nothing else
+# (ADR-0009). Only a test may build a configuration with another one: see
+# `transport::trusting` in crates/agent.
+disallowed-methods = [
+    { path = "rustls::ConfigBuilder::dangerous", reason = "the agent verifies servers with the system's verifier only (ADR-0009)" },
+    { path = "rustls_platform_verifier::Verifier::new_with_extra_roots", reason = "a root added in code is trusted on every machine (ADR-0009)" },
+]
