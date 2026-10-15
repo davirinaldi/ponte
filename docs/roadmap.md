@@ -34,7 +34,8 @@ approval, without any screen sharing. Each milestone should end with something w
   fallback; Zammad connector; demo clip end to end. Session helper with consent prompt.
   *Post: the 60-second demo.*
 - [ ] **M5 Hardening**: MSI installer with an explicit "enroll again" action, a random
-  delay when the agent process starts (a fleet restarting together), auto-update, swarm
+  delay when the agent process starts (a fleet restarting together), rate limits on the
+  agent endpoint (per source, and heartbeats per device), auto-update, swarm
   load test (10k agents), calibration report, opt-in pin of the server key (ADR-0009),
   threat model review.
   *Post: 10,000 simulated agents on one small server.*
