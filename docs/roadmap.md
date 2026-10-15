@@ -7,7 +7,7 @@ approval, without any screen sharing. Each milestone should end with something w
 
 - [x] **M0 Skeleton**: workspace, protocol types, manifest validation, path policy,
   routing policy, server health endpoint, CI, agent instructions.
-- [ ] **M1 Connected agent**: agent connects over WSS, with the server certificate checked
+- [x] **M1 Connected agent**: agent connects over WSS, with the server certificate checked
   against the OS trust store (ADR-0009) and the protocol version negotiated in the WebSocket
   upgrade (ADR-0007); enrollment token, then a device key proven on every connection
   (ADR-0008); heartbeats with real telemetry (`sysinfo`); server tracks online devices in
@@ -16,7 +16,11 @@ approval, without any screen sharing. Each milestone should end with something w
   plus three small ones other crates already brought in: `getrandom`, `sha2`, `futures-util`.
   The agent also names `rustls` (to pick the `ring` provider and TLS 1.3) and
   `rustls-platform-verifier` (ADR-0009).
-  *Post: Rust agent footprint (binary size, idle RAM).*
+  *Post: Rust agent footprint (binary size, idle RAM).* Measured on 2026-10-14 (Windows 10,
+  x86_64, release build of the agent alone, enrolled and connected to a local server, idle
+  for 15 minutes): binary 2.1 MB, working set 14.4 MB at peak (8.6 MB private), CPU
+  0.007% of one core. Budget (RNF-12): 15 MB, 40 MB, 1%. `scripts/measure-agent.ps1`
+  repeats it.
 - [ ] **M2 Signed actions on Windows**: ed25519 manifest signing (offline key) and agent-side
   verification first, so that no primitive ever runs unverified; windows-service lifecycle;
   service control and file primitives; resolved-path re-check; preconditions and
@@ -65,10 +69,14 @@ Questions that were open, with the answer and the date.
 - **2026-10-14. A test over `wss://` comes with the end-to-end step of M1**, with a
   certificate made on the spot (`rcgen`, `ring` feature, as a dev-dependency): a refused
   certificate, a refused TLS 1.2 server and an accepted connection to a root trusted in the
-  test only.
+  test only. Done: `ws_loopback_wss_*` in `crates/agent/src/transport/wss_tests.rs`, on
+  Linux and Windows in CI.
 
 ## Open questions
 
+- RF-05 asks for a network inventory, and the agent reads no network interface on purpose
+  (RNF-09): addresses and adapter names say where a machine is and whose it is. Which
+  network facts, if any, may the agent report?
 - `str0m` or `webrtc-rs` for media.
 - Plain Postgres or TimescaleDB for telemetry.
 - Local consent for high-risk actions already in phase 1, or only with the helper in M4.

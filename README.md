@@ -3,7 +3,8 @@
 **Open-source remote support for software houses, where AI handles the ticket first and a
 technician takes over the same session.**
 
-> Status: pre-alpha. Phase 1 (telemetry and typed actions) is in progress. Not for production.
+> Status: pre-alpha. Phase 1 (telemetry and typed actions) is in progress: the agent connects,
+> enrolls and reports telemetry (M1); signed actions come next. Not for production.
 
 Remote-access tools were built for a human clicking pixels. Ponte starts from the support
 ticket instead:
@@ -29,7 +30,8 @@ No one opened the screen. When the catalog cannot fix it, a technician joins wit
 - **Automation is earned.** Actions run alone only when risk is low *and* a calibrated classifier
   is confident, with thresholds set from measured calibration.
 - **Small and boring on the customer PC.** One Rust binary, outbound connections only, with a
-  budget of under 40 MB RAM at idle.
+  budget of under 40 MB RAM at idle. Measured in M1: a 2.1 MB binary, 14.4 MB of RAM and
+  0.007% of one core, connected and idle.
 
 ## Architecture
 
@@ -71,10 +73,14 @@ cargo run -p ponte-agent -- crates/agent/agent.example.toml
 cargo run -p ponte-server -- device list
 ```
 
-`cargo run -p ponte-server -- help` lists the other subcommands.
+`cargo run -p ponte-server -- help` lists the other subcommands. The
+[walkthrough](docs/walkthrough.md) goes further: approval, revocation, reconnection, and the
+agent's measured footprint.
 
 ## Documentation
 
+- [Walkthrough](docs/walkthrough.md): everything that runs today, on one machine
+- [Architecture](docs/architecture.md), with the agent's connection
 - [Requirements](docs/requirements.md) with stable IDs
 - [Threat model](docs/threat-model.md)
 - [Roadmap](docs/roadmap.md)

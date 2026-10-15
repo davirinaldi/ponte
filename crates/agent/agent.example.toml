@@ -1,5 +1,5 @@
 # Copy to agent.toml for local development: cargo run -p ponte-agent -- agent.toml
-server_url = "ws://localhost:8080/agent"
+server_url = "ws://127.0.0.1:8080/agent"
 allowed_roots = ['C:\FakeErp']
 
 # Where the device key and the identity live. The installer writes an absolute path that
