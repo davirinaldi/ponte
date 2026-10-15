@@ -35,6 +35,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 axum.workspace = true
 ponte-server.workspace = true
+rcgen.workspace = true
+rustls = { workspace = true, features = ["tls12"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
 
 [lints]
