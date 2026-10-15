@@ -51,6 +51,16 @@ jobs:
           SQLX_OFFLINE=false cargo check -p ponte-server --all-targets
         env:
           DATABASE_URL: postgres://ponte:ponte@localhost:5432/ponte
+      # The agent built on its own: TLS 1.3 only (RNF-01) and no test-only crate. A build
+      # that includes the server unifies features, and sqlx brings rustls's tls12 with it.
+      - name: The agent's release has no TLS 1.2 and no test crates
+        run: |
+          rustls=$(cargo tree -p ponte-agent -e normal -i rustls --depth 0 -f '{p} {f}')
+          echo "$rustls"
+          if grep -q tls12 <<<"$rustls"; then echo "the agent's rustls has tls12"; exit 1; fi
+          if cargo tree -p ponte-agent -e normal,build -f '{p}' | grep -q 'rcgen v'; then
+            echo "rcgen is in the agent's build"; exit 1
+          fi
 
   windows:
     name: Lint and test (windows-latest)
