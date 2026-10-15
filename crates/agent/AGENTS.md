@@ -49,10 +49,11 @@ keep the agent's half, and most of them exist because the server is not trusted 
   request carries no `Origin`.
 - **No token and no signature without TLS, except to this machine.** A `ServerUrl` only
   exists for `wss://` or for `ws://` to `localhost`, and the transport checks the address it
-  connected to. TLS is 1.3 only (RNF-01), with the provider named in the code and the
-  operating system's verifier, both in `transport::base`. Only `#[cfg(test)]` code may give
-  that builder another verifier: `transport::trusting` is the system's verifier with one
-  more root, a test's. The `ws_loopback_wss_*` tests connect over real TLS to servers made
+  connected to. TLS is 1.3 only (RNF-01), with the provider named in the code
+  (`transport::base` holds both) and the operating system's verifier (`client_config`). Only
+  `#[cfg(test)]` code may give that builder another verifier: `transport::trusting` is the
+  system's verifier with one more root, a test's, and `clippy.toml` refuses the two calls
+  that does everywhere else. The `ws_loopback_wss_*` tests connect over real TLS to servers made
   on the spot, and the agent's own configuration is among them. Always hand the connector
   to the WebSocket library: it must never build a TLS configuration of its own. The
   verifier can block the thread it runs on, so the connection is made on a task of its

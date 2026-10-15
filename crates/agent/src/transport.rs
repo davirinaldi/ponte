@@ -91,6 +91,8 @@ fn base() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, rustls::Error> {
 /// The agent's configuration, with `roots` trusted on top of the system's. The verifier
 /// is the one `with_platform_verifier` builds, given the roots of a test.
 #[cfg(test)]
+// The one place that may: clippy.toml refuses both calls everywhere else.
+#[allow(clippy::disallowed_methods)]
 fn trusting(
     roots: impl IntoIterator<Item = rustls::pki_types::CertificateDer<'static>>,
 ) -> Result<ClientConfig, rustls::Error> {
@@ -235,6 +237,7 @@ fn classify(error: WsError) -> ConnectError {
 /// for among them, and the server chose those.
 fn tls_problem(error: &rustls::Error) -> String {
     use rustls::CertificateError as Certificate;
+    use rustls::PeerIncompatible;
 
     let problem = match error {
         rustls::Error::InvalidCertificate(certificate) => match certificate {
@@ -263,18 +266,23 @@ fn tls_problem(error: &rustls::Error) -> String {
             // The verifier of the system in its own words: on Windows, its reason in the
             // language of the machine, and the error code.
             Certificate::Other(other) => {
-                return format!(
-                    "the server's certificate does not verify: {}",
-                    bounded(other)
-                );
+                return bounded(&format_args!(
+                    "the server's certificate does not verify: {other}"
+                ));
             }
             _ => "the server's certificate does not verify",
         },
-        // A server, or a proxy that inspects TLS, that stops at TLS 1.2 says so with an alert.
-        rustls::Error::PeerIncompatible(_)
-        | rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion) => {
-            "the server does not speak TLS 1.3"
-        }
+        // A server, or a proxy that inspects TLS, that stops at TLS 1.2: rustls says so
+        // with an alert, other stacks answer in TLS 1.2.
+        rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion)
+        | rustls::Error::PeerIncompatible(
+            PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig
+            | PeerIncompatible::ServerDoesNotSupportTls12Or13,
+        ) => "the server does not speak TLS 1.3",
+        // It carries what the server sent. The agent offers no encrypted hello anyway.
+        rustls::Error::PeerIncompatible(PeerIncompatible::ServerRejectedEncryptedClientHello(
+            _,
+        )) => "the server refused an encrypted client hello",
         rustls::Error::NoCertificatesPresented => "the server presented no certificate",
         // The rest names what went wrong in rustls's words, with nothing of the server's.
         other => return bounded(other),
@@ -593,6 +601,34 @@ mod tests {
             let wrapped = WsError::Io(io::Error::new(io::ErrorKind::InvalidData, error));
             assert_eq!(classify(wrapped), ConnectError::Tls(problem.to_owned()));
         }
+        // What stops at TLS 1.2, whichever way it says so; and what does not.
+        for (error, problem) in [
+            (
+                rustls::Error::PeerIncompatible(
+                    rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig,
+                ),
+                "the server does not speak TLS 1.3",
+            ),
+            (
+                rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion),
+                "the server does not speak TLS 1.3",
+            ),
+            (
+                rustls::Error::PeerIncompatible(rustls::PeerIncompatible::NoCipherSuitesInCommon),
+                "peer is incompatible: NoCipherSuitesInCommon",
+            ),
+        ] {
+            let wrapped = WsError::Io(io::Error::new(io::ErrorKind::InvalidData, error));
+            assert_eq!(classify(wrapped), ConnectError::Tls(problem.to_owned()));
+        }
+        // The system's own words, long or not, still make one short line.
+        let long = io::Error::other(format!("{} (os error -1)", "x".repeat(500)));
+        let problem = tls_problem(&rustls::Error::InvalidCertificate(Certificate::Other(
+            rustls::OtherError(Arc::new(long)),
+        )));
+        assert_eq!(problem.chars().count(), 200, "{problem}");
+        assert!(problem.starts_with("the server's certificate does not verify: xxx"));
+
         let error = classify(WsError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
             rustls::Error::InvalidCertificate(Certificate::NotValidForNameContext {
