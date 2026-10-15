@@ -7,7 +7,8 @@
 //! - **TLS** is rustls with the `ring` provider, TLS 1.3 only (RNF-01), and the server
 //!   certificate checked by the operating system's verifier (ADR-0009). The agent builds
 //!   that configuration itself and always hands it to the WebSocket library, which is
-//!   built without a root store of its own.
+//!   built without a root store of its own. A failed handshake is logged as the problem
+//!   (`tls_problem`), never as what the certificate says.
 //! - **Plain `ws://`** is for development against this very machine. The configuration
 //!   only accepts it for `localhost` and `127.0.0.1`, and this module checks the address
 //!   the socket actually connected to: a name can resolve anywhere.
@@ -21,12 +22,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use ponte_protocol::{MAX_MESSAGE_BYTES, ProtocolVersion};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, ConfigBuilder, WantsVerifier};
 use rustls_platform_verifier::BuilderVerifierExt;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::client::ClientRequestBuilder;
-use tokio_tungstenite::tungstenite::error::ProtocolError;
+use tokio_tungstenite::tungstenite::error::{ProtocolError, TlsError};
 use tokio_tungstenite::tungstenite::http::{HeaderMap, Uri};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream, client_async_tls_with_config};
@@ -55,6 +56,8 @@ pub(crate) enum ConnectError {
          Sec-WebSocket-Protocol header causes this too)"
     )]
     NoVersion,
+    #[error("the TLS handshake failed (the agent speaks TLS 1.3 only): {0}")]
+    Tls(String),
     #[error("the TLS handshake (TLS 1.3 only) or the upgrade failed: {0}")]
     Upgrade(String),
 }
@@ -75,11 +78,30 @@ impl Tls {
 }
 
 fn client_config() -> Result<ClientConfig, rustls::Error> {
+    Ok(base()?.with_platform_verifier()?.with_no_client_auth())
+}
+
+/// The provider and the versions, which the tests share with the agent.
+fn base() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>, rustls::Error> {
     // Named here, so that nothing depends on a process-wide default provider.
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    Ok(ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])?
-        .with_platform_verifier()?
+    ClientConfig::builder_with_provider(provider).with_protocol_versions(&[&rustls::version::TLS13])
+}
+
+/// The agent's configuration, with `roots` trusted on top of the system's. The verifier
+/// is the one `with_platform_verifier` builds, given the roots of a test.
+#[cfg(test)]
+fn trusting(
+    roots: impl IntoIterator<Item = rustls::pki_types::CertificateDer<'static>>,
+) -> Result<ClientConfig, rustls::Error> {
+    let builder = base()?;
+    let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(
+        roots,
+        Arc::clone(builder.crypto_provider()),
+    )?;
+    Ok(builder
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
         .with_no_client_auth())
 }
 
@@ -198,8 +220,66 @@ fn classify(error: WsError) -> ConnectError {
         WsError::Protocol(ProtocolError::SecWebSocketSubProtocolError(_)) => {
             ConnectError::NoVersion
         }
+        WsError::Tls(TlsError::Rustls(error)) => ConnectError::Tls(tls_problem(&error)),
+        // The library hands the handshake's failure on as the error of a read or a write.
+        WsError::Io(error) => match error.get_ref().and_then(|inner| inner.downcast_ref()) {
+            Some(tls) => ConnectError::Tls(tls_problem(tls)),
+            None => ConnectError::Upgrade(bounded(&error)),
+        },
         other => ConnectError::Upgrade(bounded(&other)),
     }
+}
+
+/// Why TLS failed, as ADR-0009 wants it in the log: the problem, in words of this module.
+/// What rustls says about a certificate can repeat the certificate, the names it was made
+/// for among them, and the server chose those.
+fn tls_problem(error: &rustls::Error) -> String {
+    use rustls::CertificateError as Certificate;
+
+    let problem = match error {
+        rustls::Error::InvalidCertificate(certificate) => match certificate {
+            Certificate::UnknownIssuer => {
+                "the server's certificate is from an authority this machine does not trust"
+            }
+            Certificate::NotValidForName | Certificate::NotValidForNameContext { .. } => {
+                "the server's certificate is for another name"
+            }
+            Certificate::Expired | Certificate::ExpiredContext { .. } => {
+                "the server's certificate has expired"
+            }
+            Certificate::NotValidYet | Certificate::NotValidYetContext { .. } => {
+                "the server's certificate is not valid yet"
+            }
+            Certificate::Revoked => "the server's certificate is revoked",
+            Certificate::UnknownRevocationStatus => {
+                "whether the server's certificate is revoked is unknown"
+            }
+            Certificate::BadSignature => {
+                "the signature on the server's certificate does not verify"
+            }
+            Certificate::InvalidPurpose | Certificate::InvalidPurposeContext { .. } => {
+                "the server's certificate is not for a server"
+            }
+            // The verifier of the system in its own words: on Windows, its reason in the
+            // language of the machine, and the error code.
+            Certificate::Other(other) => {
+                return format!(
+                    "the server's certificate does not verify: {}",
+                    bounded(other)
+                );
+            }
+            _ => "the server's certificate does not verify",
+        },
+        // A server, or a proxy that inspects TLS, that stops at TLS 1.2 says so with an alert.
+        rustls::Error::PeerIncompatible(_)
+        | rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion) => {
+            "the server does not speak TLS 1.3"
+        }
+        rustls::Error::NoCertificatesPresented => "the server presented no certificate",
+        // The rest names what went wrong in rustls's words, with nothing of the server's.
+        other => return bounded(other),
+    };
+    problem.to_owned()
 }
 
 /// An error of a library as one short line of printable ASCII. Such a text can repeat what
@@ -214,6 +294,9 @@ fn bounded(error: &dyn fmt::Display) -> String {
         .map(|c| if c.is_ascii_graphic() { c } else { ' ' })
         .collect()
 }
+
+#[cfg(test)]
+mod wss_tests;
 
 #[cfg(test)]
 mod tests {
@@ -472,6 +555,68 @@ mod tests {
             "{line}"
         );
         assert!(line.starts_with("certificate for evil  2026-01-01 INFO all good"));
+    }
+
+    /// ADR-0009: the log names the certificate problem. What the certificate says, the
+    /// names it was made for among them, is the server's text and stays out.
+    #[test]
+    fn a_tls_failure_names_the_problem_and_nothing_of_the_certificate() {
+        use rustls::CertificateError as Certificate;
+        use rustls::pki_types::{ServerName, UnixTime};
+        use std::time::Duration;
+
+        let forged = "evil.example
+2026-01-01 INFO all good";
+        let cases = [
+            (
+                Certificate::NotValidForNameContext {
+                    expected: ServerName::try_from("localhost").unwrap(),
+                    presented: vec![forged.to_owned()],
+                },
+                "the server's certificate is for another name",
+            ),
+            (
+                Certificate::ExpiredContext {
+                    time: UnixTime::since_unix_epoch(Duration::from_secs(2_000_000_000)),
+                    not_after: UnixTime::since_unix_epoch(Duration::from_secs(1_000_000_000)),
+                },
+                "the server's certificate has expired",
+            ),
+            (
+                Certificate::UnknownIssuer,
+                "the server's certificate is from an authority this machine does not trust",
+            ),
+        ];
+        for (certificate, problem) in cases {
+            let error = rustls::Error::InvalidCertificate(certificate);
+            // As the WebSocket library hands it on: the error of a read or a write.
+            let wrapped = WsError::Io(io::Error::new(io::ErrorKind::InvalidData, error));
+            assert_eq!(classify(wrapped), ConnectError::Tls(problem.to_owned()));
+        }
+        let error = classify(WsError::Io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(Certificate::NotValidForNameContext {
+                expected: ServerName::try_from("localhost").unwrap(),
+                presented: vec![forged.to_owned()],
+            }),
+        )));
+        assert!(!error.to_string().contains("evil"), "{error}");
+    }
+
+    #[test]
+    fn a_failure_that_is_not_tls_is_still_one_short_line() {
+        let error = classify(WsError::Io(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "reset
+INFO forged",
+        )));
+        let ConnectError::Upgrade(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(
+            text.chars().all(|c| c == ' ' || c.is_ascii_graphic()),
+            "{text}"
+        );
     }
 
     #[test]

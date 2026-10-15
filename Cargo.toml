@@ -25,6 +25,8 @@ ed25519-dalek = "3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 getrandom = "0.4"
 http-body-util = "0.1"
+# Tests only: certificates made on the spot, signed with ring. No PEM, no aws-lc-rs.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 # The agent picks the crypto provider and the certificate verifier itself (ADR-0009), so
 # rustls comes without its defaults: no aws-lc-rs, no TLS 1.2 (RNF-01), no logging.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

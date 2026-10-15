@@ -45,9 +45,13 @@ keep the agent's half, and most of them exist because the server is not trusted 
 - **No token and no signature without TLS, except to this machine.** A `ServerUrl` only
   exists for `wss://` or for `ws://` to `localhost`, and the transport checks the address it
   connected to. TLS is 1.3 only (RNF-01), with the provider named in the code and the
-  operating system's verifier. Always hand the connector to the WebSocket library: it must
-  never build a TLS configuration of its own. The verifier can block the thread it runs
-  on, so the connection is made on a task of its own. Redirects are not followed.
+  operating system's verifier, both in `transport::base`. Only `#[cfg(test)]` code may give
+  that builder another verifier: `transport::trusting` is the system's verifier with one
+  more root, a test's. The `ws_loopback_wss_*` tests connect over real TLS to servers made
+  on the spot, and the agent's own configuration is among them. Always hand the connector
+  to the WebSocket library: it must never build a TLS configuration of its own. The
+  verifier can block the thread it runs on, so the connection is made on a task of its
+  own. Redirects are not followed.
 - **Every failure before `Welcome` is the same failure.** A refused upgrade (503, 400), a
   certificate that does not verify and a close without a message all mean: wait and come
   back (`backoff.rs`). The server never says why it refused, so the agent never guesses,
@@ -60,9 +64,11 @@ keep the agent's half, and most of them exist because the server is not trusted 
   stops reading and keeps pinging fills the memory with the pongs it is owed.
 - **Never log a frame, a message, a token, a transcript, or the text of a parse error.**
   `Enroll` holds the token and the rest is text the server chose. Log `error.classify()`,
-  an id, a count. Errors of libraries go through `transport::bounded`. The workspace is
-  built without the `log` bridge of `tracing-subscriber`, because the WebSocket library logs
-  every frame at `trace`: do not turn it on. `tests/agent_logs.rs` reads the whole log.
+  an id, a count. Errors of libraries go through `transport::bounded`, and a failed TLS
+  handshake through `transport::tls_problem`, which names the problem and never repeats
+  what the certificate says. The workspace is built without the `log` bridge of
+  `tracing-subscriber`, because the WebSocket library logs every frame at `trace`: do not
+  turn it on. `tests/agent_logs.rs` reads the whole log.
 - **Telemetry is numbers and a drive letter** (RNF-09). Never read processes, users, host
   names or network interfaces, and never send a path: `telemetry::mount_name` keeps `C:`
   and `/` and drops the rest.
@@ -71,5 +77,5 @@ keep the agent's half, and most of them exist because the server is not trusted 
 - Tests of the handshake and the session run without a socket and with a paused clock. A
   test of a deadline asserts the time that passed and the reason the wait ended, and has
   a twin in which the thing waited for arrives: a wait that ends for any reason at all
-  must not pass for a working check. Tests named `ws_loopback_*` bind `127.0.0.1`, most of
-  them against the real server.
+  must not pass for a working check. Tests named `ws_loopback_*` bind this machine only,
+  most of them the real server on `127.0.0.1`.
