@@ -2292,8 +2292,9 @@ path = 'C:\FakeErp\run\erp.lock'
                 refused(RejectReason::BadSignature)
             );
         }
-        tokio::time::sleep(LAZY_WRITES_EVERY).await;
-        settle().await;
+        // A second past the write, which the runtime's clock only reaches once the
+        // blocking task that writes has returned: `settle` alone does not wait for it.
+        tokio::time::sleep(LAZY_WRITES_EVERY + Duration::from_secs(1)).await;
         assert_eq!(writes(&harness), 1);
         assert_eq!(harness.disk.files().writes, [JournalFile::Ended]);
         assert_eq!(LAZY_WRITES_EVERY, Duration::from_secs(60));
@@ -2363,15 +2364,17 @@ path = 'C:\FakeErp\run\erp.lock'
         // Both files are dirty now: the delivered mark of 1, the refusal of 2.
         let before = harness.disk.files().writes.len();
         harness.disk.fail_after(0);
-        tokio::time::sleep(LAZY_WRITES_EVERY).await;
-        settle().await;
+        // A second past the write, which the runtime's clock only reaches once the
+        // blocking task that writes has returned: `settle` alone does not wait for it.
+        tokio::time::sleep(LAZY_WRITES_EVERY + Duration::from_secs(1)).await;
         assert_eq!(
             harness.disk.files().writes[before..],
             [JournalFile::Started]
         );
         harness.disk.works_again();
-        tokio::time::sleep(LAZY_WRITES_EVERY).await;
-        settle().await;
+        // A second past the write, which the runtime's clock only reaches once the
+        // blocking task that writes has returned: `settle` alone does not wait for it.
+        tokio::time::sleep(LAZY_WRITES_EVERY + Duration::from_secs(1)).await;
         assert_eq!(
             harness.disk.files().writes[before..],
             [
