@@ -16,31 +16,36 @@ use crate::{PublicKey, Signature};
 /// 1 KiB; a manifest needs to grow tenfold before it comes near.
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
-/// Whether `c` may appear in signed manifest text: not a control character other than a
-/// line feed or a tab, and not a character that changes how text looks without being seen.
+/// Whether `c` may appear in signed manifest text. An allow list, because a list of what
+/// to refuse always misses something:
 ///
-/// TOML allows none of those controls raw anyway. The invisible ones are allowed by TOML in
-/// strings and comments, and that is the problem: a byte order mark, a zero-width
-/// character or a bidirectional override can make the text a person reviews differ from
-/// what the parser reads ("Trojan Source"), and no honest manifest needs one.
+/// - printable ASCII, the line feed and the tab;
+/// - Latin-1 and Latin Extended-A letters and signs (U+00A1 to U+017F), which cover
+///   Portuguese, Spanish and English, except the soft hyphen (U+00AD), which is invisible;
+/// - the dashes, curly quotes and ellipsis a word processor puts in a description.
+///
+/// Everything else is refused: controls, byte order marks, zero-width and bidirectional
+/// characters, tag characters, blank fillers, the no-break space (it looks like a space and
+/// is not one in a path). Any of those can make the text a person reviews differ from what
+/// the parser reads ("Trojan Source"), or hide text from the reviewer. Widening the list
+/// later keeps every manifest signed before valid; narrowing it would not.
 fn is_visible_text(c: char) -> bool {
-    match c {
-        '\n' | '\t' => true,
-        '\0'..='\u{1f}' | '\u{7f}' => false,
-        '\u{feff}'
-        | '\u{061c}'
-        | '\u{200b}'..='\u{200f}'
-        | '\u{202a}'..='\u{202e}'
-        | '\u{2066}'..='\u{2069}'
-        | '\u{2028}'
-        | '\u{2029}' => false,
-        _ => true,
-    }
+    matches!(
+        c,
+        '\n' | '\t'
+            | ' '..='~'
+            | '\u{a1}'..='\u{ac}'
+            | '\u{ae}'..='\u{17f}'
+            | '\u{2013}'
+            | '\u{2014}'
+            | '\u{2018}'..='\u{201d}'
+            | '\u{2026}'
+    )
 }
 
-/// The exact TOML text that was signed: not empty, at most [`MAX_MANIFEST_BYTES`], with no
-/// `\r`, no other control character but the line feed and the tab, no byte order mark and
-/// no invisible character that changes how the text reads.
+/// The exact TOML text that was signed: not empty, at most [`MAX_MANIFEST_BYTES`], made of
+/// the characters `is_visible_text` allows, so no `\r`, no other control, no byte order
+/// mark and no invisible character.
 ///
 /// The signature covers these bytes as they are (ADR-0010). Anything an editor adds or
 /// strips without showing it, or that shows the reviewer something other than what the
@@ -56,8 +61,8 @@ pub struct ManifestText(String);
 /// Says nothing about the text: errors get logged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "expected 1 to {MAX_MANIFEST_BYTES} bytes of text with no control or invisible character \
-     but line feeds and tabs"
+    "expected 1 to {MAX_MANIFEST_BYTES} bytes of printable ASCII or Latin text, line feeds \
+     and tabs"
 )]
 pub struct InvalidManifestText;
 
@@ -195,9 +200,56 @@ mod tests {
         for control in ('\0'..='\u{1f}').filter(|c| !matches!(c, '\n' | '\t')) {
             assert!(!parses(&format!("# a{control}b\n")), "{control:?}");
         }
+        // What a list of things to refuse missed: C1 controls, the soft hyphen, word
+        // joiners, tag characters (hidden instructions for a model), blank fillers,
+        // variation selectors, the no-break space.
+        for hidden in [
+            '\u{85}',
+            '\u{9b}',
+            '\u{a0}',
+            '\u{ad}',
+            '\u{34f}',
+            '\u{115f}',
+            '\u{180e}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{206f}',
+            '\u{3164}',
+            '\u{fe0f}',
+            '\u{ffa0}',
+            '\u{fff9}',
+            '\u{e0041}',
+            '\u{e0100}',
+        ] {
+            assert!(!parses(&format!("# a{hidden}b\n")), "{hidden:?}");
+        }
         for not_text in [json!(null), json!(1), json!(["id"]), json!({})] {
             assert!(serde_json::from_value::<ManifestText>(not_text).is_err());
         }
+    }
+
+    /// The allow list, character by character over every `char`, written here once more
+    /// on its own: a change to `is_visible_text` must be made twice to pass.
+    #[test]
+    fn exactly_the_allowed_characters_pass() {
+        let allowed = |c: char| {
+            let code = u32::from(c);
+            c == '\n'
+                || c == '\t'
+                || (0x20..=0x7e).contains(&code)
+                || ((0xa1..=0x17f).contains(&code) && code != 0xad)
+                || [
+                    0x2013, 0x2014, 0x2018, 0x2019, 0x201a, 0x201b, 0x201c, 0x201d, 0x2026,
+                ]
+                .contains(&code)
+        };
+        for c in (0..=0x10_ffff).filter_map(char::from_u32) {
+            assert_eq!(is_visible_text(c), allowed(c), "{c:?}");
+        }
+        // What a manifest written in Portuguese or Spanish uses passes.
+        assert!(parses(
+            "description = \"Reinicia o serviço do ERP — não use durante uma venda… ¿Año? “ok”\"\n"
+        ));
     }
 
     /// A manifest names paths and services: a stray `{:?}` of a request must not log them.
