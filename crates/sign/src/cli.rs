@@ -16,7 +16,7 @@ use ponte_protocol::{
 };
 
 use crate::keyfile::{KeyFile, MIN_PASSWORD_CHARS, Password};
-use crate::summary::summary;
+use crate::summary::{printable, summary};
 use crate::text::why_not_manifest_text;
 
 pub(crate) const USAGE: &str = "\
@@ -127,7 +127,8 @@ pub(crate) fn run(
     match result {
         Ok(()) => OK,
         Err(error) => {
-            let _ = writeln!(console.err(), "error: {error:#}");
+            // Parser errors quote what they read (an unknown key, decoded): escaped.
+            let _ = writeln!(console.err(), "error: {}", printable(&format!("{error:#}")));
             FAILED
         }
     }
@@ -479,7 +480,13 @@ pub(crate) fn write_new(path: &Path, text: &str, access: Access) -> anyhow::Resu
     let mut file = options
         .open(path)
         .with_context(|| format!("cannot create {}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("cannot write {}", path.display()))
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all());
+    if written.is_err() {
+        // Ours, created a moment ago: a half-written file would only block the next try.
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+    written.with_context(|| format!("cannot write {}", path.display()))
 }
