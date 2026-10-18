@@ -140,6 +140,19 @@ pub async fn run(config: AgentConfig, shutdown: impl Future<Output = ()>) {
 /// [`run`] with the waits of the caller's choosing, `heartbeat` included.
 #[doc(hidden)]
 pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future<Output = ()>) {
+    let actions = &config.actions;
+    // Numbers and a ceiling only: the names of services and roots stay out of the log.
+    info!(
+        actions = if actions.keys.is_some() { "enabled" } else { "disabled" },
+        max_risk = ?actions.policy.max_risk,
+        max_actions_per_hour = actions.max_per_hour,
+        min_manifest_interval_secs = actions.min_interval_secs,
+        shutdown_timeout_secs = actions.shutdown_timeout.as_secs(),
+        "action policy"
+    );
+    if actions.keys.is_none() {
+        warn!("the configuration names no manifest_keys: this agent runs no action (ADR-0010)");
+    }
     let (stop, stopped) = watch::channel(false);
     let agent = Agent::new(&config, timing);
     let work = agent.run(stopped);
