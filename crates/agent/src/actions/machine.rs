@@ -14,6 +14,13 @@ use ponte_actions::{Check, Primitive};
 /// Why a service may not be touched, read from the service manager when the action runs
 /// (ADR-0011): its type, its protection or where its binary lies, or that it could not be
 /// read at all.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the machine of Windows gives these, in step 5 of M2"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceRefusal {
     Structure,
@@ -28,6 +35,13 @@ pub(crate) enum CheckError {
 }
 
 /// A step that did not do what it says.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the machine of Windows gives these, in step 5 of M2"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepError {
     /// The operating system refused or failed.

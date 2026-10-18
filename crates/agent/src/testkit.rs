@@ -275,3 +275,80 @@ impl crate::actions::clock::Clock for FakeClock {
         self.0.lock().unwrap().1
     }
 }
+
+/// A clock mark kept in memory.
+#[derive(Clone, Default)]
+pub(crate) struct MemoryMark(pub(crate) Arc<std::sync::Mutex<Option<String>>>);
+
+impl MemoryMark {
+    pub(crate) fn set(&self, text: Option<String>) {
+        *self.0.lock().unwrap() = text;
+    }
+}
+
+impl crate::actions::clock::MarkDisk for MemoryMark {
+    fn read_mark(&self) -> std::io::Result<Option<String>> {
+        Ok(self.0.lock().unwrap().clone())
+    }
+
+    fn write_mark(&self, text: &str) -> std::io::Result<()> {
+        self.set(Some(text.to_owned()));
+        Ok(())
+    }
+}
+
+/// Everything logged on this thread, and by the blocking tasks it hands its dispatcher to,
+/// while the capture lives.
+pub(crate) struct LogCapture {
+    text: Arc<std::sync::Mutex<Vec<u8>>>,
+    _guard: tracing::subscriber::DefaultGuard,
+    _second: tracing::Dispatch,
+}
+
+#[derive(Clone)]
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogCapture {
+    pub(crate) fn start() -> Self {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let text = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = CaptureWriter(Arc::clone(&text));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(move || writer.clone()),
+        );
+        let guard = tracing::subscriber::set_default(subscriber);
+        // With a single dispatcher registered, `tracing-core` asks the default of whichever
+        // thread first reaches a callsite, and a test running beside this one, with no
+        // subscriber, would turn this one's events off. A second one makes it ask all.
+        let second = tracing::Dispatch::new(tracing_subscriber::registry());
+        Self {
+            text,
+            _guard: guard,
+            _second: second,
+        }
+    }
+
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8_lossy(&self.text.lock().unwrap()).into_owned()
+    }
+}
+
+/// The public key of the manifest signing key made from `seed`, in hex.
+pub(crate) fn manifest_key_hex(seed: u8) -> String {
+    let key = ed25519_dalek::SigningKey::from_bytes(&[seed; 32]);
+    PublicKey::from_bytes(key.verifying_key().to_bytes()).to_string()
+}
