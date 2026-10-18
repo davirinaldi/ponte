@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ed25519_dalek::SigningKey;
 use ponte_protocol::{PublicKey, SignedManifest};
 
-use crate::cli::{Console, FAILED, OK, USAGE_ERROR, run, write_new};
+use crate::cli::{Access, Console, FAILED, OK, USAGE_ERROR, run, write_new};
 use crate::keyfile::{KeyFile, Password};
 
 const RESTART: &str = include_str!("../../../manifests/examples/erp-restart-service.toml");
@@ -270,12 +270,16 @@ fn keygen_refuses_weak_or_mistyped_passwords_and_never_overwrites() {
 }
 
 #[test]
-fn the_envelope_never_overwrites_the_key_or_the_manifest() {
+fn the_envelope_replaces_nothing_but_an_envelope() {
     let dir = TempDir::new();
     let (key_file, _) = keygen(&dir);
     let manifest = dir.write("restart.toml", RESTART);
+    // A second key kept for rotation is the way out of a lost password.
+    let backup = dir.write("backup.key", &std::fs::read_to_string(&key_file).unwrap());
+    let public = dir.join("ops.key.pub");
+    let notes = dir.write("notes.txt", "keep me");
     let key_before = std::fs::read(&key_file).unwrap();
-    for out in [&key_file, &manifest] {
+    for out in [&key_file, &manifest, &backup, &public, &notes, &dir.0] {
         let mut console = Scripted::new(&[]);
         let args = [
             "sign",
@@ -288,13 +292,37 @@ fn the_envelope_never_overwrites_the_key_or_the_manifest() {
         ];
         assert_eq!(command(&mut console, &args, NOW), FAILED);
         assert!(
-            console.err().contains("would overwrite"),
+            console.err().contains("is not a signed envelope"),
             "{}",
             console.err()
         );
     }
     assert_eq!(std::fs::read(&key_file).unwrap(), key_before);
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), RESTART);
+    assert_eq!(
+        std::fs::read_to_string(&backup).unwrap().as_bytes(),
+        key_before
+    );
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep me");
+
+    // An earlier envelope is replaced: that is how a signature is renewed.
+    let envelope = dir.join("restart.signed.json");
+    for days in ["30", "60"] {
+        let mut console = Scripted::new(&[PASSWORD]);
+        let args = [
+            "sign",
+            "--key",
+            arg(&key_file),
+            "--days",
+            days,
+            "--yes",
+            arg(&manifest),
+        ];
+        assert_eq!(command(&mut console, &args, NOW), OK, "{}", console.err());
+    }
+    let signed = read_envelope(&envelope);
+    assert_eq!(signed.expires_at - signed.issued_at, 60 * DAY);
+    assert!(!dir.join("restart.signed.json.tmp").exists());
 }
 
 /// `keygen` checks first, and the write itself refuses too, should a file appear between
@@ -303,13 +331,24 @@ fn the_envelope_never_overwrites_the_key_or_the_manifest() {
 fn a_key_is_written_only_where_nothing_is() {
     let dir = TempDir::new();
     let existing = dir.write("k.key", "old");
-    assert!(write_new(&existing, "new").is_err());
+    assert!(write_new(&existing, "new", Access::Owner).is_err());
     assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old");
-    write_new(&dir.join("fresh.key"), "new").unwrap();
+    write_new(&dir.join("fresh.key"), "new", Access::Owner).unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("fresh.key")).unwrap(),
         "new"
     );
+}
+
+/// Where files have modes, only the owner reads the key file.
+#[cfg(unix)]
+#[test]
+fn the_key_file_is_the_owners_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let (key_file, _) = keygen(&dir);
+    let mode = std::fs::metadata(&key_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]

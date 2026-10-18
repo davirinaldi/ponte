@@ -258,8 +258,8 @@ fn keygen(key_file: &Path, console: &mut dyn Console) -> anyhow::Result<()> {
     let public_key = *sealed.public_key();
 
     let text = serde_json::to_string_pretty(&sealed)? + "\n";
-    write_new(key_file, &text)?;
-    write_new(&public_file, &format!("{public_key}\n"))?;
+    write_new(key_file, &text, Access::Owner)?;
+    write_new(&public_file, &format!("{public_key}\n"), Access::Public)?;
     writeln!(
         console.out(),
         "Public key: {public_key}\n\
@@ -306,8 +306,13 @@ fn sign(
         .context("the clock reads past the year 292 billion")?;
 
     let out_file = out.unwrap_or_else(|| manifest_file.with_extension("signed.json"));
-    if same_file(&out_file, key_file) || same_file(&out_file, manifest_file) {
-        bail!("the envelope would overwrite the key or the manifest; choose another --out");
+    // Only an envelope is ever replaced, to renew a signature: never a key (the second one
+    // is the way out of a lost password), a manifest or anything else.
+    if out_file.exists() && read_json::<SignedManifest>(&out_file).is_err() {
+        bail!(
+            "{} exists and is not a signed envelope; choose another --out",
+            out_file.display()
+        );
     }
     write!(
         console.out(),
@@ -340,9 +345,14 @@ fn sign(
     let trusted = TrustedKeys::new([public_key]).context("the key is not usable")?;
     verify(&signed, &trusted, now, now).context("the envelope just signed does not verify")?;
 
+    // Written beside it and renamed over it, so a crash never leaves half an envelope.
     let envelope = serde_json::to_string_pretty(&signed)? + "\n";
-    std::fs::write(&out_file, envelope)
-        .with_context(|| format!("cannot write {}", out_file.display()))?;
+    let temporary = with_suffix(&out_file, ".tmp");
+    write_new(&temporary, &envelope, Access::Public)?;
+    if let Err(error) = std::fs::rename(&temporary, &out_file) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).with_context(|| format!("cannot write {}", out_file.display()));
+    }
     writeln!(console.out(), "\nSigned. Wrote {}.", out_file.display())?;
     Ok(())
 }
@@ -419,11 +429,6 @@ fn refused(error: &VerifyError) -> anyhow::Error {
     anyhow::anyhow!("refused: {error}")
 }
 
-/// Whether both paths name one existing file.
-fn same_file(a: &Path, b: &Path) -> bool {
-    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
-}
-
 /// `path` with `suffix` appended to its last component (`key.json` → `key.json.pub`).
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name: OsString = path.as_os_str().to_owned();
@@ -450,11 +455,28 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
     serde_json::from_slice(&bytes).with_context(|| format!("cannot read {}", path.display()))
 }
 
+/// Who may read a file `write_new` makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Access {
+    /// Its owner only, where files have modes. On Windows the folder's access list
+    /// decides; the key is encrypted either way.
+    Owner,
+    /// Whatever the folder gives.
+    Public,
+}
+
 /// Writes a file that must not exist yet: a key is never overwritten.
-pub(crate) fn write_new(path: &Path, text: &str) -> anyhow::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+pub(crate) fn write_new(path: &Path, text: &str, access: Access) -> anyhow::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if access == Access::Owner {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = access;
+    let mut file = options
         .open(path)
         .with_context(|| format!("cannot create {}", path.display()))?;
     file.write_all(text.as_bytes())
