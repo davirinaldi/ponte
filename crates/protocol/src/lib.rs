@@ -6,6 +6,7 @@
 
 mod ids;
 mod keys;
+mod manifest;
 mod messages;
 mod telemetry;
 mod text;
@@ -14,12 +15,13 @@ mod version;
 
 pub use ids::{DeviceId, RequestId};
 pub use keys::{EnrollmentToken, InvalidHex, Nonce, PublicKey, Signature};
+pub use manifest::{InvalidManifestText, MAX_MANIFEST_BYTES, ManifestText, SignedManifest};
 pub use messages::{
     ActionOutcome, ActionRequest, ActionResult, AgentToServer, Initiator, ServerToAgent,
 };
 pub use telemetry::{DiskUsage, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot};
 pub use text::{InvalidLabel, Label};
-pub use transcript::{Transcript, enroll_transcript, hello_transcript};
+pub use transcript::{Transcript, enroll_transcript, hello_transcript, manifest_transcript};
 pub use version::ProtocolVersion;
 
 /// Newest version of the agent <-> server protocol this build speaks. Bump it on every wire
