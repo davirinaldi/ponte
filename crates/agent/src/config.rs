@@ -12,7 +12,8 @@ pub struct AgentConfig {
     /// Control-plane URL. Must be `wss://`; plain `ws://` is accepted only for localhost.
     /// It is written to the log: never put a secret in it.
     pub server_url: ServerUrl,
-    /// Directories that file-touching actions may access.
+    /// Directories that file-touching actions may access. None may be a drive, a system
+    /// folder or a folder every user shares (ADR-0011).
     #[serde(default)]
     pub allowed_roots: Vec<String>,
     /// Where the agent keeps its device key and its identity. Only administrators may
@@ -41,8 +42,8 @@ pub enum ConfigError {
     Read(#[from] std::io::Error),
     #[error("{0}")]
     Parse(#[from] toml::de::Error),
-    #[error("invalid allowed root `{0}`")]
-    AllowedRoot(String),
+    #[error("allowed_roots: {0}")]
+    AllowedRoot(ponte_actions::InvalidRoot),
     #[error("data_dir must not be empty")]
     DataDir,
     #[error("enrollment_token_file must not be empty")]
@@ -350,6 +351,15 @@ mod tests {
             with(r"allowed_roots = ['..\FakeErp']"),
             Err(ConfigError::AllowedRoot(_))
         ));
+        for forbidden in [r"C:\", r"C:\Windows", r"C:\ProgramData", r"C:\Users\joana"] {
+            assert!(
+                matches!(
+                    with(&format!("allowed_roots = ['{forbidden}']")),
+                    Err(ConfigError::AllowedRoot(_))
+                ),
+                "{forbidden}"
+            );
+        }
     }
 
     #[test]

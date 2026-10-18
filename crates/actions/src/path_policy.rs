@@ -11,27 +11,97 @@
 /// U+212A KELVIN SIGN as `k`, which NTFS does not, so outside ASCII a path must spell
 /// a root exactly as it was configured.
 ///
-/// A lexical check cannot see symlinks or junctions. The agent must also resolve the
-/// final path at execution time and re-check it (tracked in `docs/roadmap.md`).
+/// No root may be a whole drive, a system folder or a folder every user shares (see
+/// [`RootRule`], ADR-0011), so a careless configuration cannot hand a manifest the
+/// Windows folder or every profile on the machine.
+///
+/// A lexical check cannot see symlinks or junctions. The agent also checks the roots as
+/// they resolve when it starts, and the final path of every file it opens (ADR-0011).
 #[derive(Debug, Clone, Default)]
 pub struct PathPolicy {
     roots: Vec<Vec<String>>,
 }
 
+/// A root the configuration names that ADR-0011 forbids. The root comes from the
+/// administrator's configuration, not from a manifest, so the error names it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("root `{root}` {rule}")]
+pub struct InvalidRoot {
+    pub root: String,
+    pub rule: RootRule,
+}
+
+/// Which rule of ADR-0011 a root breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RootRule {
+    #[error(
+        "is not an absolute Windows path with no `..`, UNC, device name, stream, wildcard or \
+         trailing dot or space"
+    )]
+    NotAPath,
+    #[error("is a whole drive")]
+    Drive,
+    #[error("has a short 8.3 name (`~`); write the long name")]
+    ShortName,
+    #[error(
+        "is the Windows folder, `$Recycle.Bin`, `System Volume Information`, `Recovery` or \
+         `Boot`, or lies inside one"
+    )]
+    SystemFolder,
+    #[error("is a `Program Files` folder, `ProgramData` or the folder of user profiles")]
+    SharedFolder,
+    #[error("is the root of a user's profile; name a folder inside it")]
+    ProfileRoot,
+    #[error("is a delete root outside every allowed root")]
+    OutsideAllowedRoots,
+}
+
+/// Folders at the root of a drive that no root may be or lie in.
+const SYSTEM_FOLDERS: [&str; 5] = [
+    "windows",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "boot",
+];
+/// Folders at the root of a drive that no root may be, though folders inside them may.
+const SHARED_FOLDERS: [&str; 6] = [
+    "program files",
+    "program files (x86)",
+    "program files (arm)",
+    "programdata",
+    "users",
+    "documents and settings",
+];
+/// Folders whose children are user profiles, which no root may be either.
+const PROFILE_FOLDERS: [&str; 2] = ["users", "documents and settings"];
+
 impl PathPolicy {
-    /// Builds a policy from root directories. Invalid roots are returned as an error
-    /// instead of being silently ignored.
+    /// Builds a policy from root directories. A root that breaks a rule is an error,
+    /// never silently ignored.
+    ///
+    /// The rules are lexical and hold on every drive letter: nothing here knows which
+    /// drive Windows is on, and a `Windows` folder on another drive is no place for a root
+    /// either. The agent checks the folders Windows reports, and the roots as they
+    /// resolve, when it starts.
     ///
     /// # Errors
-    /// Returns the first root that is not a valid absolute Windows path.
-    pub fn new<I, S>(roots: I) -> Result<Self, String>
+    /// Returns the first root that is not a valid absolute Windows path or that names a
+    /// forbidden folder.
+    pub fn new<I, S>(roots: I) -> Result<Self, InvalidRoot>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
         let roots = roots
             .into_iter()
-            .map(|root| normalize(root.as_ref()).ok_or_else(|| root.as_ref().to_owned()))
+            .map(|root| {
+                let root = root.as_ref();
+                check_root(root).map_err(|rule| InvalidRoot {
+                    root: root.to_owned(),
+                    rule,
+                })
+            })
             .collect::<Result<_, _>>()?;
         Ok(Self { roots })
     }
@@ -43,6 +113,78 @@ impl PathPolicy {
             return false;
         };
         self.roots.iter().any(|root| segments.starts_with(root))
+    }
+}
+
+/// The segments of a root that ADR-0011 allows, or the rule it breaks.
+fn check_root(root: &str) -> Result<Vec<String>, RootRule> {
+    let segments = normalize(root).ok_or(RootRule::NotAPath)?;
+    let Some(top) = segments.get(1) else {
+        return Err(RootRule::Drive);
+    };
+    // `C:\PROGRA~1` is `Program Files` under another name. An installer writes long names.
+    if segments.iter().any(|segment| segment.contains('~')) {
+        return Err(RootRule::ShortName);
+    }
+    if SYSTEM_FOLDERS.contains(&top.as_str()) {
+        return Err(RootRule::SystemFolder);
+    }
+    if segments.len() == 2 && SHARED_FOLDERS.contains(&top.as_str()) {
+        return Err(RootRule::SharedFolder);
+    }
+    if segments.len() == 3 && PROFILE_FOLDERS.contains(&top.as_str()) {
+        return Err(RootRule::ProfileRoot);
+    }
+    Ok(segments)
+}
+
+/// Where a manifest may look and where it may delete (ADR-0011): `allowed` bounds every
+/// path a manifest names, `delete` bounds `delete_file`, and each delete root lies inside
+/// (or is) an allowed root. A root wide enough to check that the ERP's database exists
+/// then does not also let a manifest delete it.
+#[derive(Debug, Clone, Default)]
+pub struct Roots {
+    allowed: PathPolicy,
+    delete: PathPolicy,
+}
+
+impl Roots {
+    /// # Errors
+    /// A root breaks a rule of [`PathPolicy::new`], or a delete root lies outside every
+    /// allowed root.
+    pub fn new<A, D, S>(allowed: A, delete: D) -> Result<Self, InvalidRoot>
+    where
+        A: IntoIterator<Item = S>,
+        D: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let allowed = PathPolicy::new(allowed)?;
+        let delete: Vec<S> = delete.into_iter().collect();
+        let delete = PathPolicy::new(&delete).and_then(|policy| {
+            match delete
+                .iter()
+                .find(|root| !allowed.is_allowed(root.as_ref()))
+            {
+                Some(outside) => Err(InvalidRoot {
+                    root: outside.as_ref().to_owned(),
+                    rule: RootRule::OutsideAllowedRoots,
+                }),
+                None => Ok(policy),
+            }
+        })?;
+        Ok(Self { allowed, delete })
+    }
+
+    /// Bounds every path a manifest names.
+    #[must_use]
+    pub const fn allowed(&self) -> &PathPolicy {
+        &self.allowed
+    }
+
+    /// Bounds the paths `delete_file` may act on.
+    #[must_use]
+    pub const fn delete(&self) -> &PathPolicy {
+        &self.delete
     }
 }
 
@@ -225,15 +367,128 @@ mod tests {
         assert!(!angstrom.is_allowed("C:\\\u{212b}\\erp.log"));
     }
 
+    fn rule(root: &str) -> Option<RootRule> {
+        PathPolicy::new([root]).err().map(|error| {
+            assert_eq!(error.root, root);
+            error.rule
+        })
+    }
+
     #[test]
     fn invalid_root_is_an_error() {
+        for root in [
+            r"relative\dir",
+            r"C:\FakeErp\NUL",
+            r"\\server\share\erp",
+            "",
+        ] {
+            assert_eq!(rule(root), Some(RootRule::NotAPath), "{root:?}");
+        }
+        // One bad root refuses the whole list.
+        assert!(PathPolicy::new([r"C:\FakeErp", "C:"]).is_err());
+    }
+
+    #[test]
+    fn no_root_is_a_drive() {
+        for root in ["C:", r"C:\", "d:/", r"Z:\.", r"C:\\"] {
+            assert_eq!(rule(root), Some(RootRule::Drive), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn no_root_is_or_lies_in_a_system_folder() {
+        for root in [
+            r"C:\Windows",
+            r"c:\WINDOWS\Temp",
+            r"C:\Windows\System32\config",
+            r"D:\Windows",
+            r"C:\$Recycle.Bin\S-1-5-21",
+            r"C:\System Volume Information",
+            r"C:\Recovery\WindowsRE",
+            r"C:\Boot",
+        ] {
+            assert_eq!(rule(root), Some(RootRule::SystemFolder), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn shared_folders_are_not_roots_but_folders_inside_them_are() {
+        for root in [
+            r"C:\Program Files",
+            r"C:\program files (x86)",
+            r"C:\Program Files (Arm)",
+            r"C:\ProgramData",
+            r"C:\Users",
+            r"C:\Documents and Settings",
+        ] {
+            assert_eq!(rule(root), Some(RootRule::SharedFolder), "{root:?}");
+        }
+        for root in [
+            r"C:\Users\joana",
+            r"C:\Users\Public",
+            r"C:\Users\Default",
+            r"C:\Documents and Settings\joana",
+        ] {
+            assert_eq!(rule(root), Some(RootRule::ProfileRoot), "{root:?}");
+        }
+        for root in [
+            r"C:\Program Files\FakeErp",
+            r"C:\ProgramData\FakeErp\logs",
+            r"C:\Users\joana\FakeErp",
+            r"C:\FakeErp",
+            r"D:\Logs\erp",
+            r"C:\Windows2",
+            r"C:\Data\Windows",
+            r"C:\Data\Users\x",
+        ] {
+            assert_eq!(rule(root), None, "{root:?}");
+        }
+    }
+
+    #[test]
+    fn short_names_are_not_roots() {
+        for root in [
+            r"C:\PROGRA~1",
+            r"C:\PROGRA~1\FakeErp",
+            r"C:\FakeErp\LOGS~1",
+            r"C:\WINDOW~1",
+        ] {
+            assert_eq!(rule(root), Some(RootRule::ShortName), "{root:?}");
+        }
+    }
+
+    #[test]
+    fn delete_roots_lie_inside_allowed_roots() {
+        let roots = Roots::new([r"C:\FakeErp"], [r"C:\FakeErp\run"]).unwrap();
+        assert!(roots.allowed().is_allowed(r"C:\FakeErp\data\erp.db"));
+        assert!(!roots.delete().is_allowed(r"C:\FakeErp\data\erp.db"));
+        assert!(roots.delete().is_allowed(r"C:\FakeErp\run\erp.lock"));
+
+        // Equal to an allowed root is inside it.
+        assert!(Roots::new([r"C:\FakeErp"], ["c:/fakeerp"]).is_ok());
+        // No delete root at all: nothing is deleted.
+        let roots = Roots::new(vec![r"C:\FakeErp"], vec![]).unwrap();
+        assert!(!roots.delete().is_allowed(r"C:\FakeErp\run\erp.lock"));
+
+        for delete in [r"C:\Other", r"C:\FakeErpEvil", r"D:\FakeErp"] {
+            assert_eq!(
+                Roots::new([r"C:\FakeErp"], [delete]).unwrap_err(),
+                InvalidRoot {
+                    root: delete.to_owned(),
+                    rule: RootRule::OutsideAllowedRoots,
+                }
+            );
+        }
+        // A delete root obeys the root rules as well.
         assert_eq!(
-            PathPolicy::new([r"relative\dir"]).unwrap_err(),
-            r"relative\dir"
+            Roots::new([r"C:\FakeErp"], [r"C:\FakeErp\NUL"])
+                .unwrap_err()
+                .rule,
+            RootRule::NotAPath
         );
         assert_eq!(
-            PathPolicy::new([r"C:\FakeErp\NUL"]).unwrap_err(),
-            r"C:\FakeErp\NUL"
+            Roots::new([r"C:\FakeErp"], [r"C:\"]).unwrap_err().rule,
+            RootRule::Drive
         );
     }
 }

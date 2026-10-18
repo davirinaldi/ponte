@@ -96,8 +96,13 @@ because its folder is readable. No root of either kind may be:
 - the folder of the agent's executable, or anything inside it.
 
 The forbidden folders are named by what Windows reports for them (known folders and the
-profile list), not by hard-coded drive letters; the lexical check that runs everywhere uses
-the usual locations under `C:`. The rule holds for the path as written and for the path the
+profile list), not by hard-coded drive letters. The lexical check that runs everywhere
+(`PathPolicy::new`) applies the usual names on every drive letter, since it cannot know
+which drive Windows is on and a `Windows` folder on another drive is no place for a root
+either; it also counts `Program Files (Arm)` and `Documents and Settings` (the old name
+of the profiles folder, still a junction) among the folders above, and refuses any root
+with a `~` in it, because `C:\PROGRA~1` is `Program Files` under its short name. Step 3 of
+M2 added those three; the plan had only the usual locations under `C:`. The rule holds for the path as written and for the path the
 root resolves to when the agent starts. The configuration file, the `data_dir` and the
 enrollment token may not lie inside any root.
 

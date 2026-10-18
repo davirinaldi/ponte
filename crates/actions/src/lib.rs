@@ -17,6 +17,6 @@ pub use manifest::{
     Check, CheckList, ExpectedServiceState, Location, MAX_CHECKS, MAX_DESCRIPTION_CHARS,
     MAX_ID_LEN, MAX_STEPS, MAX_TITLE_CHARS, Manifest, ManifestError, TextField, ValidManifest,
 };
-pub use path_policy::PathPolicy;
+pub use path_policy::{InvalidRoot, PathPolicy, RootRule, Roots};
 pub use primitive::Primitive;
 pub use risk::RiskLevel;
