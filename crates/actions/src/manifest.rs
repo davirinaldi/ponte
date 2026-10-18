@@ -178,7 +178,9 @@ pub enum ManifestError {
     #[error("{field} must be at most {max} characters")]
     TextTooLong { field: TextField, max: usize },
     #[error(
-        "{0} holds a character a manifest may not show, perhaps written as a TOML escape \n         (only printable ASCII, Latin letters, the typographic dashes, quotes and ellipsis, \n         and in descriptions line feeds and tabs)"
+        "{0} holds a character a manifest may not show, perhaps written as a TOML escape \
+         (only printable ASCII, Latin letters, the typographic dashes, quotes and ellipsis, \
+         and in descriptions line feeds and tabs)"
     )]
     TextNotAllowed(TextField),
     #[error("the title must be a single line")]
