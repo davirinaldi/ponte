@@ -48,7 +48,7 @@ impl PathPolicy {
 
 /// Splits an absolute Windows path into lowercase segments, or `None` if it is
 /// relative or ambiguous.
-fn normalize(path: &str) -> Option<Vec<String>> {
+pub(crate) fn normalize(path: &str) -> Option<Vec<String>> {
     let mut parts = path.split(['\\', '/']);
 
     let drive = parts.next()?;

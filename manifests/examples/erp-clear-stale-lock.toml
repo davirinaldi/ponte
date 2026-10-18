@@ -1,5 +1,5 @@
 id = "erp.clear-stale-lock"
-version = 1
+version = 2
 title = "Remove a stale ERP lock file"
 description = "Deletes the lock file the ERP leaves behind after a crash, then starts the service."
 ai_description = """
@@ -30,3 +30,8 @@ service = "FakeErp"
 check = "service_state"
 service = "FakeErp"
 state = "running"
+
+# The ERP creates its lock again when it starts, so the lock is expected back.
+[[verify]]
+check = "path_exists"
+path = 'C:\FakeErp\run\erp.lock'
