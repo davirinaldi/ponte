@@ -563,8 +563,12 @@ impl Shared {
                 continue;
             }
             let disk = Arc::clone(&self.disk);
-            let written = spawn_blocking(move || disk.write(file, &text)).await;
-            if !matches!(written, Ok(Ok(()))) {
+            let written = !text.is_empty()
+                && matches!(
+                    spawn_blocking(move || disk.write(file, &text)).await,
+                    Ok(Ok(()))
+                );
+            if !written {
                 failed = true;
                 self.not_written(file);
             }
@@ -757,13 +761,12 @@ impl Shared {
                 Ok(pending) => pending,
                 Err(StartError::Duplicate) => return RunEnd::Duplicate,
                 Err(StartError::Full) => return RunEnd::Refused(RejectReason::JournalFull),
+                Err(StartError::Unwritable) => {
+                    return RunEnd::Refused(RejectReason::JournalUnavailable);
+                }
             }
         };
-        if self
-            .disk
-            .write(JournalFile::Started, pending.text())
-            .is_err()
-        {
+        if !self.write_now(JournalFile::Started, pending.text()) {
             if self.log_allowed() {
                 warn!(request = %id, "the start could not be written: the action does not run");
             }
@@ -858,7 +861,7 @@ impl Shared {
             }
             journal.take_started()
         };
-        if self.disk.write(JournalFile::Started, &text).is_err() {
+        if !self.write_now(JournalFile::Started, &text) {
             // Kept in memory and sent; written with the next write that goes through.
             self.not_written(JournalFile::Started);
         }
@@ -870,9 +873,15 @@ impl Shared {
             Ok(journal) => journal.take_started(),
             Err(_) => return,
         };
-        if self.disk.write(JournalFile::Started, &text).is_err() {
+        if !self.write_now(JournalFile::Started, &text) {
             self.not_written(JournalFile::Started);
         }
+    }
+
+    /// Writes `text` from a blocking task. An empty text is a serialization that failed,
+    /// and never replaces a journal.
+    fn write_now(&self, file: JournalFile, text: &str) -> bool {
+        !text.is_empty() && self.disk.write(file, text).is_ok()
     }
 
     /// A request that ended before "started": its answer, recorded in the ring unless it
@@ -2338,6 +2347,16 @@ path = 'C:\FakeErp\run\erp.lock'
             succeeded()
         );
         assert_eq!(harness.machine.steps(), 3);
+    }
+
+    /// A text that could not be serialized is empty, and never replaces a journal.
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_text_is_never_written() {
+        let mut harness = Harness::new("");
+        let actions = harness.start().await;
+        assert!(!actions.shared.write_now(JournalFile::Started, ""));
+        assert!(actions.shared.write_now(JournalFile::Started, "{}"));
+        assert_eq!(harness.disk.files().writes, [JournalFile::Started]);
     }
 
     /// A start that cannot be written runs nothing.

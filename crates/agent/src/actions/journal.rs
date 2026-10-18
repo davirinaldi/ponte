@@ -166,6 +166,8 @@ pub(crate) enum StartError {
     Duplicate,
     /// [`MAX_STARTED`] requests are in the journal.
     Full,
+    /// The journal could not be written as text.
+    Unwritable,
 }
 
 /// A start that is ready to be written. It joins the journal only once it is on disk
@@ -402,6 +404,9 @@ impl Journal {
         let mut started = self.started.clone();
         started.push(entry.clone());
         let text = started_text(started);
+        if text.is_empty() {
+            return Err(StartError::Unwritable);
+        }
         Ok(PendingStart { entry, text })
     }
 
@@ -523,7 +528,8 @@ impl Journal {
 }
 
 /// `serde_json` cannot fail on these types: no map with keys that are not strings, no
-/// float. An empty text would be refused at the next load, which fails closed.
+/// float. Should it fail, the text is empty, which the executor never writes and which
+/// starts nothing (`StartError::Unwritable`).
 fn started_text(started: Vec<Started>) -> String {
     serde_json::to_string(&StartedFile {
         format: FORMAT,
