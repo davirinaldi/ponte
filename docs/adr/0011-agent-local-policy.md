@@ -171,19 +171,34 @@ lexical policy, the final-path check and the link count.
 
 ### Only a validated type runs
 
-`Manifest` → `ValidManifest` → `RunnableManifest`. `validate_shape()` makes a
-`ValidManifest` without knowing the machine: id, names, risk, coverage, the primitives this
-release runs, the lexical shape of paths, and limits: at most 16 steps, 16 checks per list,
-a title of 120 characters and descriptions of 2,000, on top of the 16 KiB of the signed
-text (ADR-0010) and the limits that exist today (timeout 1 to 600 seconds, names of 256
-characters). `ponte-sign` uses it. Step 3 of M2 added a few rules the plan had left out:
-an id of at most 64 bytes, a version of at least 1, a title and descriptions that are not
-blank and a title on one line, service names in ASCII (the agent refuses any other service
-anyway, so the signer learns it first), and paths that name something below the drive.
-Errors name the rule and the place (step 2, verify check 0), never the path or the name, so
-an agent can log them without logging what a manifest touches. `validate(&Roots)` adds the agent's roots, services and
-risk ceiling and yields a `RunnableManifest`, which only exists after the signature and its
-validity were checked. Only a `RunnableManifest` can be executed.
+`Manifest` → `ValidManifest` → `VerifiedManifest` → `RunnableManifest`.
+
+- `validate_shape()` makes a `ValidManifest` without knowing the machine: id, names, risk,
+  coverage, the primitives this release runs, the lexical shape of paths, and limits: at
+  most 16 steps, 16 checks per list, a title of 120 characters and descriptions of 2,000,
+  on top of the 16 KiB of the signed text (ADR-0010) and the limits that exist today
+  (timeout 1 to 600 seconds, names of 256 characters). `ponte-sign` and the server's
+  catalog use it.
+- `verify` (ADR-0010) checks the signature and the validity, then parses and validates the
+  shape. It is the only way to a `VerifiedManifest`.
+- `VerifiedManifest::validate(&LocalPolicy)` adds the agent's roots, services and risk
+  ceiling and yields a `RunnableManifest`, which therefore only exists after the signature
+  and its validity were checked. Only a `RunnableManifest` can be executed.
+
+Step 3 of M2 changed three things the plan had:
+
+- The plan named three states. With three, `validate` would have hung on the
+  `ValidManifest` that `ponte-sign` makes without any signature, so a fourth state sits
+  between them.
+- A few shape rules the plan left out: an id of at most 64 bytes, a version of at least 1,
+  a title and descriptions that are not blank and a title on one line, service names in
+  ASCII (the agent refuses any other service anyway, so the signer learns it first), and
+  paths that name something below the drive. Errors name the rule and the place (step 2,
+  verify check 0), never the path or the name, so an agent can log them without logging
+  what a manifest touches.
+- The list of refused services lives beside the policy in `ponte-actions`, so a
+  `RunnableManifest` never names one. The structural refusals read the service manager and
+  stay in the agent.
 
 ### High risk
 

@@ -6,10 +6,18 @@
 //!   [`RiskLevel`], preconditions and a post-action verification.
 //! - [`PathPolicy`] restricts every file-touching step to allowed roots.
 //!
+//! A manifest only runs as a [`RunnableManifest`], and the only way to one is a typestate
+//! (ADR-0011): [`Manifest::validate_shape`] gives a [`ValidManifest`] without knowing any
+//! machine (the signer and the server stop there); [`verify`] gives a
+//! [`VerifiedManifest`], checking the signature and the validity before the TOML is even
+//! parsed (ADR-0010); [`VerifiedManifest::validate`] applies the machine's
+//! [`LocalPolicy`].
+//!
 //! There is deliberately no "run this script" primitive. See ADR-0002.
 
 mod manifest;
 mod path_policy;
+mod policy;
 mod primitive;
 mod risk;
 mod signed;
@@ -19,6 +27,10 @@ pub use manifest::{
     MAX_ID_LEN, MAX_STEPS, MAX_TITLE_CHARS, Manifest, ManifestError, TextField, ValidManifest,
 };
 pub use path_policy::{InvalidRoot, PathPolicy, RootRule, Roots};
+pub use policy::{
+    AllowedServices, AllowedServicesError, LocalPolicy, MAX_ALLOWED_SERVICES, PolicyError,
+    REFUSED_SERVICES, RiskCeiling, RunnableManifest, is_refused_service,
+};
 pub use primitive::Primitive;
 pub use risk::RiskLevel;
 pub use signed::{
