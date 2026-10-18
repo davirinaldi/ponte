@@ -307,7 +307,12 @@ mod tests {
         for (what, change) in changes {
             let mut file = sealed();
             change(&mut file);
-            assert!(file.unlock(&right).is_err(), "{what}");
+            // The cipher itself notices, before the check of the public key.
+            assert_eq!(
+                file.unlock(&right).unwrap_err().to_string(),
+                "wrong password, or the key file was changed",
+                "{what}"
+            );
         }
     }
 
