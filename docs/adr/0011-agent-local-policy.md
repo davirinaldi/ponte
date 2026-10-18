@@ -195,9 +195,13 @@ Step 3 of M2 changed three things the plan had:
   ASCII (the agent refuses any other service anyway, so the signer learns it first), and
   paths that name something below the drive, in one spelling (no empty or `.` segment,
   no separator at the end) and with printable ASCII and Latin letters only, so neither a
-  TOML escape nor a look-alike letter makes a reviewer read another file name than the
-  one the agent opens. Errors name the rule and the place (step 2,
-  verify check 0), never the path or the name, so an agent can log them without logging
+  TOML escape nor a letter from another script makes a reviewer read another file name
+  than the one the agent opens. A few Latin letters still look like others (dotless `ı`,
+  long `ſ`); NTFS keeps them apart and the comparison is exact, so a manifest that uses
+  one fails closed, but the reviewer should read paths with that in mind. The rule holds
+  for roots too: a configured root with an en dash or a letter outside Latin now refuses
+  the configuration. Errors name the rule and the place (step 2, verify check 0), never
+  the path or the name, so an agent can log them without logging
   what a manifest touches.
 - The list of refused services lives beside the policy in `ponte-actions`, so a
   `RunnableManifest` never names one. The structural refusals read the service manager and
