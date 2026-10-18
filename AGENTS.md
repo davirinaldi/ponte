@@ -23,6 +23,7 @@ Status: pre-alpha, phase 1. Read `docs/roadmap.md` to see which milestone is in 
 | `crates/agent` | Privileged Windows service. Outbound connections only. |
 | `crates/agent-helper` | Unprivileged process in the user session (consent UI, capture). |
 | `crates/server` | Control plane: axum HTTP/WebSocket, Postgres, approvals, audit, MCP. |
+| `crates/sign` | `ponte-sign`: signs manifests offline, key encrypted with a password. |
 | `crates/fake-erp` | Deliberately breakable ERP for demos and end-to-end tests. |
 | `crates/swarm` | Load generator that simulates thousands of agents. |
 | `manifests/examples` | Example action manifests (TOML). |
@@ -40,6 +41,7 @@ cargo run -p ponte-server                                   # needs DATABASE_URL
 cargo run -p ponte-server -- help                           # operator subcommands: customers, tokens, devices
 cargo test -p ponte-server -- --ignored pg_                 # tests that need Postgres (DATABASE_URL)
 cargo run -p ponte-agent -- crates/agent/agent.example.toml
+cargo run -p ponte-sign -- help                             # keygen, sign, verify, show
 cargo deny check                                            # needs: cargo install cargo-deny
 docker compose -f deploy/docker-compose.yml up -d           # Postgres for local dev
 ```
