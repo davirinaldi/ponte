@@ -19,7 +19,12 @@ ponte-server = { path = "crates/server" }
 
 # Shared external crates. Add new ones here, then reference them with `workspace = true`.
 anyhow = "1"
+# `ponte-sign` only: the signing key at rest, under a password (ADR-0010). Raw hashing,
+# no PHC strings; the KDF's memory is wiped when it is dropped.
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 axum = "0.8"
+# `ponte-sign` only, with the argon2 above. Nonces come from getrandom.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 ed25519-dalek = "3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -31,6 +36,8 @@ rcgen = { version = "0.14", default-features = false, features = ["ring"] }
 # rustls comes without its defaults: no aws-lc-rs, no TLS 1.2 (RNF-01), no logging.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-platform-verifier = "0.7"
+# `ponte-sign` only: reads the key's password from the terminal, without echo.
+rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
@@ -65,6 +72,14 @@ print_stdout = "warn"
 todo = "warn"
 undocumented_unsafe_blocks = "warn"
 unwrap_used = "warn"
+
+# argon2 at its real cost (64 MiB, 3 passes) takes seconds unoptimised, and the tests of
+# `ponte-sign` run it at that cost.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 # The agent runs on weak point-of-sale PCs: optimise for size and strip symbols.

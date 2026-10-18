@@ -53,6 +53,7 @@ More in [docs/architecture.md](docs/architecture.md).
 | `decision` | Classifier traits and the risk x confidence routing policy |
 | `agent` / `agent-helper` | Windows service and its unprivileged session helper |
 | `server` | Control plane (axum, Postgres, MCP) |
+| `sign` | `ponte-sign`, which signs manifests offline |
 | `fake-erp` / `swarm` | Breakable demo ERP and a 10k-agent load generator |
 
 ## Getting started

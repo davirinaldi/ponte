@@ -110,6 +110,19 @@ because the configuration is a root of trust that nobody but an administrator ca
 - `verify` checks an envelope against a public key; `show` prints the summary of `sign`
   for an envelope.
 
+Step 3 of M2 settled the details. The key file is JSON (`ponte.signing-key.v1`), with the
+public key and the format label in the associated data of the cipher, so neither can be
+swapped; after decrypting, the private key must make the recorded public key. A file that
+asks for an argon2 cost below the default or above 4 GiB, 64 passes or 16 lanes is
+refused. `keygen` never overwrites a file and asks for a password of at least 12
+characters, twice. `sign` without `--yes` prints the summary and asks for no password;
+with it, it verifies its own envelope before writing it. When a manifest's text is
+refused, it says why: CR LF line endings, a byte order mark, its size, or the character
+and its place, and for a combining accent that the file is decomposed (NFD) and must be
+saved in NFC. The password is read from the terminal only: no flag, environment variable
+or pipe takes one, and the tests hand theirs in through the same interface the terminal
+sits behind.
+
 A signing ceremony is part of the walkthrough of M2: the private key lives on a machine
 that is not the server, its encrypted file is backed up, and two keys are configured on
 agents from the start so one can be retired.
