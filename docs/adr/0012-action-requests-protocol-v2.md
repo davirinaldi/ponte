@@ -86,8 +86,9 @@ The agent keeps a journal of requests on disk, keyed by `RequestId`.
 - An entry found "started" with no end when the agent starts becomes
   `Failed { reason: Interrupted }` and never runs again. A crash before the mark leaves no
   entry: nothing acted, and a resend is checked from the start.
-- An entry is kept until the request's expiry plus 24 hours, and never longer than 48 hours
-  from when it was written.
+- An entry is kept until the request's expiry plus 24 hours, by the clock's high-water
+  mark. Step 4 of M2 dropped the "never longer than 48 hours" this ADR first had: see
+  below.
 - "Started" entries are what the at-most-once promise rests on, and they are never dropped
   early. The rate limits of ADR-0011 count exactly these entries, so the same test bounds
   both: at most 60 an hour by configuration, at most 2,880 in 48 hours, against room for
@@ -169,6 +170,61 @@ It cannot run a manifest that is unsigned, altered, expired or signed by another
 choose a path, a service or a step; go past the risk ceiling, the service list, the roots
 or the limits; run the refused primitives or anything `high`; or make one request run
 twice. Every one of those refusals is on the agent, which is the point of ADR-0003.
+
+### Step 4 of M2 settled the details
+
+Building the executor showed a few places where the text above was not enough, or not
+right. The code follows this section.
+
+- **The order, exactly.** On arrival: the journal, then whether the agent is stopping, has
+  manifest keys and has room in the queue. Out of the queue: the journal again; the clock
+  (no mark, or a clock more than one hour behind it, is `ClockWentBack`, since ADR-0010
+  already refuses every action then and the checks after it read the clock); the request's
+  expiry; the hourly limit and the room in the journal, before any signature is checked;
+  `verify`; the interval per manifest, which needs the manifest's id and so comes after
+  `verify`, the only door to that id; `validate`. Then one blocking task does the rest: the
+  structural refusal of every service named, the preconditions, the "started" entry, the
+  steps, the verification and the end.
+- **The request's expiry is checked against the clock**, not the mark: expired when
+  `expires_at` is not after the clock, too far ahead when it is more than 24 hours and 5
+  minutes after it. The server writes `expires_at`, so this is no defence against it, and
+  what the expiry protects is the journal: an entry stays a day past the expiry by the
+  mark, and any clock the agent accepts is at most one hour behind the mark.
+- **No cap of 48 hours.** Entries are kept by the mark, which moves only with a monotonic
+  clock while the agent runs. If the clock is corrected forward while the agent runs, the
+  mark falls behind it; a cap counted from the start could then drop an entry whose
+  request the clock still finds valid, and a copy sent later would run again. Without the
+  cap, the bound of 2,880 started entries holds while the clock and the mark agree; in the
+  odd case where they do not, the journal fills and refuses (`JournalFull`), which fails
+  closed. The ring keeps the same rule, or its size.
+- **Two files.** `journal.json` holds the started requests and is written at once on a
+  start and on an end; the start is written before it joins the journal in memory, so
+  nothing ever sees a start the disk does not hold. `ended.json` is the ring. The ring and
+  the marks of what a session sent are written at most once a minute and when the agent
+  stops: a server sending requests that are refused in a loop would otherwise get a disk
+  write per request. A refusal lost in a crash costs a new evaluation, as above; a
+  delivered mark lost in a crash, an identical result sent again.
+- **Refusals that describe the agent are sent, not recorded**: `ActionsDisabled`,
+  `QueueFull`, `ShuttingDown`, `JournalFull`, `JournalUnavailable` and `ClockWentBack`. A
+  repeat is decided again, which is safe because nothing started, and a flood of
+  `QueueFull` writes nothing.
+- **One `RequestId`, one entry**, across both files. A start or a refusal is not recorded
+  for an id the journal knows, and a file that names one twice makes the journal
+  unavailable: the agent never writes a journal it would refuse to read.
+- **One process holds the journal.** `journal.lock`, in the data directory, is locked for
+  the life of the process (`File::try_lock`). Two agents on one data directory, a service
+  and a console, would each trust their own copy and could both run a request; the second
+  one refuses everything with `JournalUnavailable`.
+- **The queue counts duplicates.** A copy of a request that runs or waits takes a place in
+  the queue of 4 like any request, so copies cannot grow the memory.
+- **Cancelling a request that left the queue** takes its waiting copies and answers
+  nothing: the request being decided keeps its own answer, and a `Cancelled` recorded for
+  it would name the id twice.
+- **What the server may see twice.** A result sent again for a copy that arrives after the
+  first answer went out; a result sent again after a crash lost its delivered mark; and,
+  after a refusal that describes the agent, a second, different result once a copy is
+  decided again. The first two are identical and harmless. Step 6 logs a different second
+  result as the anomaly described above, and an identical one at debug level.
 
 ## Consequences
 

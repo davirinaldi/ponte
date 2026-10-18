@@ -106,6 +106,15 @@ M2 added those three; the plan had only the usual locations under `C:`. The rule
 root resolves to when the agent starts. The configuration file, the `data_dir` and the
 enrollment token may not lie inside any root.
 
+Step 4 of M2 made that rule both ways and stricter: none of them, nor the folder of the
+agent's executable, may lie inside a root or hold one (`PathPolicy::overlaps`), and the
+comparison folds case over every Latin letter, not only ASCII, since there a match too
+many only refuses a configuration. On Windows, one of those paths that cannot be compared
+(a short 8.3 name, a device or UNC path, letters outside the allowed list) refuses the
+configuration. The service name the agent is registered under is refused in
+`allowed_services` like `PonteAgent`; a manifest that names it is then refused as not
+allowed.
+
 ### Verification covers what the steps touched
 
 RF-13 asks for at least one verify check; a check that names something else proves nothing.
