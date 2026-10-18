@@ -1026,6 +1026,8 @@ path = 'C:\FakeErp\run\erp.lock'
         active: usize,
         most_active: usize,
         gate: Option<Gate>,
+        /// Whether the gate holds checks too, not only steps.
+        gate_checks: bool,
         /// How long a step takes, on the clock below.
         step_takes: Duration,
         clock: Option<FakeClock>,
@@ -1115,7 +1117,13 @@ path = 'C:\FakeErp\run\erp.lock'
             };
             state.calls.push(format!("check {kind}"));
             state.remaining.push(remaining);
-            state.checks.pop_front().unwrap_or(Ok(true))
+            let gate = state.gate.clone().filter(|_| state.gate_checks);
+            drop(state);
+            if let Some(gate) = gate {
+                let _ = gate.started.send(());
+                let _ = gate.release.lock().unwrap().recv();
+            }
+            self.state().checks.pop_front().unwrap_or(Ok(true))
         }
 
         fn step(&self, step: &Primitive, remaining: Duration) -> Result<(), StepError> {
@@ -1778,13 +1786,17 @@ path = 'C:\FakeErp\run\erp.lock'
     /// answer.
     #[tokio::test(start_paused = true)]
     async fn a_duplicate_that_waits_gets_the_first_ones_answer() {
-        let mut harness = Harness::new("");
+        let mut harness = Harness::new("min_manifest_interval_secs = 60");
+        // Longer than the interval below, so that the first run outlives it.
+        let slow = RESTART.replace("timeout_secs = 60", "timeout_secs = 120");
         let mut gate = harness.machine.gate();
         let actions = harness.start().await;
-        actions.submit(request(1, RESTART));
+        actions.submit(request(1, &slow));
         gate.step_started().await;
-        actions.submit(request(1, RESTART));
-        actions.submit(request(1, RESTART));
+        actions.submit(request(1, &slow));
+        actions.submit(request(1, &slow));
+        // Past the interval: only the journal stands between the copies and the machine.
+        harness.clock.advance(Duration::from_secs(61));
         harness.machine.open();
         gate.release();
         assert_eq!(next(&actions).await.outcome, succeeded());
@@ -1796,6 +1808,32 @@ path = 'C:\FakeErp\run\erp.lock'
             "{more:?}"
         );
         assert_eq!(harness.machine.steps(), 1);
+        // The copies were answered when they left the queue, before anything was read.
+        assert_eq!(harness.machine.calls().len(), 5);
+    }
+
+    /// A repeat of a request that ended is answered when it arrives, before the queue is
+    /// looked at: a full queue does not turn a stored answer into `QueueFull`.
+    #[tokio::test(start_paused = true)]
+    async fn a_repeat_is_answered_on_arrival_even_with_a_full_queue() {
+        let mut harness = Harness::new("");
+        let actions = harness.start().await;
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+
+        let mut gate = harness.machine.gate();
+        actions.submit(request(2, DELETE_ONLY));
+        gate.step_started().await;
+        for n in 3..=6 {
+            actions.submit(request(n, CLEAR_LOCK));
+        }
+        actions.submit(request(1, RESTART));
+        let answers: Vec<(RequestId, ActionOutcome)> = drain(&actions)
+            .into_iter()
+            .map(|result| (result.request_id, result.outcome))
+            .collect();
+        assert_eq!(answers, [(id(1), succeeded())]);
+        harness.machine.open();
+        gate.release();
     }
 
     /// The power goes while a step runs. The request never runs again, and the server
@@ -1972,6 +2010,24 @@ path = 'C:\FakeErp\run\erp.lock'
         );
     }
 
+    /// The limits follow the mark: a clock thrown ahead while the agent runs makes no
+    /// room either.
+    #[tokio::test(start_paused = true)]
+    async fn a_clock_thrown_ahead_does_not_reset_the_limits() {
+        let mut harness = Harness::new("max_actions_per_hour = 1");
+        let actions = harness.start().await;
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        harness.clock.set_wall(NOW + 2 * HOUR);
+        assert_eq!(
+            outcome(
+                &actions,
+                request_with(2, signed(DELETE_ONLY), NOW + 3 * HOUR)
+            )
+            .await,
+            refused(RejectReason::RateLimited)
+        );
+    }
+
     // ----- The queue, cancelling, the lock and stopping --------------------------------
 
     #[tokio::test(start_paused = true)]
@@ -2017,19 +2073,24 @@ path = 'C:\FakeErp\run\erp.lock'
     /// a "cancelled" for a request that then runs would name the id twice in the journal.
     #[tokio::test(start_paused = true)]
     async fn a_request_being_decided_is_not_cancelled() {
-        let mut harness = Harness::new("");
-        let mut gate = harness.machine.gate();
-        let actions = harness.start().await;
-        actions.submit(request(1, RESTART));
-        gate.step_started().await;
-        actions.submit(request(1, RESTART));
-        actions.cancel(id(1));
-        assert_eq!(drain(&actions), []);
-        harness.machine.open();
-        gate.release();
-        assert_eq!(next(&actions).await.outcome, succeeded());
-        let actions = harness.restart().await;
-        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        // Cancelled while its preconditions are read, and again once it started.
+        for hold_checks in [true, false] {
+            let mut harness = Harness::new("");
+            let mut gate = harness.machine.gate();
+            harness.machine.state().gate_checks = hold_checks;
+            let actions = harness.start().await;
+            actions.submit(request(1, RESTART));
+            gate.step_started().await;
+            actions.submit(request(1, RESTART));
+            actions.cancel(id(1));
+            assert_eq!(drain(&actions), [], "{hold_checks}");
+            harness.machine.open();
+            gate.release();
+            assert_eq!(next(&actions).await.outcome, succeeded(), "{hold_checks}");
+            assert_eq!(harness.machine.steps(), 1, "{hold_checks}");
+            let actions = harness.restart().await;
+            assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        }
     }
 
     /// One at a time, and the lock is only released when the blocking work has returned,
@@ -2044,6 +2105,8 @@ path = 'C:\FakeErp\run\erp.lock'
         actions.submit(request(2, CLEAR_LOCK));
         // Far past the manifest's 60 seconds, the step has not returned.
         harness.clock.advance(Duration::from_secs(10 * 60));
+        // The runtime's clock too: a timeout around the blocking task would fire now.
+        tokio::time::advance(Duration::from_secs(10 * 60)).await;
         settle().await;
         assert_eq!(harness.machine.steps(), 1);
         assert_eq!(drain(&actions), []);
@@ -2085,6 +2148,29 @@ path = 'C:\FakeErp\run\erp.lock'
         assert_eq!(outcomes(drain(&actions)), [interrupted()]);
         // Request 2 was dropped: sent again, it is decided now.
         assert_eq!(outcome(&actions, request(2, CLEAR_LOCK)).await, succeeded());
+    }
+
+    /// A stop that comes while a request is in its preconditions starts nothing new.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_is_not_started_once_the_agent_stops() {
+        let mut harness = Harness::new("");
+        let mut gate = harness.machine.gate();
+        harness.machine.state().gate_checks = true;
+        let actions = harness.start().await;
+        actions.submit(request(1, RESTART));
+        gate.step_started().await;
+        let runner = harness.runner.take().unwrap();
+        let stopping = tokio::spawn(runner.stop(Duration::from_secs(10)));
+        settle().await;
+        harness.machine.open();
+        gate.release();
+        stopping.await.unwrap();
+        assert_eq!(
+            outcomes(drain(&actions)),
+            [refused(RejectReason::ShuttingDown)]
+        );
+        assert_eq!(harness.machine.steps(), 0);
+        assert_eq!(harness.disk.files().started, None);
     }
 
     /// The twin of the test above: an action that ends in time ends as it should.

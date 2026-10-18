@@ -551,6 +551,36 @@ data_dir = 'data'
         assert_eq!(result(&mut next.peer).await.request_id, request_id);
     }
 
+    /// A session that could not send a result leaves it waiting, and the next session
+    /// sends it at once, with nothing else to wake it.
+    #[tokio::test(start_paused = true)]
+    async fn a_result_that_could_not_be_sent_goes_out_with_the_next_session() {
+        let (runner, disk) = in_memory(with_keys(), FakeClock::at(NOW)).await;
+        let actions = runner.actions();
+        let (_peer, mut stream, _) = pipe();
+        let mut stuck = stuck_sink();
+        let (_stop, mut stopped) = watch::channel(false);
+        let request_id = RequestId::new();
+        actions.submit(Box::new(action_request(request_id)));
+        // No heartbeat: the send that fails is the result's.
+        let collector = FakeCollector::default();
+        collector.fail(true);
+        let end = run(
+            &mut stream,
+            &mut stuck,
+            &collector,
+            &actions,
+            &Timing::default(),
+            &mut stopped,
+        )
+        .await;
+        assert_eq!(end, SessionEnd::SendFailed);
+
+        let mut next = start_session(runner, disk);
+        assert_eq!(result(&mut next.peer).await.request_id, request_id);
+        assert_eq!(next.elapsed(), Duration::ZERO);
+    }
+
     /// A `RunAction` that does not parse is dropped like any other message (ADR-0006): no
     /// answer, and nothing of it in the log. The name of an unknown field is the server's
     /// choice, so not even the parser's error goes there.

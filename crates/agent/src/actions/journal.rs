@@ -552,6 +552,8 @@ pub(crate) mod tests {
         pub(crate) started: Option<String>,
         pub(crate) ended: Option<String>,
         pub(crate) unreadable: bool,
+        /// One file that cannot be read, the other one fine.
+        pub(crate) unreadable_file: Option<JournalFile>,
         pub(crate) locked: bool,
         /// Every write, in order, whether or not it went through.
         pub(crate) writes: Vec<JournalFile>,
@@ -580,7 +582,7 @@ pub(crate) mod tests {
     impl JournalDisk for FakeJournalDisk {
         fn read(&self, file: JournalFile) -> io::Result<Option<String>> {
             let files = self.files();
-            if files.unreadable {
+            if files.unreadable || files.unreadable_file == Some(file) {
                 return Err(io::ErrorKind::PermissionDenied.into());
             }
             Ok(match file {
@@ -755,6 +757,16 @@ pub(crate) mod tests {
         let disk = FakeJournalDisk::default();
         disk.files().unreadable = true;
         assert_eq!(Journal::load(&disk).map(|_| ()), Err(Unavailable::Read));
+        // Either file alone is enough.
+        for file in [JournalFile::Started, JournalFile::Ended] {
+            let disk = FakeJournalDisk::default();
+            disk.files().unreadable_file = Some(file);
+            assert_eq!(
+                Journal::load(&disk).map(|_| ()),
+                Err(Unavailable::Read),
+                "{file:?}"
+            );
+        }
         let disk = FakeJournalDisk::default();
         disk.files().locked = true;
         assert_eq!(Journal::load(&disk).map(|_| ()), Err(Unavailable::Locked));
