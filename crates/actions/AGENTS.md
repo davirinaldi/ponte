@@ -22,8 +22,8 @@ The closed catalog of what an agent can do. This crate is the main security boun
   then parses the TOML. Keep that order; the tests prove it.
 - `REFUSED_SERVICES` may only grow without an ADR. It wins over `allowed_services`.
 - **Check decoded values, not only bytes.** `ManifestText` checks the signed bytes, but
-  TOML decodes escapes (`\e`, `‮`) into any character. Every string read out of a
-  manifest passes `ManifestText::allows` (text) or `is_path_char` (paths) in
+  TOML decodes escapes into any character (ESC, a bidirectional mark). Every string read
+  out of a manifest passes `ManifestText::allows` (text) or `is_path_char` (paths) in
   `validate_shape`; a new string field needs the same.
 - Errors say which rule and where (`Location`), never the path, name or text at fault: the
   agent may log them, and a manifest names paths and services (ADR-0012).
