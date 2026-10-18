@@ -1,14 +1,17 @@
 //! What a manifest does, as `sign` and `show` print it for the person who answers for it
 //! (ADR-0010): risk, steps, every path and service, the validity and the key.
 //!
-//! Every string printed here passed `ManifestText`, which has no control characters, so
-//! a manifest cannot move the cursor or recolour the terminal.
+//! The bytes of a manifest pass `ManifestText`, but TOML decodes escapes into any
+//! character, and `show` prints envelopes that were never validated. So every value is
+//! escaped here: what `ManifestText` refuses is written as `<U+XXXX>`, a value meant for
+//! one line stays on one line, and every line of a description is quoted with `|`, so no
+//! manifest can move the cursor, hide text or print a section of its own.
 
 use std::fmt::Write as _;
 
 use chrono::DateTime;
 use ponte_actions::{Check, ExpectedServiceState, Manifest, Primitive, RiskLevel};
-use ponte_protocol::PublicKey;
+use ponte_protocol::{ManifestText, PublicKey};
 
 const DAY: u64 = 24 * 60 * 60;
 
@@ -25,13 +28,22 @@ pub(crate) fn summary(
     };
     line(
         "Manifest",
-        &format!("{}, version {}", manifest.id, manifest.version),
+        &format!("{}, version {}", one_line(&manifest.id), manifest.version),
     );
-    line("Title", &manifest.title);
+    line("Title", &one_line(&manifest.title));
     line("Risk", risk(manifest.risk));
     line("Timeout", &format!("{} s", manifest.timeout_secs));
     line("Signing key", &key.to_string());
     line("Valid", &validity(issued_at, expires_at));
+
+    let mut quote = |title: &str, text: &str| {
+        let _ = writeln!(out, "\n{title}");
+        for text_line in text.trim_end().lines() {
+            let _ = writeln!(out, "  | {}", one_line(text_line));
+        }
+    };
+    quote("Description", &manifest.description);
+    quote("For the AI", &manifest.ai_description);
 
     let mut section = |title: &str, items: Vec<String>| {
         let _ = writeln!(out, "\n{title}");
@@ -39,17 +51,9 @@ pub(crate) fn summary(
             let _ = writeln!(out, "  (none)");
         }
         for (index, item) in items.iter().enumerate() {
-            let _ = writeln!(out, "  {index}. {item}");
+            let _ = writeln!(out, "  {index}. {}", one_line(item));
         }
     };
-    section(
-        "Description",
-        vec![manifest.description.trim_end().to_owned()],
-    );
-    section(
-        "For the AI",
-        vec![manifest.ai_description.trim_end().to_owned()],
-    );
     section(
         "Preconditions",
         manifest.preconditions.iter().map(check).collect(),
@@ -94,8 +98,26 @@ fn list(items: &[&str]) -> String {
     if items.is_empty() {
         "(none)".to_owned()
     } else {
-        items.join(", ")
+        items
+            .iter()
+            .map(|item| one_line(item))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
+}
+
+/// `text` on one line, with every character `ManifestText` refuses, and the line feed and
+/// the tab, written as `<U+XXXX>`.
+fn one_line(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    for c in text.chars() {
+        if ManifestText::allows(c) && !matches!(c, '\n' | '\t') {
+            shown.push(c);
+        } else {
+            let _ = write!(shown, "<U+{:04X}>", u32::from(c));
+        }
+    }
+    shown
 }
 
 const fn risk(risk: RiskLevel) -> &'static str {
@@ -201,6 +223,31 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in\n{text}");
         }
+    }
+
+    /// What an escape in the TOML can decode into never reaches the terminal raw, and no
+    /// value starts a line of its own.
+    #[test]
+    fn nothing_printed_can_steer_the_terminal() {
+        let mut manifest = Manifest::from_toml(CLEAR_LOCK).unwrap();
+        let esc = char::from(0x1b);
+        let bell = char::from(0x07);
+        let rlo = char::from_u32(0x202e).unwrap();
+        manifest.title = format!("Restart\rRead-only check{esc}[8m");
+        manifest.description = format!("Harmless.\nSteps\n  0. check the disk{esc}[8m");
+        manifest.ai_description = format!("x{esc}]0;pwned{bell} {rlo}abc");
+        manifest.steps[0] = Primitive::DeleteFile {
+            path: format!(r"C:\FakeErp\run\a{rlo}kcol.bd") + "\nPaths  nothing",
+        };
+        let text = summary(&manifest, &PublicKey::from_bytes([1; 32]), 0, DAY);
+        for c in text.chars() {
+            assert!(c == '\n' || ManifestText::allows(c), "{c:?} in\n{text}");
+        }
+        assert!(text.contains("Title         Restart<U+000D>Read-only check<U+001B>[8m\n"));
+        assert!(text.contains("  | Harmless.\n  | Steps\n  |   0. check the disk<U+001B>[8m\n"));
+        assert!(text.contains("x<U+001B>]0;pwned<U+0007> <U+202E>abc"));
+        assert!(text.contains("a<U+202E>kcol.bd<U+000A>Paths  nothing"));
+        assert!(!text.contains("\nPaths  nothing"));
     }
 
     #[test]

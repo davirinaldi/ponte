@@ -486,6 +486,60 @@ fn a_tampered_key_file_signs_nothing() {
     assert!(file.unlock(&Password::new(PASSWORD.to_owned())).is_ok());
 }
 
+/// `show` is for envelopes of unknown origin: an escape in the signed TOML must not reach
+/// the terminal, hide the steps or fake the status line. `sign` refuses the same text.
+#[test]
+fn show_never_prints_what_an_escape_decodes_into() {
+    use ed25519_dalek::Signer;
+    use ponte_protocol::{Signature, manifest_transcript};
+
+    let dir = TempDir::new();
+    let text = RESTART.replace(
+        "description = \"Restarts the FakeErp Windows service and confirms it is running again.\"",
+        "description = \"Harmless.\\e[8m\\rStatus: fine\"",
+    );
+    assert_ne!(text, RESTART);
+    let key = SigningKey::from_bytes(&[4; 32]);
+    let mut signed = SignedManifest {
+        manifest: text.parse().unwrap(),
+        issued_at: NOW - 3600,
+        expires_at: NOW + DAY,
+        public_key: PublicKey::from_bytes(key.verifying_key().to_bytes()),
+        signature: Signature::from_bytes([0; 64]),
+    };
+    let signature = key.sign(manifest_transcript(&signed).expose_bytes());
+    signed.signature = Signature::from_bytes(signature.to_bytes());
+    let envelope = dir.write("odd.json", &serde_json::to_string(&signed).unwrap());
+
+    let mut console = Scripted::new(&[]);
+    assert_eq!(command(&mut console, &["show", arg(&envelope)], NOW), OK);
+    let out = console.out();
+    assert!(
+        !out.contains(char::from(0x1b)) && !out.contains('\r'),
+        "{out:?}"
+    );
+    assert!(
+        out.contains("  | Harmless.<U+001B>[8m<U+000D>Status: fine\n"),
+        "{out}"
+    );
+    assert!(out.contains("Status: refused: the signed manifest has no valid shape"));
+
+    let (key_file, _) = keygen(&dir);
+    let manifest = dir.write("odd.toml", &text);
+    let mut console = Scripted::new(&[]);
+    let code = command(
+        &mut console,
+        &["sign", "--key", arg(&key_file), arg(&manifest)],
+        NOW,
+    );
+    assert_eq!(code, FAILED);
+    assert!(
+        console.err().contains("description holds a character"),
+        "{}",
+        console.err()
+    );
+}
+
 #[test]
 fn usage_errors() {
     for args in [
