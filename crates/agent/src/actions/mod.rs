@@ -4,11 +4,15 @@
 //! |---|---|
 //! | `clock` | The clock and its high-water mark |
 //! | `journal` | What already ran, or was answered, by `RequestId` |
+//! | `machine` | What the executor asks of the operating system |
+//! | `runner` | The executor: the queue, the order of the checks, one action at a time |
 //!
 //! The files live in the data directory, which only administrators may change.
 
 pub(crate) mod clock;
 pub(crate) mod journal;
+pub(crate) mod machine;
+pub(crate) mod runner;
 
 use std::fs::{File, OpenOptions};
 use std::io;

@@ -132,6 +132,14 @@ impl HighWater {
         Self { clock, anchor }
     }
 
+    /// A mark that could not be read: every action is refused.
+    pub(crate) fn unavailable(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            clock,
+            anchor: None,
+        }
+    }
+
     /// The clock and the mark now, or `None` if the mark could not be read.
     pub(crate) fn reading(&self) -> Option<Reading> {
         let anchor = self.anchor?;
