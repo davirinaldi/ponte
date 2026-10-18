@@ -2,8 +2,9 @@
 server_url = "ws://127.0.0.1:8080/agent"
 allowed_roots = ['C:\FakeErp']
 
-# Where the device key and the identity live. The installer writes an absolute path that
-# only administrators can change. `keys/` is ignored by git.
+# Where the device key, the identity, the journal of actions and the clock mark live. The
+# installer writes an absolute path that only administrators can change, outside every
+# root. `keys/` is ignored by git.
 data_dir = "keys/agent-dev"
 
 # The enrollment token: 64 lowercase hex characters. Read once, removed once enrolled.
@@ -11,3 +12,27 @@ enrollment_token_file = "keys/agent-dev/enrollment-token"
 
 # Seconds between heartbeats (10 to 3600).
 heartbeat_secs = 60
+
+# Actions (ADR-0010, ADR-0011). Without manifest_keys the agent runs no action at all.
+# Up to four ed25519 public keys in lowercase hex, as `ponte-sign keygen` prints them;
+# two let one be retired. An empty list is refused.
+# manifest_keys = ["<64 lowercase hex characters>"]
+
+# The highest risk this machine runs: "read", "low" or "medium". "high" is refused.
+max_risk = "medium"
+
+# Every service a manifest names, in a step or a check, must be here (up to 32, ASCII).
+# Windows' own services and the agent's are refused whatever this list says.
+allowed_services = ["FakeErp"]
+
+# Where delete_file may act, each inside an allowed root.
+delete_roots = ['C:\FakeErp\run']
+
+# Requests started in the last hour (1 to 60), and seconds between two runs of the same
+# manifest (60 to 86400).
+max_actions_per_hour = 20
+min_manifest_interval_secs = 600
+
+# How long a stop waits for the running action, in seconds (1 to 60). What does not end
+# in time is recorded as interrupted and never runs again.
+shutdown_timeout_secs = 10

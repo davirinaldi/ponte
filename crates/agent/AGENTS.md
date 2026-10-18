@@ -20,6 +20,13 @@ point-of-sale PCs, so bugs here are expensive and visible.
 - UI, consent prompts and screen capture belong to `crates/agent-helper`, not here
   (a service in session 0 cannot reach the user's desktop).
 - Reconnect with exponential backoff plus jitter (RNF-16). Execute each `RequestId` at most once (RNF-18).
+- **The configuration is a root of trust** (ADR-0010, ADR-0011). `manifest_keys` and the
+  local policy decide what SYSTEM runs, so `config.rs` builds `TrustedKeys` and
+  `LocalPolicy` once and refuses the whole file on any doubt: no key list means no action,
+  an empty one is an error, `high` does not parse, the agent's own service name and the
+  refused services never go on `allowed_services`, and the agent's own files (executable
+  folder, configuration, `data_dir`, token) never overlap a root (`Roots::overlaps`).
+  Errors name the setting, never repair it.
 
 ## The connection to the server (`src/`)
 

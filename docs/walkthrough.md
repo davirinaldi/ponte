@@ -125,6 +125,8 @@ cargo run -q --release -p ponte-agent -- keys/walkthrough/agent.toml
 
 ```
 INFO  agent starting server=ws://127.0.0.1:8080/agent allowed_roots=1 protocol=2 platform="windows"
+INFO  action policy actions="disabled" max_risk=Medium max_actions_per_hour=20 min_manifest_interval_secs=600 shutdown_timeout_secs=10
+WARN  the configuration names no manifest_keys: this agent runs no action (ADR-0010)
 WARN  the device key is stored without encryption ... This build is for development only (ADR-0008)
 WARN  server_url is plain ws:// to this machine ... For development only
 INFO  new device key stored for an enrollment public_key=...
@@ -133,8 +135,9 @@ INFO  enrolled: the server gave this device its id device=<device id>
 INFO  connected: the server accepted this device server=ws://127.0.0.1:8080/agent
 ```
 
-The two warnings are the point of an M1 build: the key file is not encrypted until M2, and
-plain `ws://` is for this machine only. The server logs `event="device_enrolled"`,
+Without `manifest_keys` the agent runs no action; signing manifests is part of M2. The
+other two warnings are the point of an M1 build: the key file is not encrypted until M2,
+and plain `ws://` is for this machine only. The server logs `event="device_enrolled"`,
 `event="session_started"` and `agent connected ... status=Active version=1`.
 
 In the operator terminal:
