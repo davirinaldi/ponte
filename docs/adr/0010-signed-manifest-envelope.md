@@ -38,7 +38,9 @@ is a type in `crates/protocol`, written as JSON everywhere: on the wire, in the 
   zero-width, bidirectional and tag characters, blank fillers and the no-break space are
   all out, so a reviewer cannot be shown one text while the parser reads another, or miss
   text hidden from view. The list may widen later without invalidating a signature; it
-  must never narrow.
+  must never narrow. An agent built before a widening still refuses the new characters,
+  and a request it cannot parse gets no answer, so manifests that use them wait until the
+  fleet runs a version that knows them.
 - `issued_at` and `expires_at` are seconds since the Unix epoch, as integers.
 - `public_key` and `signature` follow the rules of `src/keys.rs`: lowercase hex of their
   exact length.
