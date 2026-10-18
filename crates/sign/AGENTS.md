@@ -9,7 +9,10 @@ and shows the person signing exactly what they sign.
   environment variable, a file or a read from stdin that takes a password: it would end
   up in a shell history, a CI log or a process list.
 - **A key file is never overwritten** (`create_new`), and `keygen` checks the `.pub` too
-  before asking anything. Losing a key is worse than an error message.
+  before asking anything. Losing a key is worse than an error message. `sign --out` only
+  replaces a file that is already an envelope (renewing a signature), through a temporary
+  file and a rename. Where files have modes the key file is `0600`; on Windows the
+  folder's access list decides, and the key is encrypted either way.
 - **The key file is fail closed.** Unknown fields, formats and algorithms are refused, and
   so is an argon2 cost outside its range (`keyfile.rs`): below it a stolen file is cheap
   to attack, above it opening the file exhausts the machine. The public key is in the
