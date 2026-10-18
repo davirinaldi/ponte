@@ -61,8 +61,9 @@ pub(crate) const MAX_REQUEST_AHEAD_SECS: u64 = 24 * 60 * 60 + 5 * 60;
 pub(crate) const LAZY_WRITES_EVERY: Duration = Duration::from_secs(60);
 /// The window of `max_actions_per_hour`.
 const HOUR_SECS: u64 = 60 * 60;
-/// Refusals the executor logs per [`LOG_WINDOW`]. A server that sends refused requests in
-/// a loop must not fill the machine's disk.
+/// Refusals, cancels and failed starts the executor logs per [`LOG_WINDOW`]. A server that
+/// sends refused or cancelled requests in a loop must not fill the machine's disk, nor push
+/// the lines of what did run out of the log.
 const LOGGED_PER_WINDOW: u32 = 20;
 const LOG_WINDOW: Duration = Duration::from_secs(10 * 60);
 
@@ -132,7 +133,7 @@ impl LogBudget {
         }
         self.used = self.used.saturating_add(1);
         if self.used == LOGGED_PER_WINDOW + 1 {
-            warn!("further refused requests are not logged for ten minutes");
+            warn!("further refused or cancelled requests are not logged for ten minutes");
         }
         self.used <= LOGGED_PER_WINDOW
     }
@@ -374,8 +375,10 @@ impl Actions {
         }
         let cancelled = answer(id, ActionOutcome::Cancelled {}, 0);
         if journal.record_ended(Ended::new(&cancelled, expires_at, mark)) {
-            info!(request = %id, "action cancelled while it waited");
             drop(state);
+            if shared.log_allowed() {
+                info!(request = %id, "action cancelled while it waited");
+            }
             shared.outbox.notify_one();
             shared.work.notify_one();
         }
@@ -454,6 +457,13 @@ impl Shared {
         state.next_ticket = ticket.wrapping_add(1);
         state.unrecorded.push_back((ticket, result));
         self.outbox.notify_one();
+    }
+
+    /// Whether one more line about a request fits in the budget. Every line a server can
+    /// cause once per request goes through it.
+    fn log_allowed(&self) -> bool {
+        let now = self.clock.monotonic();
+        self.lock().log.take(now)
     }
 
     fn log_refusal(&self, state: &mut State, id: RequestId, reason: RejectReason) {
@@ -721,7 +731,9 @@ impl Shared {
             .write(JournalFile::Started, pending.text())
             .is_err()
         {
-            warn!(request = %id, "the start could not be written: the action does not run");
+            if self.log_allowed() {
+                warn!(request = %id, "the start could not be written: the action does not run");
+            }
             return RunEnd::Refused(RejectReason::JournalUnavailable);
         }
         let committed = match &mut self.lock().journal {
@@ -2382,6 +2394,32 @@ path = 'C:\FakeErp\run\erp.lock'
         ] {
             assert!(!log.contains(secret), "{secret} in:\n{log}");
         }
+    }
+
+    /// Cancelling in a loop costs the server the same budget as refusals.
+    #[tokio::test(start_paused = true)]
+    async fn cancels_in_a_loop_are_logged_within_the_budget() {
+        let log = crate::testkit::LogCapture::start();
+        let mut harness = Harness::new("");
+        let mut gate = harness.machine.gate();
+        let actions = harness.start().await;
+        actions.submit(request(1, RESTART));
+        gate.step_started().await;
+        for n in 2..=1001 {
+            actions.submit(request(n, RESTART));
+            actions.cancel(id(n));
+        }
+        harness.machine.open();
+        gate.release();
+        let lines = log
+            .text()
+            .matches("action cancelled while it waited")
+            .count();
+        assert_eq!(lines, 20);
+        assert!(
+            log.text()
+                .contains("further refused or cancelled requests are not logged")
+        );
     }
 
     #[test]
