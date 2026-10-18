@@ -119,8 +119,36 @@ pub enum Initiator {
         client_id: Label,
         ticket_ref: Option<Label>,
         /// Calibrated confidence of the decision that proposed this action, if known.
-        confidence: Option<f32>,
+        confidence: Option<Confidence>,
     },
+}
+
+/// A calibrated confidence: a finite number from 0 to 1.
+///
+/// JSON reads `1e300` as an `f32` infinity, which would be written back as `null`: an audit
+/// record that changes on its own. Anything outside the range is refused instead.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Confidence(f32);
+
+impl Confidence {
+    /// `None` unless `value` is finite and from 0 to 1.
+    #[must_use]
+    pub fn new(value: f32) -> Option<Self> {
+        (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for Confidence {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = f32::deserialize(deserializer)?;
+        Self::new(value).ok_or_else(|| de::Error::custom("expected a confidence from 0 to 1"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -226,7 +254,8 @@ pub enum FailReason {
 }
 
 /// Text from the machine in a result: at most [`Output::MAX_BYTES`] once written as a JSON
-/// string, quotes and escapes included.
+/// string, quotes and escapes included, and no NUL, which PostgreSQL refuses in text and in
+/// `jsonb` alike: a result that cannot be stored would be sent again and again.
 ///
 /// Untrusted (invariant 4) and possibly personal (invariant 6), so `Debug` shows its size
 /// only. A sender cuts its text with [`Output::truncated`]; a receiver refuses more.
@@ -234,30 +263,38 @@ pub enum FailReason {
 #[serde(transparent)]
 pub struct Output(String);
 
-/// The output was larger than [`Output::MAX_BYTES`] once serialized.
+/// The output was larger than [`Output::MAX_BYTES`] once serialized, or held a NUL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "expected an output of at most {} bytes once serialized",
+    "expected an output of at most {} bytes once serialized, with no NUL",
     Output::MAX_BYTES
 )]
-pub struct OutputTooLarge;
+pub struct InvalidOutput;
 
 impl Output {
     /// The limit of ADR-0012, measured the way `serde_json` writes the string.
     pub const MAX_BYTES: usize = 64 * 1024;
 
-    /// The longest prefix of `text` that fits, cut between characters.
+    /// The longest prefix of `text` that fits, cut between characters, with every NUL
+    /// replaced by U+FFFD.
     #[must_use]
     pub fn truncated(text: &str) -> Self {
         let mut size = QUOTES;
-        let end = text
-            .char_indices()
-            .find(|&(_, c)| {
-                size += escaped_len(c);
-                size > Self::MAX_BYTES
-            })
-            .map_or(text.len(), |(at, _)| at);
-        Self(text[..end].to_owned())
+        Self(
+            text.chars()
+                .map(|c| {
+                    if c == '\0' {
+                        char::REPLACEMENT_CHARACTER
+                    } else {
+                        c
+                    }
+                })
+                .take_while(|&c| {
+                    size += escaped_len(c);
+                    size <= Self::MAX_BYTES
+                })
+                .collect(),
+        )
     }
 
     /// Untrusted text from the machine. Mark it as data wherever it goes.
@@ -273,12 +310,15 @@ impl Output {
 }
 
 impl FromStr for Output {
-    type Err = OutputTooLarge;
+    type Err = InvalidOutput;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         // A cheap bound first: no character takes fewer bytes escaped than in UTF-8.
-        if text.len() + QUOTES > Self::MAX_BYTES || Self::serialized_len(text) > Self::MAX_BYTES {
-            return Err(OutputTooLarge);
+        if text.len() + QUOTES > Self::MAX_BYTES
+            || Self::serialized_len(text) > Self::MAX_BYTES
+            || text.contains('\0')
+        {
+            return Err(InvalidOutput);
         }
         Ok(Self(text.to_owned()))
     }
@@ -513,7 +553,7 @@ mod tests {
                 initiator: Initiator::Ai {
                     client_id: "n1-bot".parse().unwrap(),
                     ticket_ref: None,
-                    confidence: Some(0.5),
+                    confidence: Confidence::new(0.5),
                 },
             })),
             json!({
@@ -676,7 +716,7 @@ mod tests {
             initiator: Initiator::Ai {
                 client_id: "n1-bot".parse().unwrap(),
                 ticket_ref: Some("ZAM-123".parse().unwrap()),
-                confidence: Some(0.93),
+                confidence: Confidence::new(0.93),
             },
         }));
 
@@ -760,7 +800,7 @@ mod tests {
         assert!(!parses(v1));
     }
 
-    fn output(text: &str) -> Result<Output, OutputTooLarge> {
+    fn output(text: &str) -> Result<Output, InvalidOutput> {
         text.parse()
     }
 
@@ -783,7 +823,7 @@ mod tests {
         assert_eq!(Output::MAX_BYTES, 65_536);
         let max = Output::MAX_BYTES - 2;
         assert!(output(&"a".repeat(max)).is_ok());
-        assert_eq!(output(&"a".repeat(max + 1)), Err(OutputTooLarge));
+        assert_eq!(output(&"a".repeat(max + 1)), Err(InvalidOutput));
         // Escapes count: half as many quotes fit, and a sixth as many control characters.
         assert!(output(&"\"".repeat(max / 2)).is_ok());
         assert!(output(&"\"".repeat(max / 2 + 1)).is_err());
@@ -839,6 +879,103 @@ mod tests {
             duration_ms: 1,
         };
         assert!(!format!("{result:?}").contains("Maria"));
+    }
+
+    /// PostgreSQL refuses a NUL in text and in `jsonb`. A result holding one could never be
+    /// stored, and would be sent again on every connection.
+    #[test]
+    fn output_has_no_nul() {
+        assert_eq!(output("a\0b"), Err(InvalidOutput));
+        let wire = json!({
+            "type": "action_result",
+            "request_id": ID,
+            "outcome": { "status": "succeeded" },
+            "output": "a\u{0}b",
+            "duration_ms": 1,
+        });
+        assert!(serde_json::from_value::<AgentToServer>(wire).is_err());
+
+        let cut = Output::truncated("a\0b");
+        assert_eq!(cut.as_str(), "a\u{fffd}b");
+        assert_eq!(output(cut.as_str()).as_ref(), Ok(&cut));
+        // The replacement is three bytes where the NUL took six escaped: it still fits.
+        let cut = Output::truncated(&"\0".repeat(Output::MAX_BYTES));
+        let size = serde_json::to_string(cut.as_str()).unwrap().len();
+        assert!(size <= Output::MAX_BYTES && size > Output::MAX_BYTES - 3);
+        assert!(output(cut.as_str()).is_ok());
+    }
+
+    #[test]
+    fn confidence_is_a_number_from_0_to_1() {
+        let ai = |confidence: serde_json::Value| json!({ "kind": "ai", "client_id": "bot", "ticket_ref": null, "confidence": confidence });
+        let read =
+            |confidence: serde_json::Value| serde_json::from_value::<Initiator>(ai(confidence));
+
+        for value in [0.0, 0.5, 1.0] {
+            let Initiator::Ai { confidence, .. } = read(json!(value)).unwrap() else {
+                panic!("not an AI initiator");
+            };
+            assert_eq!(confidence.map(Confidence::get), Some(value));
+        }
+        assert!(matches!(
+            read(json!(null)),
+            Ok(Initiator::Ai {
+                confidence: None,
+                ..
+            })
+        ));
+        for value in [
+            json!(-0.01),
+            json!(1.01),
+            json!(-5),
+            json!(1e300),
+            json!("0.9"),
+        ] {
+            assert!(read(value.clone()).is_err(), "{value}");
+        }
+        assert_eq!(Confidence::new(f32::NAN), None);
+        assert_eq!(Confidence::new(f32::INFINITY), None);
+    }
+
+    /// The largest request and the largest result the limits allow still fit in one message,
+    /// with room to spare. Raising a limit past that breaks this test first.
+    #[test]
+    fn the_largest_messages_fit_in_one() {
+        // Control characters are refused in a manifest, so the worst it can do is a backslash
+        // or a quote on every byte, two bytes each once escaped.
+        let worst_text = format!("#{}", "\\".repeat(crate::MAX_MANIFEST_BYTES - 1));
+        let mut request = action_request_json();
+        request["manifest"]["manifest"] = json!(worst_text);
+        assert!(serde_json::from_value::<ServerToAgent>(request.clone()).is_ok());
+        let request_size = request.to_string().len();
+        let result = json!({
+            "type": "action_result",
+            "request_id": ID,
+            "outcome": { "status": "failed", "reason": "verify_failed", "step": 255 },
+            "output": "\"".repeat(Output::MAX_BYTES / 2 - 1),
+            "duration_ms": u64::MAX,
+        });
+        assert!(serde_json::from_value::<AgentToServer>(result.clone()).is_ok());
+        let result_size = result.to_string().len();
+
+        assert!(request_size < 34 * 1024, "{request_size}");
+        assert!(result_size < 66 * 1024, "{result_size}");
+        assert_eq!(crate::MAX_MESSAGE_BYTES, 256 * 1024);
+    }
+
+    fn action_request_json() -> serde_json::Value {
+        json!({
+            "type": "run_action",
+            "request_id": ID,
+            "manifest": signed_manifest_json(),
+            "expires_at": u64::MAX,
+            "initiator": {
+                "kind": "ai",
+                "client_id": "c".repeat(64),
+                "ticket_ref": "t".repeat(64),
+                "confidence": 1.0,
+            },
+        })
     }
 
     /// A message is logged with `{:?}` sooner or later. The token must not come along.

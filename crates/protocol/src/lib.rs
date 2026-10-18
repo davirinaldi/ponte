@@ -17,8 +17,8 @@ pub use ids::{DeviceId, RequestId};
 pub use keys::{EnrollmentToken, InvalidHex, Nonce, PublicKey, Signature};
 pub use manifest::{InvalidManifestText, MAX_MANIFEST_BYTES, ManifestText, SignedManifest};
 pub use messages::{
-    ActionOutcome, ActionRequest, ActionResult, AgentToServer, FailReason, Initiator, Output,
-    OutputTooLarge, RejectReason, ServerToAgent,
+    ActionOutcome, ActionRequest, ActionResult, AgentToServer, Confidence, FailReason, Initiator,
+    InvalidOutput, Output, RejectReason, ServerToAgent,
 };
 pub use telemetry::{
     DiskUsage, MAX_LISTED, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot,

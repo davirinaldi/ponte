@@ -32,6 +32,10 @@ is a type in `crates/protocol`, written as JSON everywhere: on the wire, in the 
 - `manifest` is the exact TOML text a person reviewed, comments included. It is UTF-8 with
   no `\r` and no byte order mark; `ponte-sign` and the agent both refuse anything else, so
   the bytes that were read are the bytes that were signed. It is at most 16 KiB (ADR-0011).
+  Step 2 of M2 widened the rule before anything was signed: no control character but the
+  line feed and the tab, and none of the invisible characters that change how text reads
+  (zero-width characters, bidirectional overrides and isolates, line and paragraph
+  separators), so a reviewer cannot be shown one text while the parser reads another.
 - `issued_at` and `expires_at` are seconds since the Unix epoch, as integers.
 - `public_key` and `signature` follow the rules of `src/keys.rs`: lowercase hex of their
   exact length.

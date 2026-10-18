@@ -62,7 +62,7 @@ pub enum ServiceState {
     Unknown,
 }
 
-/// Reads a list and refuses it at its 33rd item, without reading the rest.
+/// Reads a list and refuses it at its 33rd item, without reading the items after it.
 fn at_most_listed<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,

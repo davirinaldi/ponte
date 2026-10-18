@@ -16,26 +16,56 @@ use crate::{PublicKey, Signature};
 /// 1 KiB; a manifest needs to grow tenfold before it comes near.
 pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 
-const BYTE_ORDER_MARK: char = '\u{feff}';
+/// Whether `c` may appear in signed manifest text: not a control character other than a
+/// line feed or a tab, and not a character that changes how text looks without being seen.
+///
+/// TOML allows none of those controls raw anyway. The invisible ones are allowed by TOML in
+/// strings and comments, and that is the problem: a byte order mark, a zero-width
+/// character or a bidirectional override can make the text a person reviews differ from
+/// what the parser reads ("Trojan Source"), and no honest manifest needs one.
+fn is_visible_text(c: char) -> bool {
+    match c {
+        '\n' | '\t' => true,
+        '\0'..='\u{1f}' | '\u{7f}' => false,
+        '\u{feff}'
+        | '\u{061c}'
+        | '\u{200b}'..='\u{200f}'
+        | '\u{202a}'..='\u{202e}'
+        | '\u{2066}'..='\u{2069}'
+        | '\u{2028}'
+        | '\u{2029}' => false,
+        _ => true,
+    }
+}
 
 /// The exact TOML text that was signed: not empty, at most [`MAX_MANIFEST_BYTES`], with no
-/// `\r` anywhere and no byte order mark in front.
+/// `\r`, no other control character but the line feed and the tab, no byte order mark and
+/// no invisible character that changes how the text reads.
 ///
-/// The signature covers these bytes as they are (ADR-0010). A line ending or a mark that an
-/// editor adds or strips without showing it would make the reviewed text and the signed
-/// text differ, so `ponte-sign`, the server and the agent all refuse them, here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// The signature covers these bytes as they are (ADR-0010). Anything an editor adds or
+/// strips without showing it, or that shows the reviewer something other than what the
+/// parser reads, would make the reviewed text and the signed text differ, so `ponte-sign`,
+/// the server and the agent all refuse it, here. `Debug` shows the size only: the text
+/// names paths and services, which logs do not (ADR-0012).
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ManifestText(String);
 
-/// The text was empty, too long, or had a `\r` or a byte order mark.
+/// The text was empty, too long, or had a control or an invisible character.
 ///
 /// Says nothing about the text: errors get logged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "expected 1 to {MAX_MANIFEST_BYTES} bytes of text with no carriage return or byte order mark"
+    "expected 1 to {MAX_MANIFEST_BYTES} bytes of text with no control or invisible character \
+     but line feeds and tabs"
 )]
 pub struct InvalidManifestText;
+
+impl fmt::Debug for ManifestText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ManifestText(<{} bytes>)", self.0.len())
+    }
+}
 
 impl ManifestText {
     /// The signed bytes, as text.
@@ -49,10 +79,7 @@ impl FromStr for ManifestText {
     type Err = InvalidManifestText;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.is_empty()
-            || text.len() > MAX_MANIFEST_BYTES
-            || text.contains('\r')
-            || text.starts_with(BYTE_ORDER_MARK)
+        if text.is_empty() || text.len() > MAX_MANIFEST_BYTES || !text.chars().all(is_visible_text)
         {
             return Err(InvalidManifestText);
         }
@@ -140,7 +167,8 @@ mod tests {
         assert!(!parses(""));
     }
 
-    /// What an editor adds or removes without showing it.
+    /// What an editor adds or removes without showing it, and what shows a reviewer
+    /// something other than what the parser reads.
     #[test]
     fn invisible_differences_are_refused() {
         for text in [
@@ -148,12 +176,43 @@ mod tests {
             "id = \"a.b\"\rversion = 1",
             "id = \"a.b\"\nversion = 1\r",
             "\u{feff}id = \"a.b\"\n",
+            "id = \"a.b\"\n\u{feff}version = 1\n",
+            "id = \"a.b\"\0\n",
+            "id = \"a.b\"\u{1b}[2J\n",
+            "id = \"a.b\"\u{0b}\n",
+            "id = \"a.b\"\u{7f}\n",
+            "path = 'C:\\FakeErp\\run\\erp.lock' # \u{202e}kcol.pre\n",
         ] {
             assert!(!parses(text), "accepted {text:?}");
+        }
+        for invisible in [
+            '\u{061c}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
+            '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}',
+            '\u{2069}', '\u{2028}', '\u{2029}',
+        ] {
+            assert!(!parses(&format!("# a{invisible}b\n")), "{invisible:?}");
+        }
+        for control in ('\0'..='\u{1f}').filter(|c| !matches!(c, '\n' | '\t')) {
+            assert!(!parses(&format!("# a{control}b\n")), "{control:?}");
         }
         for not_text in [json!(null), json!(1), json!(["id"]), json!({})] {
             assert!(serde_json::from_value::<ManifestText>(not_text).is_err());
         }
+    }
+
+    /// A manifest names paths and services: a stray `{:?}` of a request must not log them.
+    #[test]
+    fn debug_shows_the_size_only() {
+        let text: ManifestText = "path = 'C:\\ERP\\lock'\n".parse().unwrap();
+        assert_eq!(format!("{text:?}"), "ManifestText(<21 bytes>)");
+        let signed = SignedManifest {
+            manifest: text,
+            issued_at: 1,
+            expires_at: 2,
+            public_key: PUBLIC_KEY.parse().unwrap(),
+            signature: SIGNATURE.parse().unwrap(),
+        };
+        assert!(!format!("{signed:?}").contains("ERP"));
     }
 
     #[test]
