@@ -17,3 +17,4 @@ Claude Code, or copy `0000-template.md` by hand.
 | [0010](0010-signed-manifest-envelope.md) | Carry the whole signed manifest in each request, with keys from the agent's configuration | Accepted |
 | [0011](0011-agent-local-policy.md) | The agent applies a local policy of its own to every signed manifest | Accepted |
 | [0012](0012-action-requests-protocol-v2.md) | Expiring requests, a journal on the agent, and protocol version 2 | Accepted |
+| [0013](0013-agent-windows-service.md) | Run the agent as a Windows service under SYSTEM, with its key under DPAPI | Accepted |
