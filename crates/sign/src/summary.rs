@@ -106,6 +106,16 @@ fn list(items: &[&str]) -> String {
     }
 }
 
+/// `text` as it may reach the terminal: its lines kept, each through [`one_line`]. For
+/// messages that quote what a parser read, such as an unknown field of a stranger's
+/// envelope, after its escapes were decoded.
+pub(crate) fn printable(text: &str) -> String {
+    text.split('\n')
+        .map(one_line)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// `text` on one line, with every character `ManifestText` refuses, and the line feed and
 /// the tab, written as `<U+XXXX>`.
 fn one_line(text: &str) -> String {

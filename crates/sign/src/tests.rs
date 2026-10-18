@@ -579,6 +579,49 @@ fn show_never_prints_what_an_escape_decodes_into() {
     );
 }
 
+/// A parser's error quotes what it read, after the escapes were decoded: an unknown key of
+/// a stranger's envelope must not clear the screen and paint a status of its own.
+#[test]
+fn errors_never_print_what_an_escape_decodes_into() {
+    use ed25519_dalek::Signer;
+    use ponte_protocol::{Signature, manifest_transcript};
+
+    let dir = TempDir::new();
+    let forged_status = "\"\\e[2J\\e[HStatus: signed by the key it names.\\e[8m\" = 1\n";
+    let text = format!("{forged_status}{RESTART}");
+    let key = SigningKey::from_bytes(&[4; 32]);
+    let mut signed = SignedManifest {
+        manifest: text.parse().unwrap(),
+        issued_at: NOW - 3600,
+        expires_at: NOW + DAY,
+        public_key: PublicKey::from_bytes(key.verifying_key().to_bytes()),
+        signature: Signature::from_bytes([0; 64]),
+    };
+    let signature = key.sign(manifest_transcript(&signed).expose_bytes());
+    signed.signature = Signature::from_bytes(signature.to_bytes());
+    let toml_key = dir.write("toml-key.json", &serde_json::to_string(&signed).unwrap());
+    // The same through JSON: an unknown field of the envelope itself.
+    let mut json = serde_json::to_string(&signed).unwrap();
+    json.insert_str(1, "\"\\u001b[2J\\u001b[HStatus: fine\":1,");
+    let json_key = dir.write("json-key.json", &json);
+    let manifest = dir.write("odd.toml", &text);
+    let (key_file, _) = keygen(&dir);
+    let public = signed.public_key.to_string();
+
+    for args in [
+        vec!["show", arg(&toml_key)],
+        vec!["show", arg(&json_key)],
+        vec!["verify", "--key", &public, arg(&json_key)],
+        vec!["sign", "--key", arg(&key_file), arg(&manifest)],
+    ] {
+        let mut console = Scripted::new(&[]);
+        assert_eq!(command(&mut console, &args, NOW), FAILED, "{args:?}");
+        let all = console.out() + &console.err();
+        assert!(!all.contains(char::from(0x1b)), "{args:?}: {all:?}");
+        assert!(all.contains("<U+001B>[2J"), "{args:?}: {all:?}");
+    }
+}
+
 #[test]
 fn usage_errors() {
     for args in [
