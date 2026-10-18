@@ -85,7 +85,9 @@ with `verify_strict`, then parses the TOML, never before.
   interrupt-time counter that also counts time asleep, so a clock that jumps ahead and is
   corrected while the agent runs (a bad time sync on a weak PC) leaves no mark behind. A
   clock that is already more than one hour ahead when the agent starts, and is corrected
-  later, does: that machine refuses actions until an administrator removes the mark. A
+  later, does: that machine refuses actions until an administrator removes the mark. Since step 4 of M2 the journal of requests also holds the times it saw, so after a clock
+  that ran ahead the journal's files may have to go too, once the requests they hold have
+  expired, a day and five minutes at most after they were written. A
   user who sets the clock to local time instead of choosing the time zone causes exactly
   that, so support should expect it.
 - The mark is written through (ADR-0012) every five minutes and when the agent stops, so
