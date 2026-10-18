@@ -127,6 +127,18 @@ impl VerifiedManifest {
     pub const fn expires_at(&self) -> u64 {
         self.expires_at
     }
+
+    /// A manifest taken as verified, for the tests of what comes after verification. Only
+    /// this crate's own tests can call it.
+    #[cfg(test)]
+    pub(crate) fn for_test(manifest: ValidManifest) -> Self {
+        Self {
+            manifest,
+            public_key: PublicKey::from_bytes([0; 32]),
+            issued_at: 0,
+            expires_at: 1,
+        }
+    }
 }
 
 /// The id and version only: the rest names paths and services, which logs do not.

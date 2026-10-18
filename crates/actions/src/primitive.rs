@@ -58,6 +58,22 @@ impl Primitive {
         }
     }
 
+    /// The Windows service this step touches, if any.
+    #[must_use]
+    pub fn service(&self) -> Option<&str> {
+        match self {
+            Self::ServiceStart { service }
+            | Self::ServiceStop { service }
+            | Self::ServiceRestart { service } => Some(service),
+            // Listed one by one: a new primitive must say whether it touches a service.
+            Self::ReadFileTail { .. }
+            | Self::DeleteFile { .. }
+            | Self::ClearTempDir {}
+            | Self::KillProcess { .. }
+            | Self::SqlReadonly { .. } => None,
+        }
+    }
+
     /// The filesystem path this step touches, if any.
     #[must_use]
     pub fn path(&self) -> Option<&str> {
