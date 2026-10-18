@@ -57,6 +57,9 @@ request costs nothing towards them, and they are kept in the journal so a restar
 reset them. They exist for a compromised server in a loop: twenty restarts of the ERP in an
 hour already stops a business, and the per-manifest interval caps any one action at six an
 hour by default. Service names are compared case-insensitively, as Windows does, over ASCII.
+The ceiling defaults to `medium` because the lists default to empty: naming a service or a
+delete root is already the deliberate act, and a ceiling of `low` would only add a second
+setting to every installation that restarts a service.
 
 ### Services refused whatever the list says
 

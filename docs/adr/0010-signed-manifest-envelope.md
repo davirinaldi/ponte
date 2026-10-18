@@ -56,8 +56,15 @@ with `verify_strict`, then parses the TOML, never before.
   checked against the later of the clock and the mark, so setting the clock back never
   revives an expired manifest. A clock more than one hour behind the mark refuses every
   action with `ClockWentBack`, because the request's expiry, the rate limits and the
-  journal (ADR-0012) read the clock too. A clock that jumped far ahead and was corrected
-  stays refused until an administrator removes the mark.
+  journal (ADR-0012) read the clock too.
+- The mark takes the clock's value when the agent starts. While it runs, the mark only
+  moves forward by the time the monotonic clock says has passed, so a clock that jumps
+  ahead and is corrected while the agent runs (a bad time sync on a weak PC) leaves no
+  mark behind. A clock that is already far ahead when the agent starts, and is corrected
+  later, does: that machine refuses actions until an administrator removes the mark.
+- A mark that cannot be read or does not parse refuses every action, like a missing
+  policy (invariant 7); it is never taken as zero. Only a missing file means "no mark
+  yet".
 - The server shows each device's clock offset, from `collected_at` in its telemetry, so a
   machine refusing for this reason is found before anyone asks why.
 
@@ -110,8 +117,10 @@ server still trusts. One server serves one software house; multi-tenancy is out 
 - Every manifest must be re-signed at least once a year, and a catalog left to expire
   stops every action. That failure is safe and loud, but it is a chore someone owns.
 - An agent whose clock is wrong by more than the tolerances refuses actions. The clock
-  offset in `device list` is how that gets noticed; a mark left by a clock that jumped
-  ahead needs a person on the machine.
+  offset in `device list` is how that gets noticed; a mark left by a clock that was far
+  ahead when the agent started needs a person on the machine. Following the monotonic
+  clock while running means the mark falls behind the real time when the clock is
+  corrected forward, which only weakens the mark, never refuses.
 - The signature covers bytes, and what they mean depends on the TOML parser of the agent's
   build. Signer and agent share `crates/actions` and the parser refuses unknown fields and
   duplicate keys, but a signer built from another version could read a document

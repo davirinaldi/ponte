@@ -26,14 +26,17 @@ service --config <path>` is what the service manager starts; `ponte-agent run <c
 runs the same agent in a console, for development and diagnosis. The lifecycle uses the
 `windows-service` crate, and the Windows calls the agent makes itself go through
 `windows-sys` with only the features it needs, at the version the tree already has if
-`windows-service` allows it. Both stay under `cfg(windows)`. `zeroize` wipes the key bytes
-once they are no longer needed.
+`windows-service` allows it. Both stay under `cfg(windows)`. `zeroize` wipes every copy of
+the key's secret bytes once it is no longer needed: the buffer DPAPI returns (wiped before
+it is freed), the bytes read from disk, and the secret held by the key type itself, which
+is never copied by value.
 
 **Elevation is read from the token.** Whether the agent applies the ownership and ACL rules
 of ADR-0011 and refuses `ws://` depends on whether its token is elevated, not on whether it
 was started as a service. An administrator's elevated console gets the same rules as the
 service; an ordinary console does not need them, because it can do no more than the user
-who started it. An elevated agent also refuses to start when its own executable, or the
+who started it. If the agent cannot tell whether its token is elevated, it applies the
+rules as if it were. An elevated agent also refuses to start when its own executable, or the
 folder that holds it, can be changed by anyone but SYSTEM, Administrators or
 TrustedInstaller. That does not stop a user who already replaced the binary, since the
 replacement does not check, but it catches the mistake at install, before anyone relies on
