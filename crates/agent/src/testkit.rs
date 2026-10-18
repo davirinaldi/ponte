@@ -238,3 +238,40 @@ impl Collect for FakeCollector {
         (!self.failing.load(Ordering::Relaxed)).then(|| telemetry(reading))
     }
 }
+
+/// Clocks the test sets by hand: the wall clock, which it may move either way, and the
+/// monotonic one, which only [`FakeClock::advance`] moves.
+#[derive(Clone)]
+pub(crate) struct FakeClock(Arc<std::sync::Mutex<(std::time::Duration, std::time::Duration)>>);
+
+impl FakeClock {
+    /// Wall clock at `secs` since the Unix epoch, monotonic clock at zero.
+    pub(crate) fn at(secs: u64) -> Self {
+        Self(Arc::new(std::sync::Mutex::new((
+            std::time::Duration::from_secs(secs),
+            std::time::Duration::ZERO,
+        ))))
+    }
+
+    /// Sets the wall clock, as an administrator or a time sync would.
+    pub(crate) fn set_wall(&self, secs: u64) {
+        self.0.lock().unwrap().0 = std::time::Duration::from_secs(secs);
+    }
+
+    /// Lets time pass on both clocks.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        let mut clocks = self.0.lock().unwrap();
+        clocks.0 = clocks.0.saturating_add(by);
+        clocks.1 = clocks.1.saturating_add(by);
+    }
+}
+
+impl crate::actions::clock::Clock for FakeClock {
+    fn wall_secs(&self) -> u64 {
+        self.0.lock().unwrap().0.as_secs()
+    }
+
+    fn monotonic(&self) -> std::time::Duration {
+        self.0.lock().unwrap().1
+    }
+}
