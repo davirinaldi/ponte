@@ -17,7 +17,9 @@
 //!   oldest goes first, and a stream of refused requests cannot fill the journal.
 //! - A started request with no end when the agent starts was cut short: it ends
 //!   `Failed { interrupted }` and never runs again.
-//! - A `RequestId` is in at most one entry of both files together. A file that breaks that,
+//! - In memory, a `RequestId` is in at most one entry of both files together. On disk the
+//!   ring can lag behind: a crash after a start and before the ring's next write can leave
+//!   an id in both, and the start wins when the journal is read. An id twice in one file,
 //!   or anything else this build cannot read in full, makes the journal unavailable, and
 //!   an unavailable journal refuses everything: an entry that cannot be read is never
 //!   taken as "not seen".
@@ -239,16 +241,24 @@ impl Journal {
         if started.len() > MAX_STARTED || ended.len() > MAX_ENDED {
             return Err(Unavailable::Invalid);
         }
-        let mut seen = HashSet::new();
-        let ids = started
+        // Within a file an id is there once, or the file is not one this build wrote.
+        let mut started_ids = HashSet::new();
+        let mut ended_ids = HashSet::new();
+        let unique = started
             .iter()
-            .map(|entry| entry.request_id)
-            .chain(ended.iter().map(|entry| entry.request_id));
-        for id in ids {
-            if !seen.insert(id) {
-                return Err(Unavailable::Invalid);
-            }
+            .all(|entry| started_ids.insert(entry.request_id))
+            && ended.iter().all(|entry| ended_ids.insert(entry.request_id));
+        if !unique {
+            return Err(Unavailable::Invalid);
         }
+        // Across the two, it can be: a start goes to disk at once, and the ring that had
+        // dropped the same id from memory waits for its lazy write, so a crash in between
+        // leaves both. The start is the stronger fact, and with it the request never runs
+        // again, so it wins.
+        let mut ended = ended;
+        let before = ended.len();
+        ended.retain(|entry| !started_ids.contains(&entry.request_id));
+        let ended_dirty = ended.len() != before;
         if started
             .iter()
             .any(|entry| entry.manifest_id.is_empty() || entry.manifest_id.len() > MAX_ID_LEN)
@@ -260,7 +270,7 @@ impl Journal {
             started,
             ended: ended.into(),
             started_dirty: false,
-            ended_dirty: false,
+            ended_dirty,
         };
         for entry in &mut journal.started {
             if entry.end.is_none() {
@@ -736,18 +746,21 @@ pub(crate) mod tests {
             );
         }
 
-        // One id twice, in one file or across both.
+        // One id twice in one file. Across both files see `an_id_in_both_files_is_the_start`.
         let mut twice = Journal::default();
         start(&mut twice, 1, "erp.restart-service", NOW, NOW + HOUR);
         let mut entries = twice.started.clone();
         entries.extend(twice.started.clone());
         let doubled = started_text(entries);
         assert_eq!(load(Some(&doubled), None), Err(Unavailable::Invalid));
-        let across = ended_text.replace("000000000002", "000000000001");
-        assert_eq!(
-            load(Some(&started), Some(&across)),
-            Err(Unavailable::Invalid)
-        );
+        let mut ring: Vec<Ended> = full.ended.iter().cloned().collect();
+        ring.extend(ring.clone());
+        let doubled_ring = serde_json::to_string(&EndedFile {
+            format: FORMAT,
+            ended: ring,
+        })
+        .unwrap();
+        assert_eq!(load(None, Some(&doubled_ring)), Err(Unavailable::Invalid));
         // A manifest id no manifest can have.
         let long = started.replace("erp.restart-service", &"a".repeat(MAX_ID_LEN + 1));
         assert_eq!(load(Some(&long), None), Err(Unavailable::Invalid));
@@ -770,6 +783,30 @@ pub(crate) mod tests {
         let disk = FakeJournalDisk::default();
         disk.files().locked = true;
         assert_eq!(Journal::load(&disk).map(|_| ()), Err(Unavailable::Locked));
+    }
+
+    /// A start on disk and the same id still in the ring written before it: a crash between
+    /// the start and the ring's lazy write. The start wins, and the journal stays usable.
+    #[test]
+    fn an_id_in_both_files_is_the_start() {
+        let mut journal = Journal::default();
+        start(&mut journal, 1, "erp.restart-service", NOW, NOW + HOUR);
+        journal.finish(id(1), ActionOutcome::Succeeded {}, 10);
+        let disk = FakeJournalDisk::default();
+        disk.files().started = Some(journal.take_started());
+        let mut ring = Journal::default();
+        ring.record_ended(ended(1, NOW + HOUR));
+        ring.record_ended(ended(2, NOW + HOUR));
+        disk.files().ended = Some(ring.take_ended());
+
+        let journal = Journal::load(&disk).unwrap();
+        assert!(matches!(
+            journal.lookup(id(1)),
+            Some(Known::Ended { result, .. }) if result.outcome == ActionOutcome::Succeeded {}
+        ));
+        assert!(journal.lookup(id(2)).is_some());
+        // The ring is written again without the copy.
+        assert_eq!(journal.dirty(), (false, true));
     }
 
     #[test]

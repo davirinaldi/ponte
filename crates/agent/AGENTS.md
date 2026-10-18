@@ -105,8 +105,9 @@ server is not trusted, and neither is the user of the machine.
   request that breaks two rules and expects the first.
 - **The journal is what "at most once" rests on** (`journal.rs`, RNF-18). A start is
   serialized and on disk before it joins the journal in memory and before the first step;
-  nothing runs without it. A `RequestId` is in one entry of both files at most, and an
-  unreadable journal refuses everything. The executor is the only writer of the journal,
+  nothing runs without it. A `RequestId` is in one entry at most; on disk the lazy ring may
+  still name an id that started, and the start wins at load. An unreadable journal refuses
+  everything. The executor is the only writer of the journal,
   and `journal.lock` keeps a second process off it. If the files cannot be repaired, an
   administrator may remove `journal.json` and `ended.json`, which forgets what ran in the
   last day; say so in support guidance, never do it in code.
