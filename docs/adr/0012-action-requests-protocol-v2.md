@@ -73,11 +73,15 @@ The agent keeps a journal of requests on disk, keyed by `RequestId`.
 
 - A `RequestId` already in the journal gets the stored answer back, before any other
   check, without the `output`. The check runs when the request arrives and again when it
-  leaves the queue. A duplicate of a request that is still queued or being checked or run
-  gets no answer of its own; the first one's result answers both.
+  leaves the queue. A duplicate that arrives while the first is queued or running waits
+  in the queue like any request, and the check at dequeue answers it with the first one's
+  recorded outcome.
 - A request is marked "started" after its preconditions pass and before its first step,
   in one write-through write. Preconditions only read the machine, so nothing has acted
-  before the mark. An entry found "started" with no end when the agent starts becomes
+  before the mark. The write is a conditional insert that fails when the id is already in
+  the journal, and that failure is answered as a duplicate, so at-most-once does not rest
+  on there being one executor. There is one anyway: for each request, the check at
+  dequeue, the preconditions, the mark and the steps happen in one turn of it. An entry found "started" with no end when the agent starts becomes
   `Failed { reason: Interrupted }` and never runs again. A crash before the mark leaves no
   entry: nothing acted, and a resend is checked from the start.
 - An entry is kept until the request's expiry plus 24 hours, and never longer than 48 hours
@@ -113,8 +117,9 @@ it.
 - The server accepts a result only from the device the request was sent to, and only for a
   request in `sent`, in one atomic `UPDATE`. Anything else is dropped and logged at a
   bounded rate. A second result for a request that already has one is logged as an
-  anomaly with the device and the request id: it can mean that a refusal fell out of the
-  agent's ring and a resend then ran, so the stored outcome may not be what happened.
+  anomaly with the device and the request id, under the same bound: it can mean that a
+  refusal fell out of the agent's ring and a resend then ran, so the stored outcome may
+  not be what happened.
 
 ### Cancelling
 

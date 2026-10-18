@@ -62,8 +62,10 @@ with `verify_strict`, then parses the TOML, never before.
   runs, the mark moves forward only by the time that passed on `QueryInterruptTime`, an
   interrupt-time counter that also counts time asleep, so a clock that jumps ahead and is
   corrected while the agent runs (a bad time sync on a weak PC) leaves no mark behind. A
-  clock that is already far ahead when the agent starts, and is corrected later, does:
-  that machine refuses actions until an administrator removes the mark.
+  clock that is already more than one hour ahead when the agent starts, and is corrected
+  later, does: that machine refuses actions until an administrator removes the mark. A
+  user who sets the clock to local time instead of choosing the time zone causes exactly
+  that, so support should expect it.
 - The mark is written through (ADR-0012) every five minutes and when the agent stops, so
   a clock set back across a restart finds a mark at most five minutes old, well inside
   the one-hour tolerance.
@@ -122,10 +124,10 @@ server still trusts. One server serves one software house; multi-tenancy is out 
 - Every manifest must be re-signed at least once a year, and a catalog left to expire
   stops every action. That failure is safe and loud, but it is a chore someone owns.
 - An agent whose clock is wrong by more than the tolerances refuses actions. The clock
-  offset in `device list` is how that gets noticed; a mark left by a clock that was far
-  ahead when the agent started needs a person on the machine. Following the monotonic
-  clock while running means the mark falls behind the real time when the clock is
-  corrected forward, which only weakens the mark, never refuses.
+  offset in `device list` is how that gets noticed; a mark left by a clock that was more
+  than one hour ahead when the agent started needs a person on the machine. Following the
+  interrupt-time counter while running means the mark falls behind the real time when the
+  clock is corrected forward, which only weakens the mark, never refuses.
 - The signature covers bytes, and what they mean depends on the TOML parser of the agent's
   build. Signer and agent share `crates/actions` and the parser refuses unknown fields and
   duplicate keys, but a signer built from another version could read a document

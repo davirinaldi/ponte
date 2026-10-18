@@ -49,7 +49,7 @@ manifest is a chance for that user to point it somewhere else.
 | `max_risk` | The highest risk the agent runs: `read`, `low` or `medium` | `medium` |
 | `allowed_services` | Up to 32 service names, ASCII only. Every service a step or a check names must be on it | empty: no service is touched |
 | `delete_roots` | Where `delete_file` may act, each inside an `allowed_root` | empty: nothing is deleted |
-| `max_actions_per_hour` | Actions whose steps began in the last hour, counted from the journal on disk (ADR-0012), 1 to 60 | 20 |
+| `max_actions_per_hour` | Requests marked "started" in the last hour, counted from the journal on disk (ADR-0012), 1 to 60 | 20 |
 | `min_manifest_interval_secs` | Time between two runs of the same manifest id, any version, 60 to 86 400 | 600 |
 
 One action runs at a time. The two limits count the requests the journal marked "started",
