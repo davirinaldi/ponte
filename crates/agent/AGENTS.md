@@ -92,3 +92,35 @@ keep the agent's half, and most of them exist because the server is not trusted 
   a twin in which the thing waited for arrives: a wait that ends for any reason at all
   must not pass for a working check. Tests named `ws_loopback_*` bind this machine only,
   most of them the real server on `127.0.0.1`.
+
+## Actions (`src/actions/`)
+
+ADR-0010 to ADR-0013 say what the agent runs and when. These rules keep its half; the
+server is not trusted, and neither is the user of the machine.
+
+- **Only a `RunnableManifest` reaches the machine.** `runner.rs` decides in the order of
+  ADR-0012 (journal, clock, the request's expiry, the hourly limit, `verify`, the interval
+  per manifest, `validate`) and only then calls `Machine`. Keep the order; a test sends a
+  request that breaks two rules and expects the first.
+- **The journal is what "at most once" rests on** (`journal.rs`, RNF-18). A start is
+  serialized and on disk before it joins the journal in memory and before the first step;
+  nothing runs without it. A `RequestId` is in one entry of both files at most, and an
+  unreadable journal refuses everything. The executor is the only writer of the journal,
+  and `journal.lock` keeps a second process off it. If the files cannot be repaired, an
+  administrator may remove `journal.json` and `ended.json`, which forgets what ran in the
+  last day; say so in support guidance, never do it in code.
+- **One action at a time, and the lock is the blocking task itself.** Everything that
+  touches the machine or the disk for one request runs in one `spawn_blocking`, awaited to
+  its end with no `timeout` around it. Each `Machine` call gets the time the manifest has
+  left and must return within it. A running action is never cancelled; only the queue is.
+- **The clock has a high-water mark** (`clock.rs`): the latest of the stored mark, the
+  clock and the journal at start, then moved by a monotonic clock only. A mark that cannot
+  be read refuses everything and is never written over.
+- **Refusals that describe the agent are sent, not recorded**: no keys, a full queue or
+  journal, a journal or clock that cannot be trusted, a stop. A repeat is decided again,
+  which is safe because nothing started. Refusals of the request go to the ring, written
+  at most once a minute, so a server cannot make the agent write per request.
+- **`Machine` answers with codes.** No implementation returns text from the system, and
+  the executor logs request ids, manifest ids and versions, step indexes and reason codes
+  only: never a service name, a path, or anything of the request the server wrote, the
+  text of a parse error included (`runner::tests::the_log_holds_no_name_*`).
