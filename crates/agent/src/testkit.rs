@@ -10,7 +10,8 @@ use std::task::{Context, Poll};
 
 use futures_util::{Sink, Stream, stream};
 use ponte_protocol::{
-    AgentToServer, DeviceId, MemoryUsage, ProtocolVersion, ServerToAgent, TelemetrySnapshot,
+    ActionRequest, AgentToServer, DeviceId, Initiator, MemoryUsage, ProtocolVersion, PublicKey,
+    RequestId, ServerToAgent, Signature, SignedManifest, TelemetrySnapshot,
 };
 use tokio::sync::mpsc;
 
@@ -54,6 +55,27 @@ pub(crate) fn version() -> ProtocolVersion {
 
 pub(crate) fn device_id() -> DeviceId {
     serde_json::from_str("\"00112233-4455-6677-8899-aabbccddeeff\"").unwrap()
+}
+
+/// A request whose envelope has the right shape and a signature that verifies against
+/// nothing: enough for tests where the agent refuses before looking at it.
+pub(crate) fn action_request(request_id: RequestId) -> ActionRequest {
+    ActionRequest {
+        request_id,
+        manifest: SignedManifest {
+            manifest: include_str!("../../../manifests/examples/erp-restart-service.toml")
+                .parse()
+                .unwrap(),
+            issued_at: 1_767_225_600,
+            expires_at: 1_774_998_000,
+            public_key: PublicKey::from_bytes([0x22; 32]),
+            signature: Signature::from_bytes([0x33; 64]),
+        },
+        expires_at: 1_767_229_200,
+        initiator: Initiator::Human {
+            user_id: "u1".parse().unwrap(),
+        },
+    }
 }
 
 pub(crate) fn about() -> About {

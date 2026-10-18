@@ -131,6 +131,8 @@ mod tests {
 
     #[test]
     fn size_is_bounded() {
+        // The limit of ADR-0011, in a number the rest of this test cannot move.
+        assert_eq!(MAX_MANIFEST_BYTES, 16_384);
         assert!(parses(&"#".repeat(MAX_MANIFEST_BYTES)));
         assert!(!parses(&"#".repeat(MAX_MANIFEST_BYTES + 1)));
         // The limit is in bytes: 8,193 two-byte characters are over it.

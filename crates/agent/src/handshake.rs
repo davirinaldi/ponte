@@ -146,15 +146,15 @@ mod tests {
 
     use ed25519_dalek::VerifyingKey;
     use ponte_protocol::{
-        ActionRequest, EnrollmentToken, Initiator, Nonce, PublicKey, RequestId, Signature,
-        enroll_transcript, hello_transcript,
+        EnrollmentToken, Nonce, PublicKey, RequestId, Signature, enroll_transcript,
+        hello_transcript,
     };
     use tokio::task::JoinHandle;
     use tokio::time::Instant;
 
     use super::*;
     use crate::identity::DeviceKey;
-    use crate::testkit::{Peer, Sent, about, device_id, pipe, stuck_sink, version};
+    use crate::testkit::{Peer, Sent, about, action_request, device_id, pipe, stuck_sink, version};
 
     fn nonce() -> Nonce {
         Nonce::from_bytes([0x11; 32])
@@ -294,14 +294,7 @@ mod tests {
             serde_json::to_string(&challenge()).unwrap(),
             " ".repeat(MAX_HANDSHAKE_MESSAGE_BYTES)
         );
-        let run_action = ServerToAgent::RunAction(ActionRequest {
-            request_id: RequestId::new(),
-            manifest_id: "erp.restart-service".to_owned(),
-            manifest_version: 1,
-            initiator: Initiator::Human {
-                user_id: "u1".to_owned(),
-            },
-        });
+        let run_action = ServerToAgent::RunAction(Box::new(action_request(RequestId::new())));
         let json = |message: &ServerToAgent| Message::text(serde_json::to_string(message).unwrap());
         let challenge_as_bytes = serde_json::to_vec(&challenge()).unwrap();
 

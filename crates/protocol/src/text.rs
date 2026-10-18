@@ -1,15 +1,15 @@
-//! Short text a peer says about itself.
+//! Short text a peer says: about itself, about a drive or a service, about who asked.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-/// A version or an OS name: 1 to 64 characters out of ASCII letters, digits, space and
-/// `._-+()/,:`.
+/// A version, an OS name, a drive, or who asked for an action: 1 to 64 characters out of
+/// ASCII letters, digits, space and `._-+()/,:`.
 ///
-/// It arrives before the peer has proven anything and ends up in logs, on a technician's
-/// screen and in front of a model. The limits keep out what could pass for something else
+/// It may arrive before the peer has proven anything, and it ends up in logs, on a
+/// technician's screen and in front of a model. The limits keep out what could pass for something else
 /// there: line breaks, escape sequences, quotes, markup, text that reads right to left.
 /// What is left is still untrusted data (invariant 4 in `AGENTS.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -93,11 +93,158 @@ impl<'de> Deserialize<'de> for Label {
     }
 }
 
+/// The name of a Windows service, as the agent reports it and as manifests name it: 1 to
+/// 256 ASCII characters out of letters, digits, `._-$` and single inner spaces, starting
+/// with a letter or a digit and ending with neither a space nor a dot.
+///
+/// The name rule of manifests (`ponte_actions`), restricted to ASCII as ADR-0011 asks of
+/// every service the agent touches. `$` stays because named SQL Server instances
+/// (`MSSQL$SQLEXPRESS`) are common beside an ERP, which is also why this is not a
+/// [`Label`]. It is still text from the machine (invariant 4).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct ServiceName(String);
+
+/// The text was not a service name. Says nothing about the text: errors get logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "expected a service name: 1 to {} ASCII letters, digits, ._-$ and single inner spaces",
+    ServiceName::MAX_LEN
+)]
+pub struct InvalidServiceName;
+
+impl ServiceName {
+    /// In bytes, which is the same as characters here.
+    pub const MAX_LEN: usize = 256;
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for ServiceName {
+    type Err = InvalidServiceName;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let plain = text.len() <= Self::MAX_LEN
+            && text.starts_with(|c: char| c.is_ascii_alphanumeric())
+            && !text.ends_with([' ', '.'])
+            && !text.contains("  ")
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '$' | ' '));
+        if plain {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(InvalidServiceName)
+        }
+    }
+}
+
+impl fmt::Display for ServiceName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for ServiceName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ServiceNameVisitor;
+
+        impl de::Visitor<'_> for ServiceNameVisitor {
+            type Value = ServiceName;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a service name")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<ServiceName, E> {
+                // Not `E::invalid_value`: it would quote the text in the error.
+                text.parse().map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_str(ServiceNameVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    fn is_service_name(text: &str) -> bool {
+        let from_wire = serde_json::from_value::<ServiceName>(json!(text)).is_ok();
+        assert_eq!(from_wire, text.parse::<ServiceName>().is_ok(), "{text:?}");
+        from_wire
+    }
+
+    #[test]
+    fn service_names_as_windows_writes_them() {
+        // The name rule of manifests, in a number the rest of this test cannot move.
+        assert_eq!(ServiceName::MAX_LEN, 256);
+        for text in [
+            "FakeErp",
+            "MSSQL$SQLEXPRESS",
+            "SQLAgent$ERP",
+            "Erp Service 2",
+            "erp.sync_worker-1",
+            "a",
+            &"a".repeat(ServiceName::MAX_LEN),
+        ] {
+            assert!(is_service_name(text), "{text:?}");
+            let name: ServiceName = text.parse().unwrap();
+            assert_eq!(name.as_str(), text);
+            assert_eq!(serde_json::to_value(&name).unwrap(), json!(text));
+        }
+    }
+
+    #[test]
+    fn anything_else_is_not_a_service_name() {
+        for text in [
+            "",
+            &"a".repeat(ServiceName::MAX_LEN + 1),
+            " FakeErp",
+            "FakeErp ",
+            "FakeErp.",
+            "Fake  Erp",
+            "$FakeErp",
+            ".FakeErp",
+            "Serviço",
+            "Ｆakeerp",
+            "FakeErp\0",
+            "Fake\nErp",
+            "Fake\tErp",
+            "C:\\Windows",
+            "../FakeErp",
+            "Fake/Erp",
+            "\"FakeErp\"",
+            "Fake*",
+            "Fake\u{200b}Erp",
+        ] {
+            assert!(!is_service_name(text), "accepted {text:?}");
+        }
+        for not_text in [json!(null), json!(1), json!(["FakeErp"])] {
+            assert!(serde_json::from_value::<ServiceName>(not_text).is_err());
+        }
+    }
+
+    #[test]
+    fn service_name_errors_do_not_quote_the_input() {
+        let text = "evil\nline";
+        let message = InvalidServiceName.to_string();
+        assert_eq!(
+            text.parse::<ServiceName>().unwrap_err().to_string(),
+            message
+        );
+        let error = serde_json::from_value::<ServiceName>(json!(text))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, message);
+        assert!(!error.contains("evil"));
+    }
 
     fn parses(text: &str) -> bool {
         let from_wire = serde_json::from_value::<Label>(json!(text)).is_ok();
