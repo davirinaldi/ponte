@@ -1,6 +1,6 @@
 # 0003. The agent verifies signatures and enforces policy itself
 
-- Status: Accepted
+- Status: Accepted, amended by 0010 (the public keys come from the agent's configuration)
 - Date: 2026-10-12
 - Requirements: RF-14, RNF-02
 
@@ -12,9 +12,10 @@ every connected machine.
 ## Decision
 
 Manifests are signed with an ed25519 key that never lives on the server (offline, or a separate
-signing service). The agent ships with the public key, rejects unsigned or tampered manifests,
-and applies its own local policy (allowed roots, risk ceiling, consent for high risk) regardless
-of what the server decided.
+signing service). The agent ships with the public key (amended by ADR-0010: it reads the
+keys from its configuration, which only administrators can change), rejects unsigned or
+tampered manifests, and applies its own local policy (allowed roots, risk ceiling, consent for
+high risk) regardless of what the server decided.
 
 ## Consequences
 
