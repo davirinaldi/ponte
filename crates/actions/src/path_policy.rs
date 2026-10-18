@@ -216,10 +216,16 @@ pub(crate) fn is_drive(s: &str) -> bool {
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-/// Characters no file or directory name may contain: wildcards, the other characters
-/// Windows forbids in names, and control characters.
-fn is_forbidden_char(c: char) -> bool {
-    c.is_control() || matches!(c, '<' | '>' | '"' | '|' | '?' | '*')
+/// Characters a file or directory name may hold here: printable ASCII and Latin letters
+/// (U+00A1 to U+017F, without the soft hyphen), less the wildcards and the other
+/// characters Windows forbids in names.
+///
+/// An allow list, like the one of `ManifestText` and narrower: a TOML escape can put any
+/// character into a parsed path, and an invisible, bidirectional or look-alike one would
+/// let a reviewer read one name while the agent opens another.
+fn is_path_char(c: char) -> bool {
+    matches!(c, ' '..='~' | '\u{a1}'..='\u{ac}' | '\u{ae}'..='\u{17f}')
+        && !matches!(c, '<' | '>' | '"' | '|' | '?' | '*')
 }
 
 /// Whether Windows opens exactly the file or directory this segment names.
@@ -227,7 +233,7 @@ fn is_plain_segment(segment: &str) -> bool {
     !(segment.contains(':')
         || segment.ends_with('.')
         || segment.ends_with(' ')
-        || segment.chars().any(is_forbidden_char)
+        || !segment.chars().all(is_path_char)
         || is_reserved_device(segment))
 }
 
@@ -348,6 +354,33 @@ mod tests {
         ] {
             assert!(!p.is_allowed(path), "should reject {path:?}");
         }
+    }
+
+    /// What a TOML escape can put in a parsed path, and what reads as another name.
+    #[test]
+    fn rejects_invisible_and_look_alike_characters() {
+        let p = policy();
+        for c in [
+            '\u{1b}',
+            '\u{85}',
+            '\u{a0}',
+            '\u{ad}',
+            '\u{303}',
+            '\u{430}',
+            '\u{200b}',
+            '\u{202e}',
+            '\u{2013}',
+            '\u{feff}',
+            '\u{e0041}',
+        ] {
+            let path = format!("C:\\FakeErp\\run\\erp{c}.lock");
+            assert!(!p.is_allowed(&path), "should reject {c:?}");
+            assert!(
+                PathPolicy::new([format!("C:\\Fake{c}Erp")]).is_err(),
+                "{c:?}"
+            );
+        }
+        assert!(p.is_allowed("C:\\FakeErp\\Gest\u{e3}o \u{a7}1 (c\u{f3}pia).txt"));
     }
 
     #[test]

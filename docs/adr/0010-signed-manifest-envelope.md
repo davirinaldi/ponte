@@ -41,6 +41,12 @@ is a type in `crates/protocol`, written as JSON everywhere: on the wire, in the 
   must never narrow. An agent built before a widening still refuses the new characters,
   and a request it cannot parse gets no answer, so manifests that use them wait until the
   fleet runs a version that knows them.
+- The rule holds for what the TOML parser decodes as well as for the bytes. A basic TOML
+  string turns escapes into any character at all (ESC, a carriage return, a bidirectional
+  mark), so `validate_shape` applies the same allow list to the title and the
+  descriptions, and a narrower one (printable ASCII and Latin letters) to paths and
+  names. The security review of step 3 found the gap: an escape in a description could
+  hide the steps from the signer's terminal.
 - `issued_at` and `expires_at` are seconds since the Unix epoch, as integers.
 - `public_key` and `signature` follow the rules of `src/keys.rs`: lowercase hex of their
   exact length.
