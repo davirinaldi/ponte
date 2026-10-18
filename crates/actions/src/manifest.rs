@@ -1,6 +1,6 @@
 use std::fmt;
 
-use ponte_protocol::ServiceName;
+use ponte_protocol::{ManifestText, ServiceName};
 use serde::{Deserialize, Serialize};
 
 use crate::path_policy::{is_drive, normalize};
@@ -177,6 +177,10 @@ pub enum ManifestError {
     EmptyText(TextField),
     #[error("{field} must be at most {max} characters")]
     TextTooLong { field: TextField, max: usize },
+    #[error(
+        "{0} holds a character a manifest may not show, perhaps written as a TOML escape \n         (only printable ASCII, Latin letters, the typographic dashes, quotes and ellipsis, \n         and in descriptions line feeds and tabs)"
+    )]
+    TextNotAllowed(TextField),
     #[error("the title must be a single line")]
     TitleNotOneLine,
     #[error("manifest must have at least one step")]
@@ -325,6 +329,11 @@ impl Manifest {
             if text.chars().count() > max {
                 return Err(ManifestError::TextTooLong { field, max });
             }
+            // The signed bytes passed `ManifestText`; an escape may still have decoded
+            // into a control, bidirectional or invisible character.
+            if !text.chars().all(ManifestText::allows) {
+                return Err(ManifestError::TextNotAllowed(field));
+            }
         }
         if self.title.contains(['\n', '\t']) {
             return Err(ManifestError::TitleNotOneLine);
@@ -459,12 +468,17 @@ fn check_step(step: &Primitive, at: Location) -> Result<(), ManifestError> {
     }
 }
 
-/// The lexical shape of a path: absolute, below a drive, nothing ambiguous. Which roots it
-/// must lie in is the agent's to decide (`LocalPolicy`).
+/// The lexical shape of a path: absolute, below a drive, nothing ambiguous, and one
+/// spelling only: no empty or `.` segment, no separator at the end. Which roots it must
+/// lie in is the agent's to decide (`LocalPolicy`).
 fn check_path(path: &str, at: Location) -> Result<(), ManifestError> {
+    let one_spelling = path
+        .split(['\\', '/'])
+        .skip(1)
+        .all(|segment| !matches!(segment, "" | "."));
     match normalize(path) {
         // The drive alone is not a file or a folder any primitive should touch.
-        Some(segments) if segments.len() > 1 => Ok(()),
+        Some(segments) if segments.len() > 1 && one_spelling => Ok(()),
         _ => Err(ManifestError::InvalidPath(at)),
     }
 }
@@ -488,9 +502,10 @@ fn check_name(name: &str, at: Location) -> Result<(), ManifestError> {
         && name.chars().count() <= MAX_NAME_LEN
         && !name.ends_with([' ', '.'])
         && !name.contains("  ")
-        && name
-            .chars()
-            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '$' | ' '));
+        && name.chars().all(|c| {
+            ManifestText::allows(c)
+                && (c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '$' | ' '))
+        });
     if plain {
         Ok(())
     } else {
@@ -639,6 +654,114 @@ mod tests {
         let mut manifest = parsed(RESTART);
         manifest.description = "Restarts the ERP.\n\nThen checks it.".to_owned();
         assert_eq!(shape(manifest), Ok(()));
+    }
+
+    /// `ManifestText` checks the signed bytes, and TOML then decodes escapes such as `\e`,
+    /// `\r` or `\u202e` in basic strings. What the parsed values hold must pass the same
+    /// rule, or a reviewer's terminal shows one thing while the agent reads another.
+    #[test]
+    fn escapes_cannot_add_what_the_signed_text_refuses() {
+        for escape in [
+            "\\r",
+            "\\b",
+            "\\e",
+            "\\u001b",
+            "\\u0007",
+            "\\u202E",
+            "\\u200B",
+            "\\uFEFF",
+            "\\u00A0",
+            "\\u00AD",
+            "\\u0303",
+            "\\u0430",
+            "\\U000E0041",
+        ] {
+            let text = |field: &str, line: &str| {
+                RESTART.replace(line, &format!("{field} = \"Restart{escape}the ERP\""))
+            };
+            for (field, line, expected) in [
+                (
+                    "title",
+                    "title = \"Restart the ERP service\"",
+                    TextField::Title,
+                ),
+                (
+                    "description",
+                    "description = \"Restarts the FakeErp Windows service and confirms it is running again.\"",
+                    TextField::Description,
+                ),
+            ] {
+                let source = text(field, line);
+                assert_ne!(source, RESTART);
+                assert_eq!(
+                    shape(parsed(&source)),
+                    Err(ManifestError::TextNotAllowed(expected)),
+                    "{field} {escape}"
+                );
+            }
+            let ai = RESTART.replace(
+                "ai_description = \"\"\"\n",
+                &format!("ai_description = \"\"\"\nHidden{escape}text. "),
+            );
+            assert_ne!(ai, RESTART);
+            assert_eq!(
+                shape(parsed(&ai)),
+                Err(ManifestError::TextNotAllowed(TextField::AiDescription)),
+                "ai_description {escape}"
+            );
+
+            // In a path, a bidirectional mark or a look-alike letter names another file
+            // than the one the reviewer reads.
+            let path = CLEAR_LOCK.replace(
+                "'C:\\FakeErp\\run\\erp.lock'",
+                &format!("\"C:\\\\FakeErp\\\\run\\\\a{escape}kcol.bd\""),
+            );
+            assert_ne!(path, CLEAR_LOCK);
+            assert_eq!(
+                shape(parsed(&path)),
+                Err(ManifestError::InvalidPath(Location::Step(0))),
+                "path {escape}"
+            );
+
+            let service = RESTART.replace("\"FakeErp\"", &format!("\"Fake{escape}Erp\""));
+            assert_eq!(
+                shape(parsed(&service)),
+                Err(ManifestError::InvalidName(Location::Step(0))),
+                "service {escape}"
+            );
+        }
+        // Descriptions may still span lines and hold tabs, written as escapes or not.
+        let mut manifest = parsed(RESTART);
+        manifest.description = "Restarts the ERP.\n\tThen checks it — “ok”…".to_owned();
+        assert_eq!(shape(manifest), Ok(()));
+    }
+
+    /// One path, one spelling: Windows reads `C:\a\` and `C:\a\\b` like `C:\a` and
+    /// `C:\a\b`, or refuses them, so a manifest writes neither.
+    #[test]
+    fn a_path_has_one_spelling() {
+        for path in [
+            r"C:\FakeErp\run\erp.lock\",
+            r"C:\FakeErp\run\erp.lock/",
+            r"C:\FakeErp\\run\erp.lock",
+            r"C:\FakeErp\.\run\erp.lock",
+            r"C:\\FakeErp\run\erp.lock",
+        ] {
+            let mut manifest = parsed(CLEAR_LOCK);
+            manifest.steps[0] = Primitive::DeleteFile {
+                path: path.to_owned(),
+            };
+            assert_eq!(
+                shape(manifest),
+                Err(ManifestError::InvalidPath(Location::Step(0))),
+                "{path}"
+            );
+        }
+        let mut forward = parsed(CLEAR_LOCK);
+        forward.verify[1] = Check::PathExists {
+            path: "C:/FakeErp/run/erp.lock".to_owned(),
+        };
+        assert_eq!(shape(forward), Ok(()));
     }
 
     #[test]

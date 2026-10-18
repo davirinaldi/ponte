@@ -193,7 +193,10 @@ Step 3 of M2 changed three things the plan had:
 - A few shape rules the plan left out: an id of at most 64 bytes, a version of at least 1,
   a title and descriptions that are not blank and a title on one line, service names in
   ASCII (the agent refuses any other service anyway, so the signer learns it first), and
-  paths that name something below the drive. Errors name the rule and the place (step 2,
+  paths that name something below the drive, in one spelling (no empty or `.` segment,
+  no separator at the end) and with printable ASCII and Latin letters only, so neither a
+  TOML escape nor a look-alike letter makes a reviewer read another file name than the
+  one the agent opens. Errors name the rule and the place (step 2,
   verify check 0), never the path or the name, so an agent can log them without logging
   what a manifest touches.
 - The list of refused services lives beside the policy in `ponte-actions`, so a

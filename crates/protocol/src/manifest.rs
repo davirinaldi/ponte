@@ -29,7 +29,7 @@ pub const MAX_MANIFEST_BYTES: usize = 16 * 1024;
 /// is not one in a path). Any of those can make the text a person reviews differ from what
 /// the parser reads ("Trojan Source"), or hide text from the reviewer. Widening the list
 /// later keeps every manifest signed before valid; narrowing it would not.
-fn is_visible_text(c: char) -> bool {
+const fn is_visible_text(c: char) -> bool {
     matches!(
         c,
         '\n' | '\t'
@@ -73,6 +73,14 @@ impl fmt::Debug for ManifestText {
 }
 
 impl ManifestText {
+    /// Whether `c` may appear in manifest text. A parser decodes escapes (a TOML string
+    /// turns a backslash and `e` into ESC), so whoever reads values out of the text applies
+    /// this to them as well: the bytes passing does not make the decoded values pass.
+    #[must_use]
+    pub const fn allows(c: char) -> bool {
+        is_visible_text(c)
+    }
+
     /// The signed bytes, as text.
     #[must_use]
     pub fn as_str(&self) -> &str {
