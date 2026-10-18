@@ -26,10 +26,12 @@ service --config <path>` is what the service manager starts; `ponte-agent run <c
 runs the same agent in a console, for development and diagnosis. The lifecycle uses the
 `windows-service` crate, and the Windows calls the agent makes itself go through
 `windows-sys` with only the features it needs, at the version the tree already has if
-`windows-service` allows it. Both stay under `cfg(windows)`. `zeroize` wipes every copy of
-the key's secret bytes once it is no longer needed: the buffer DPAPI returns (wiped before
-it is freed), the bytes read from disk, and the secret held by the key type itself, which
-is never copied by value.
+`windows-service` allows it. Both stay under `cfg(windows)`. `zeroize` wipes every buffer
+the agent owns that holds the key's secret, once it is no longer needed: the buffer DPAPI
+returns (wiped before it is freed), the bytes read from disk, and the key type itself,
+which wipes on drop and is kept behind a `Box` so that it is not copied by moves. The
+signing key type of `ed25519-dalek` implements `Clone`, so "no copies" is held by review.
+Copies a move leaves on the stack are out of reach; this is best effort, not a guarantee.
 
 **Elevation is read from the token.** Whether the agent applies the ownership and ACL rules
 of ADR-0011 and refuses `ws://` depends on whether its token is elevated, not on whether it

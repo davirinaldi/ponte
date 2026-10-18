@@ -57,11 +57,16 @@ with `verify_strict`, then parses the TOML, never before.
   revives an expired manifest. A clock more than one hour behind the mark refuses every
   action with `ClockWentBack`, because the request's expiry, the rate limits and the
   journal (ADR-0012) read the clock too.
-- The mark takes the clock's value when the agent starts. While it runs, the mark only
-  moves forward by the time the monotonic clock says has passed, so a clock that jumps
-  ahead and is corrected while the agent runs (a bad time sync on a weak PC) leaves no
-  mark behind. A clock that is already far ahead when the agent starts, and is corrected
-  later, does: that machine refuses actions until an administrator removes the mark.
+- When the agent starts, the mark becomes the later of the stored mark and the clock, and
+  a clock more than one hour behind the stored mark is refused as above. While the agent
+  runs, the mark moves forward only by the time that passed on `QueryInterruptTime`, an
+  interrupt-time counter that also counts time asleep, so a clock that jumps ahead and is
+  corrected while the agent runs (a bad time sync on a weak PC) leaves no mark behind. A
+  clock that is already far ahead when the agent starts, and is corrected later, does:
+  that machine refuses actions until an administrator removes the mark.
+- The mark is written through (ADR-0012) every five minutes and when the agent stops, so
+  a clock set back across a restart finds a mark at most five minutes old, well inside
+  the one-hour tolerance.
 - A mark that cannot be read or does not parse refuses every action, like a missing
   policy (invariant 7); it is never taken as zero. Only a missing file means "no mark
   yet".

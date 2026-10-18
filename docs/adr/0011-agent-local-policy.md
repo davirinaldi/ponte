@@ -52,14 +52,17 @@ manifest is a chance for that user to point it somewhere else.
 | `max_actions_per_hour` | Actions whose steps began in the last hour, counted from the journal on disk (ADR-0012), 1 to 60 | 20 |
 | `min_manifest_interval_secs` | Time between two runs of the same manifest id, any version, 60 to 86 400 | 600 |
 
-One action runs at a time. The two limits count actions whose steps began, so a refused
-request costs nothing towards them, and they are kept in the journal so a restart does not
-reset them. They exist for a compromised server in a loop: twenty restarts of the ERP in an
+One action runs at a time. The two limits count the requests the journal marked "started",
+which happens once preconditions pass and before the first step (ADR-0012), so a refused
+request costs nothing towards them, and they are read from the journal so a restart does
+not reset them. They exist for a compromised server in a loop: twenty restarts of the ERP in an
 hour already stops a business, and the per-manifest interval caps any one action at six an
 hour by default. Service names are compared case-insensitively, as Windows does, over ASCII.
 The ceiling defaults to `medium` because the lists default to empty: naming a service or a
 delete root is already the deliberate act, and a ceiling of `low` would only add a second
-setting to every installation that restarts a service.
+setting to every installation that restarts a service. That holds only while every
+primitive at `medium` or above needs a list entry; the ADR that re-enables a refused
+primitive revisits this default.
 
 ### Services refused whatever the list says
 

@@ -73,23 +73,25 @@ The agent keeps a journal of requests on disk, keyed by `RequestId`.
 
 - A `RequestId` already in the journal gets the stored answer back, before any other
   check, without the `output`. The check runs when the request arrives and again when it
-  leaves the queue, in the same step that marks it "started". A duplicate of a request
-  that is still queued or running gets no answer of its own; the first one's result
-  answers both.
-- A request is marked "started" before anything acts on the machine. An entry found
-  "started" with no end when the agent starts becomes `Failed { reason: Interrupted }` and
-  never runs again.
+  leaves the queue. A duplicate of a request that is still queued or being checked or run
+  gets no answer of its own; the first one's result answers both.
+- A request is marked "started" after its preconditions pass and before its first step,
+  in one write-through write. Preconditions only read the machine, so nothing has acted
+  before the mark. An entry found "started" with no end when the agent starts becomes
+  `Failed { reason: Interrupted }` and never runs again. A crash before the mark leaves no
+  entry: nothing acted, and a resend is checked from the start.
 - An entry is kept until the request's expiry plus 24 hours, and never longer than 48 hours
   from when it was written.
-- Entries of requests whose steps began are what the at-most-once promise rests on, and
-  they are never dropped early. The rate limits bound them: at most 60 an hour by
-  configuration, so at most 2,880 in 48 hours, against room for 4,096. A full journal
-  refuses new requests, and so does a journal the agent cannot write, read or parse: an
-  unreadable entry is never taken as "not seen".
-- Refusals are recorded too, so a repeat gets the same answer, but in a separate ring of
-  1,024 entries where the oldest goes first. A request that never ran cannot run twice,
-  so dropping its refusal costs at most a new evaluation if it comes back, and a stream
-  of requests that are all refused cannot fill the journal.
+- "Started" entries are what the at-most-once promise rests on, and they are never dropped
+  early. The rate limits of ADR-0011 count exactly these entries, so the same test bounds
+  both: at most 60 an hour by configuration, at most 2,880 in 48 hours, against room for
+  4,096. A full journal refuses new requests, and so does a journal the agent cannot
+  write, read or parse: an unreadable entry is never taken as "not seen".
+- Everything that ends before the mark (a refusal, a failed precondition) is recorded too,
+  so a repeat gets the same answer, but in a separate ring of 1,024 entries where the
+  oldest goes first. A request that never started cannot run twice, so dropping its entry
+  costs at most a new evaluation if it comes back, and a stream of requests that never
+  start cannot fill the journal.
 - The journal, the clock mark of ADR-0010 and the identity files are written through:
   `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`. That is the
   "renames written through to the disk" the roadmap promised for M2.
@@ -110,7 +112,9 @@ it.
   acknowledgement message with it.
 - The server accepts a result only from the device the request was sent to, and only for a
   request in `sent`, in one atomic `UPDATE`. Anything else is dropped and logged at a
-  bounded rate.
+  bounded rate. A second result for a request that already has one is logged as an
+  anomaly with the device and the request id: it can mean that a refusal fell out of the
+  agent's ring and a resend then ran, so the stored outcome may not be what happened.
 
 ### Cancelling
 
