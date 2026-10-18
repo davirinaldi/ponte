@@ -21,6 +21,11 @@
 //!
 //! Read `AGENTS.md` in this crate before changing what the agent signs, stores or logs.
 
+#[expect(
+    dead_code,
+    reason = "the executor uses it; the session hands it requests in a later commit"
+)]
+mod actions;
 mod backoff;
 mod config;
 mod handshake;
