@@ -516,11 +516,19 @@ impl Shared {
                 ended.then(|| journal.take_ended()),
             )
         };
+        // The started requests first: an id that left them in memory may be in the ring
+        // now, and the ring must not reach the disk before the file it left does.
+        let mut failed = false;
         for (file, text) in [(JournalFile::Started, started), (JournalFile::Ended, ended)] {
             let Some(text) = text else { continue };
+            if failed {
+                self.not_written(file);
+                continue;
+            }
             let disk = Arc::clone(&self.disk);
             let written = spawn_blocking(move || disk.write(file, &text)).await;
             if !matches!(written, Ok(Ok(()))) {
+                failed = true;
                 self.not_written(file);
             }
         }
@@ -2220,6 +2228,50 @@ path = 'C:\FakeErp\run\erp.lock'
             outcome(&actions, request(50, RESTART)).await,
             refused(RejectReason::BadSignature)
         );
+    }
+
+    /// An id that left the ring in memory, while the ring on disk still holds it, starts;
+    /// the power goes before the ring's next write. Both files name it, and the journal
+    /// must still be usable: the start wins, and the request never runs again.
+    #[tokio::test(start_paused = true)]
+    async fn a_crash_with_an_id_in_both_files_leaves_a_usable_journal() {
+        let mut harness = Harness::new("");
+        let actions = harness.start().await;
+        assert_eq!(
+            outcome(&actions, request_with(1, badly_signed(RESTART), NOW + HOUR)).await,
+            refused(RejectReason::BadSignature)
+        );
+        tokio::time::sleep(LAZY_WRITES_EVERY + Duration::from_secs(1)).await;
+        settle().await;
+        let first = id(1).to_string();
+        assert!(
+            harness
+                .disk
+                .files()
+                .ended
+                .as_deref()
+                .unwrap()
+                .contains(&first)
+        );
+        // A thousand and more refusals push it out of the ring, in memory only.
+        for n in 2..=1025 {
+            actions.submit(request_with(n, badly_signed(RESTART), NOW + HOUR));
+            settle().await;
+            drain(&actions);
+        }
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        {
+            let files = harness.disk.files();
+            assert!(files.started.as_deref().unwrap().contains(&first));
+            assert!(files.ended.as_deref().unwrap().contains(&first));
+        }
+        let actions = harness.crash_and_restart().await;
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        assert_eq!(
+            outcome(&actions, request(2000, CLEAR_LOCK)).await,
+            succeeded()
+        );
+        assert_eq!(harness.machine.steps(), 3);
     }
 
     /// A start that cannot be written runs nothing.

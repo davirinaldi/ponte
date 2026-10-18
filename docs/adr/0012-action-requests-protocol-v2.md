@@ -208,9 +208,16 @@ right. The code follows this section.
   `QueueFull`, `ShuttingDown`, `JournalFull`, `JournalUnavailable` and `ClockWentBack`. A
   repeat is decided again, which is safe because nothing started, and a flood of
   `QueueFull` writes nothing.
-- **One `RequestId`, one entry**, across both files. A start or a refusal is not recorded
-  for an id the journal knows, and a file that names one twice makes the journal
-  unavailable: the agent never writes a journal it would refuse to read.
+- **One `RequestId`, one entry.** A start or a refusal is not recorded for an id the
+  journal knows, and a file that names an id twice makes the journal unavailable. Across
+  the two files the disk can lag: an id that left the ring in memory may still be in the
+  last `ended.json` written when it starts, and a crash before the next write of the ring
+  leaves both. When the journal is read the start wins, since with it the request never
+  runs again; the security review of step 4 found that refusing such a journal would let a
+  compromised server, by pushing an id out of the ring and then starting it, leave every
+  crash refusing everything for good. Lazy writes also put `journal.json` before
+  `ended.json`, so an id that left the started requests reaches the ring on disk only
+  after.
 - **One process holds the journal.** `journal.lock`, in the data directory, is locked for
   the life of the process (`File::try_lock`). Two agents on one data directory, a service
   and a console, would each trust their own copy and could both run a request; the second
