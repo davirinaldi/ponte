@@ -451,7 +451,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
 }
 
 /// Writes a file that must not exist yet: a key is never overwritten.
-fn write_new(path: &Path, text: &str) -> anyhow::Result<()> {
+pub(crate) fn write_new(path: &Path, text: &str) -> anyhow::Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use ed25519_dalek::SigningKey;
 use ponte_protocol::{PublicKey, SignedManifest};
 
-use crate::cli::{Console, FAILED, OK, USAGE_ERROR, run};
+use crate::cli::{Console, FAILED, OK, USAGE_ERROR, run, write_new};
 use crate::keyfile::{KeyFile, Password};
 
 const RESTART: &str = include_str!("../../../manifests/examples/erp-restart-service.toml");
@@ -295,6 +295,21 @@ fn the_envelope_never_overwrites_the_key_or_the_manifest() {
     }
     assert_eq!(std::fs::read(&key_file).unwrap(), key_before);
     assert_eq!(std::fs::read_to_string(&manifest).unwrap(), RESTART);
+}
+
+/// `keygen` checks first, and the write itself refuses too, should a file appear between
+/// the check and the write.
+#[test]
+fn a_key_is_written_only_where_nothing_is() {
+    let dir = TempDir::new();
+    let existing = dir.write("k.key", "old");
+    assert!(write_new(&existing, "new").is_err());
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "old");
+    write_new(&dir.join("fresh.key"), "new").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("fresh.key")).unwrap(),
+        "new"
+    );
 }
 
 #[test]

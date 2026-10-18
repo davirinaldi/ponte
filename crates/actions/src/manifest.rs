@@ -689,6 +689,37 @@ mod tests {
         }
     }
 
+    /// The list itself, apart from the second line in `check_coverage`.
+    #[test]
+    fn exactly_the_four_primitives_are_refused() {
+        let service = || "FakeErp".to_owned();
+        let path = || LOCK.to_owned();
+        for runs in [
+            Primitive::ServiceStart { service: service() },
+            Primitive::ServiceStop { service: service() },
+            Primitive::ServiceRestart { service: service() },
+            Primitive::DeleteFile { path: path() },
+        ] {
+            assert!(!is_refused(&runs), "{runs:?}");
+        }
+        for refused in [
+            Primitive::ClearTempDir {},
+            Primitive::ReadFileTail {
+                path: path(),
+                max_bytes: 1,
+            },
+            Primitive::KillProcess {
+                image: "erp.exe".to_owned(),
+            },
+            Primitive::SqlReadonly {
+                connection: "erp".to_owned(),
+                query: "select 1".to_owned(),
+            },
+        ] {
+            assert!(is_refused(&refused), "{refused:?}");
+        }
+    }
+
     #[test]
     fn understated_risk_is_rejected() {
         let mut manifest = parsed(RESTART);
