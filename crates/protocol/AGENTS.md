@@ -29,8 +29,8 @@ Wire types for every message between agent, server and web console.
   `ponte.manifest.v1` versions its layout instead. Changing it invalidates every manifest
   ever signed: a new layout is a new label, and the old one keeps verifying.
 - Text that ends up signed, logged or shown has one door each, and the door holds the rule:
-  `ManifestText` (16 KiB, no control character but line feed and tab, no invisible
-  character, `Debug` shows the size only), `Label`, `ServiceName`, `Output` (64 KiB once
+  `ManifestText` (16 KiB, an allow list of printable ASCII and Latin text that may widen
+  but never narrow, `Debug` shows the size only), `Label`, `ServiceName`, `Output` (64 KiB once
   serialized, no NUL, `Debug` shows the size only), `Confidence` (finite, 0 to 1). Never add
   a `String` field to a wire type; a field of free text needs a bounded type and a reason.
 - Keys, signatures, nonces and tokens (`src/keys.rs`) are lowercase hex of their exact
