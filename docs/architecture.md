@@ -52,8 +52,9 @@ PostgreSQL. Approvals, audit storage, MCP and the console come later (see `roadm
    Plain `ws://` is accepted for this machine only (`localhost`, `127.0.0.1`), checked on
    the address the socket reached. The agent never listens on a port (RNF-01).
 2. **Upgrade.** `GET /agent` offers the protocol versions as WebSocket subprotocols, newest
-   first (`ponte.v1`). The server selects one or answers 400; a request with an `Origin`
-   header (a browser) gets 403. No selected version, no connection (ADR-0007).
+   first (`ponte.v2`; version 1 is not spoken since M2, ADR-0012). The server selects one
+   or answers 400; a request with an `Origin` header (a browser) gets 403. No selected
+   version, no connection (ADR-0007).
 3. **Challenge.** The server speaks first: `Challenge` with 32 random bytes.
 4. **Who the agent is.** The first time, `Enroll`: the token, a public key made on the
    machine and a signature over the nonce. The server consumes one use of the token,

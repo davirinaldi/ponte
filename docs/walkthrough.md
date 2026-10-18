@@ -4,6 +4,10 @@ Everything M1 built, run locally: PostgreSQL, the server, two agents, enrollment
 revocation, a server that goes away and comes back, a second server that is refused, and
 the agent's footprint. It takes about half an hour, 15 minutes of it measuring.
 
+The agent and the server speak protocol version 2 only (ADR-0012). An agent built before
+it cannot connect: build it again from this tree. Its identity in `keys/walkthrough` still
+works.
+
 Commands are for bash (Git Bash on Windows works), run from the root of the repository.
 Where PowerShell differs, its version follows. Log lines are shortened here: the real ones
 start with a timestamp and carry more fields.
@@ -120,7 +124,7 @@ cargo run -q --release -p ponte-agent -- keys/walkthrough/agent.toml
 ```
 
 ```
-INFO  agent starting server=ws://127.0.0.1:8080/agent allowed_roots=1 protocol=1 platform="windows"
+INFO  agent starting server=ws://127.0.0.1:8080/agent allowed_roots=1 protocol=2 platform="windows"
 WARN  the device key is stored without encryption ... This build is for development only (ADR-0008)
 WARN  server_url is plain ws:// to this machine ... For development only
 INFO  new device key stored for an enrollment public_key=...
