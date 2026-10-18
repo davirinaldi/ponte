@@ -73,7 +73,11 @@ waits up to `shutdown_timeout_secs` (10 by default, 1 to 60) for the running act
 telling the service manager it is still stopping. A run that does not finish in time is
 left "started" in the journal and becomes `Failed { reason: Interrupted }` at the next start
 (ADR-0012). When the whole machine shuts down Windows may give less time than that; the
-journal covers what it cuts.
+journal covers what it cuts. Requests still waiting in the queue are dropped without an answer, since
+the server sends them again when the next session starts, and a request that arrives
+during the stop is refused with `ShuttingDown`. A request whose preconditions are being
+read when the stop comes is not started. The process then ends without waiting for an
+action that overran the timeout (`shutdown_background`).
 
 **Logs.** As a service the agent writes to `<data_dir>\logs`, in two files of at most 5 MB
 each, the older one replaced when the newer one is full. A small writer of its own does
