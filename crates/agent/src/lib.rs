@@ -4,13 +4,17 @@
 //! Windows service. It only ever opens *outbound* connections, reports telemetry,
 //! and runs actions from the signed catalog after checking its own local policy.
 //!
-//! Current state (M1): the agent connects to the server, enrolls with a token, proves its
-//! device key on every connection, sends a heartbeat with real telemetry every minute and
-//! connects again by itself when the connection is lost. It runs no actions yet.
+//! Current state (M2, in progress): the agent connects to the server, enrolls with a
+//! token, proves its device key on every connection, sends a heartbeat with real telemetry
+//! every minute and connects again by itself when the connection is lost. It decides on
+//! action requests (signature, validity, local policy, limits, journal) and runs them
+//! through the platform layer, which on every platform still refuses everything: Windows
+//! comes in step 5 of M2.
 //!
 //! | Module | What it does |
 //! |---|---|
 //! | `config` | The configuration file, and the server URL as a type |
+//! | `actions` | Action requests: the clock's mark, the journal, the executor |
 //! | `identity` | The device key, the id the server gave it, the enrollment token |
 //! | `transport` | TCP, TLS and the WebSocket upgrade with its protocol version |
 //! | `handshake` | Answers the server's challenge. No socket |
@@ -21,10 +25,6 @@
 //!
 //! Read `AGENTS.md` in this crate before changing what the agent signs, stores or logs.
 
-#[expect(
-    dead_code,
-    reason = "the executor uses it; the session hands it requests in a later commit"
-)]
 mod actions;
 mod backoff;
 mod config;
@@ -54,6 +54,9 @@ use tracing::{debug, error, info, warn};
 pub use config::{AgentConfig, ConfigError, InvalidServerUrl, ServerUrl};
 pub use platform::NAME as PLATFORM;
 
+use actions::ActionFiles;
+use actions::clock::SystemClock;
+use actions::runner::{self as executor, Actions};
 use config::Security;
 use handshake::{About, Accepted};
 use identity::{DataDir, IdentityStore};
@@ -158,18 +161,30 @@ pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future
     if actions.keys.is_none() {
         warn!("the configuration names no manifest_keys: this agent runs no action (ADR-0010)");
     }
+    let files = Arc::new(ActionFiles::new(&config.data_dir));
+    let runner = executor::start(
+        config.actions.clone(),
+        Arc::clone(&files) as _,
+        files,
+        Arc::new(SystemClock::new()),
+        platform::machine(&config.actions.policy.roots),
+    )
+    .await;
     let (stop, stopped) = watch::channel(false);
-    let agent = Agent::new(&config, timing);
+    let agent = Agent::new(&config, timing, runner.actions());
     let work = agent.run(stopped);
     tokio::pin!(work);
     tokio::select! {
-        () = &mut work => return,
-        () = shutdown => {}
+        () = &mut work => {}
+        () = shutdown => {
+            let _ = stop.send(true);
+            // Everything `work` waits on also watches the signal, so this is a matter of
+            // closing the connection politely.
+            work.await;
+        }
     }
-    let _ = stop.send(true);
-    // Everything `work` waits on also watches the signal, so this is a matter of
-    // closing the connection politely.
-    work.await;
+    // The running action, if any, gets `shutdown_timeout_secs` to end (ADR-0013).
+    runner.stop(config.actions.shutdown_timeout).await;
 }
 
 /// Completes once the agent was told to stop. Also when the sender is gone, which only
@@ -224,17 +239,19 @@ struct Agent {
     url: ServerUrl,
     identity: Arc<IdentityStore<DataDir>>,
     collector: Collector,
+    actions: Actions,
     about: About,
     timing: Timing,
 }
 
 impl Agent {
-    fn new(config: &AgentConfig, timing: Timing) -> Self {
+    fn new(config: &AgentConfig, timing: Timing, actions: Actions) -> Self {
         let disk = DataDir::new(&config.data_dir, config.enrollment_token_file.as_deref());
         Self {
             url: config.server_url.clone(),
             identity: Arc::new(IdentityStore::new(disk)),
             collector: Collector::new(),
+            actions,
             about: About {
                 agent_version: Label::from_lossy(env!("CARGO_PKG_VERSION")),
                 os: telemetry::os_label(),
@@ -299,6 +316,7 @@ impl Agent {
             &mut stream,
             &mut sink,
             &self.collector,
+            &self.actions,
             &self.timing,
             stopped,
         )

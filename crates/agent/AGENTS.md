@@ -48,9 +48,10 @@ keep the agent's half, and most of them exist because the server is not trusted 
   unknown states in `identity.toml` are refused. Its format is pinned by a test: changing
   it strands every enrolled machine.
 - **A message never decides who the device is or what the machine does.** `Enrolled` counts
-  only as the answer to `Enroll`, `Welcome` only as the answer to `Hello`. `RunAction` is
-  refused until manifests are verified (M2). `CollectNow` reads the machine at most once per
-  `Timing::min_collect_gap`. A handshake message after `Welcome` ends the session.
+  only as the answer to `Enroll`, `Welcome` only as the answer to `Hello`. `RunAction` and
+  `CancelAction` go to the executor (below), which decides on its own; one that does not
+  parse gets no answer. Every session first sends the results that wait. `CollectNow` reads
+  the machine at most once per `Timing::min_collect_gap`. A handshake message after `Welcome` ends the session.
 - **No version, no connection.** The answer to the upgrade must select exactly one of the
   versions offered (`transport::negotiated_version`); the agent never assumes one. The
   request carries no `Origin`.

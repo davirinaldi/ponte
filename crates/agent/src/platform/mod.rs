@@ -17,6 +17,18 @@ pub use unsupported::NAME;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
+use std::sync::Arc;
+
+use ponte_actions::Roots;
+
+use crate::actions::machine::{Machine, Unsupported};
+
+/// What runs the steps and checks of actions here. Step 5 of M2 gives Windows its own,
+/// which checks the final path of every file it opens against `roots` as they resolved
+/// when the agent started (ADR-0011). Until then every platform refuses everything.
+pub(crate) fn machine(_roots: &Roots) -> Arc<dyn Machine> {
+    Arc::new(Unsupported)
+}
 
 /// Creates `dir` and whatever is missing above it. Where files have modes, only the
 /// owner gets in.

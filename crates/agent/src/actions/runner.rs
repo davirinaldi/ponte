@@ -869,6 +869,25 @@ impl Shared {
     }
 }
 
+/// An executor on disks in memory, a clock set by hand and a machine that refuses
+/// everything: what the session's tests talk to.
+#[cfg(test)]
+pub(crate) async fn in_memory(
+    settings: ActionSettings,
+    clock: crate::testkit::FakeClock,
+) -> (ActionRunner, super::journal::tests::FakeJournalDisk) {
+    let disk = super::journal::tests::FakeJournalDisk::default();
+    let runner = start(
+        settings,
+        Arc::new(disk.clone()),
+        Arc::new(crate::testkit::MemoryMark::default()),
+        Arc::new(clock),
+        Arc::new(super::machine::Unsupported),
+    )
+    .await;
+    (runner, disk)
+}
+
 /// Every service the manifest names, in steps and checks.
 fn named_services(manifest: &Manifest) -> impl Iterator<Item = &str> {
     let steps = manifest.steps.iter().filter_map(|step| step.service());
@@ -894,7 +913,7 @@ mod tests {
     use super::super::machine::{ServiceRefusal, Unsupported};
     use super::*;
     use crate::AgentConfig;
-    use crate::testkit::FakeClock;
+    use crate::testkit::{FakeClock, MemoryMark};
 
     const RESTART: &str = include_str!("../../../../manifests/examples/erp-restart-service.toml");
     const CLEAR_LOCK: &str =
@@ -931,7 +950,7 @@ path = 'C:\FakeErp\run\erp.lock'
     }
 
     fn key_hex(seed: u8) -> String {
-        PublicKey::from_bytes(signer(seed).verifying_key().to_bytes()).to_string()
+        crate::testkit::manifest_key_hex(seed)
     }
 
     fn sign(text: &str, seed: u8, issued_at: u64, expires_at: u64) -> SignedManifest {
@@ -1154,33 +1173,13 @@ path = 'C:\FakeErp\run\erp.lock'
         }
     }
 
-    #[derive(Clone, Default)]
-    struct MarkFile(Arc<sync::Mutex<Option<String>>>);
-
-    impl MarkFile {
-        fn set(&self, text: Option<String>) {
-            *self.0.lock().unwrap() = text;
-        }
-    }
-
-    impl MarkDisk for MarkFile {
-        fn read_mark(&self) -> io::Result<Option<String>> {
-            Ok(self.0.lock().unwrap().clone())
-        }
-
-        fn write_mark(&self, text: &str) -> io::Result<()> {
-            self.set(Some(text.to_owned()));
-            Ok(())
-        }
-    }
-
     // ----- The harness -----------------------------------------------------------------
 
     /// An executor on fake clocks, disks and machine, which outlive a restart.
     struct Harness {
         clock: FakeClock,
         disk: FakeJournalDisk,
-        mark: MarkFile,
+        mark: MemoryMark,
         machine: FakeMachine,
         settings: ActionSettings,
         alive: Arc<AtomicBool>,
@@ -1213,7 +1212,7 @@ path = 'C:\FakeErp\run\erp.lock'
             Self {
                 clock,
                 disk: FakeJournalDisk::default(),
-                mark: MarkFile::default(),
+                mark: MemoryMark::default(),
                 machine,
                 settings,
                 alive: Arc::new(AtomicBool::new(true)),
@@ -2201,31 +2200,7 @@ path = 'C:\FakeErp\run\erp.lock'
     /// server chose.
     #[tokio::test(start_paused = true)]
     async fn the_log_holds_no_name_no_path_and_no_text_of_the_request() {
-        use tracing_subscriber::layer::SubscriberExt;
-
-        #[derive(Clone, Default)]
-        struct Captured(Arc<sync::Mutex<Vec<u8>>>);
-        impl io::Write for Captured {
-            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-        let captured = Captured::default();
-        let writer = captured.clone();
-        let subscriber = tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(move || writer.clone()),
-        );
-        let _guard = tracing::subscriber::set_default(subscriber);
-        // With a single dispatcher registered, `tracing-core` asks the default of whichever
-        // thread first reaches a callsite, and a test running beside this one, with no
-        // subscriber, would turn this one's events off. A second one makes it ask all.
-        let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+        let log = crate::testkit::LogCapture::start();
 
         let mut harness = Harness::new("");
         let actions = harness.start().await;
@@ -2254,7 +2229,7 @@ path = 'C:\FakeErp\run\erp.lock'
         outcome(&actions, request(7, RESTART)).await;
         harness.stop().await;
 
-        let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let log = log.text();
         assert!(log.contains("action started"), "{log}");
         assert!(log.contains("action refused"), "{log}");
         assert!(log.contains("a step failed"), "{log}");

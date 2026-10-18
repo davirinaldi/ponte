@@ -26,6 +26,9 @@ fn main() -> anyhow::Result<()> {
 
     let runtime = ponte_agent::runtime().context("starting the async runtime")?;
     runtime.block_on(ponte_agent::run(config, shutdown_signal()));
+    // Not the runtime's `Drop`, which would wait for an action that did not end within
+    // `shutdown_timeout_secs`: the journal reports that one as interrupted at the next start.
+    runtime.shutdown_background();
     info!("agent stopped");
     Ok(())
 }

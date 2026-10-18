@@ -10,29 +10,29 @@
 //! the server ends the connection on anything that is not the answer to its challenge.
 //!
 //! **The server is not trusted** (invariant 2 in `AGENTS.md`). Nothing it sends runs
-//! anything: `RunAction` is answered with `actions_disabled` until the agent verifies
-//! manifests (M2). `CollectNow` gets a heartbeat, but not more often than `Timing::min_collect_gap`,
-//! so asking fast does not turn into reading the machine fast. A message that does not
-//! parse is dropped and the session goes on (ADR-0006). The device key is not here at all:
-//! a challenge after the handshake ends the session, and so does any other handshake
-//! message.
+//! anything by itself: `RunAction` and `CancelAction` go to the executor (`actions`),
+//! which lives outside the session and decides on its own, and the session sends back
+//! whatever results wait, those of earlier sessions first. `CollectNow` gets a heartbeat,
+//! but not more often than `Timing::min_collect_gap`, so asking fast does not turn into
+//! reading the machine fast. A message that does not parse is dropped and the session goes
+//! on (ADR-0006), a `RunAction` included: it gets no answer, and the server learns of it
+//! when the request expires. The device key is not here at all: a challenge after the
+//! handshake ends the session, and so does any other handshake message.
 
 use futures_util::{Sink, Stream, StreamExt};
-use ponte_protocol::{ActionOutcome, ActionResult, AgentToServer, RejectReason, ServerToAgent};
+use ponte_protocol::{AgentToServer, ServerToAgent};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
 
 use crate::Timing;
+use crate::actions::runner::Actions;
 use crate::telemetry::Collect;
 use crate::wire::{self, Message};
 
 /// How many dropped or refused messages of one session get a log line each. A server
 /// that keeps sending what the agent does not take must not fill the machine's disk.
 const DROPS_LOGGED: u32 = 8;
-
-/// The answer to every `RunAction` until the agent can verify a manifest.
-const REFUSAL: RejectReason = RejectReason::ActionsDisabled;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionEnd {
@@ -53,6 +53,7 @@ pub(crate) async fn run<St, Si, E, C>(
     stream: &mut St,
     sink: &mut Si,
     collector: &C,
+    actions: &Actions,
     timing: &Timing,
     stopped: &mut watch::Receiver<bool>,
 ) -> SessionEnd
@@ -69,11 +70,25 @@ where
     let mut ping_at = start + timing.ping;
     let mut silent_at = start + timing.silence;
     let mut drops = Drops::default();
+    // What earlier sessions left unsent goes first; what they had not recorded is gone.
+    actions.session_started();
 
     loop {
         let frame = tokio::select! {
             () = crate::stop_signal(stopped) => return SessionEnd::Stopped,
             frame = stream.next() => frame,
+            () = actions.ready() => {
+                // A result is confirmed only once it is out. One lost on the way comes
+                // back when the server sends its request again.
+                while let Some((ticket, result)) = actions.next_to_send() {
+                    let message = AgentToServer::ActionResult(result);
+                    if wire::send(sink, &message, timing.send).await.is_err() {
+                        return SessionEnd::SendFailed;
+                    }
+                    actions.sent(ticket);
+                }
+                continue;
+            }
             () = sleep_until(silent_at) => return SessionEnd::ServerSilent,
             () = sleep_until(heartbeat_at) => {
                 if let Some(telemetry) = collector.snapshot().await {
@@ -126,23 +141,10 @@ where
             }
             Ok(ServerToAgent::RunAction(request)) => {
                 // Only the id: the rest of the request is text the server chose.
-                if drops.log_this_one() {
-                    warn!(request = %request.request_id, reason = ?REFUSAL, "action refused");
-                }
-                let refusal = AgentToServer::ActionResult(ActionResult {
-                    request_id: request.request_id,
-                    outcome: ActionOutcome::Rejected { reason: REFUSAL },
-                    output: None,
-                    duration_ms: 0,
-                });
-                if wire::send(sink, &refusal, timing.send).await.is_err() {
-                    return SessionEnd::SendFailed;
-                }
+                debug!(request = %request.request_id, "action request received");
+                actions.submit(request);
             }
-            Ok(ServerToAgent::CancelAction { request_id }) => {
-                // Nothing is ever running, so there is nothing to cancel.
-                debug!(request = %request_id, "cancel ignored: no action is running");
-            }
+            Ok(ServerToAgent::CancelAction { request_id }) => actions.cancel(request_id),
             Ok(
                 ServerToAgent::Challenge { .. }
                 | ServerToAgent::Enrolled { .. }
@@ -177,37 +179,78 @@ impl Drops {
 mod tests {
     use std::time::Duration;
 
-    use ponte_protocol::{Nonce, RequestId};
+    use ponte_protocol::{ActionOutcome, ActionResult, Nonce, RejectReason, RequestId};
     use tokio::task::JoinHandle;
     use tokio::time::{sleep, timeout_at};
 
     use super::*;
-    use crate::testkit::{FakeCollector, Peer, Sent, action_request, device_id, pipe, stuck_sink};
+    use crate::AgentConfig;
+    use crate::actions::journal::tests::FakeJournalDisk;
+    use crate::actions::runner::{ActionRunner, in_memory};
+    use crate::config::ActionSettings;
+    use crate::testkit::{
+        FakeClock, FakeCollector, LogCapture, Peer, Sent, action_request, device_id,
+        manifest_key_hex, pipe, stuck_sink,
+    };
 
     const fn secs(secs: u64) -> Duration {
         Duration::from_secs(secs)
     }
 
-    /// A session against a peer the test plays, with the default timing.
+    /// A session against a peer the test plays, with the default timing, handing requests
+    /// to an executor in memory.
     struct Running {
         peer: Peer,
         collector: FakeCollector,
         stop: watch::Sender<bool>,
         task: JoinHandle<SessionEnd>,
         start: Instant,
+        actions: Actions,
+        disk: FakeJournalDisk,
+        _runner: ActionRunner,
     }
 
-    fn session() -> Running {
+    /// The day the requests of `testkit::action_request` were made.
+    const NOW: u64 = 1_767_225_700;
+
+    fn settings(more: &str) -> ActionSettings {
+        let toml = format!(
+            "server_url = 'wss://ponte.example.com'
+data_dir = 'data'
+{more}"
+        );
+        toml.parse::<AgentConfig>().unwrap().actions
+    }
+
+    /// An agent with manifest keys: requests go as far as the executor takes them.
+    fn with_keys() -> ActionSettings {
+        settings(&format!("manifest_keys = ['{}']", manifest_key_hex(1)))
+    }
+
+    /// An agent without manifest keys, which runs nothing.
+    async fn session() -> Running {
+        session_with(settings("")).await
+    }
+
+    async fn session_with(settings: ActionSettings) -> Running {
+        let (runner, disk) = in_memory(settings, FakeClock::at(NOW)).await;
+        start_session(runner, disk)
+    }
+
+    fn start_session(runner: ActionRunner, disk: FakeJournalDisk) -> Running {
         let (peer, mut stream, mut sink) = pipe();
         let collector = FakeCollector::default();
         let (stop, mut stopped) = watch::channel(false);
+        let actions = runner.actions();
         let task = tokio::spawn({
             let collector = collector.clone();
+            let actions = actions.clone();
             async move {
                 run(
                     &mut stream,
                     &mut sink,
                     &collector,
+                    &actions,
                     &Timing::default(),
                     &mut stopped,
                 )
@@ -220,6 +263,9 @@ mod tests {
             stop,
             task,
             start: Instant::now(),
+            actions,
+            disk,
+            _runner: runner,
         }
     }
 
@@ -294,7 +340,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn heartbeats_go_out_at_the_start_and_then_once_per_interval() {
-        let mut running = session();
+        let mut running = session().await;
         let events = running.watch(secs(125), true).await;
 
         assert_eq!(heartbeats(&events), [(0, 1), (60, 2), (120, 3)]);
@@ -307,7 +353,7 @@ mod tests {
     /// ever. The agent gives it ninety seconds and three pings.
     #[tokio::test(start_paused = true)]
     async fn a_server_that_says_nothing_for_ninety_seconds_is_gone() {
-        let mut running = session();
+        let mut running = session().await;
         let events = running.watch(secs(300), false).await;
 
         assert_eq!(running.elapsed(), secs(90));
@@ -322,7 +368,7 @@ mod tests {
     /// any reason at all would pass for a working check.
     #[tokio::test(start_paused = true)]
     async fn a_server_that_answers_pings_keeps_the_session() {
-        let mut running = session();
+        let mut running = session().await;
         let events = running.watch(secs(599), true).await;
 
         assert_eq!(running.elapsed(), secs(599));
@@ -348,7 +394,7 @@ mod tests {
             Message::Ping(Vec::new().into()),
             Message::Pong(Vec::new().into()),
         ] {
-            let mut running = session();
+            let mut running = session().await;
             for _ in 0..3 {
                 running.watch(running.elapsed() + secs(80), false).await;
                 assert!(!running.task.is_finished(), "{frame:?}");
@@ -365,7 +411,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn collect_now_gets_one_heartbeat_per_gap_however_often_it_is_asked() {
         let collect_now = ServerToAgent::CollectNow {};
-        let mut running = session();
+        let mut running = session().await;
 
         running.watch(secs(1), true).await;
         for _ in 0..100 {
@@ -391,46 +437,179 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_heartbeat_after_the_first_collect_now_comes_five_seconds_after_the_last() {
-        let mut running = session();
+        let mut running = session().await;
         running.watch(secs(1), true).await;
         running.peer.send(&ServerToAgent::CollectNow {});
         let events = running.watch(secs(9), true).await;
         assert_eq!(heartbeats(&events), [(5, 2)]);
     }
 
-    /// Nothing runs on the server's word. Until the agent verifies manifests (M2) every
-    /// request is refused, and the server is told so.
-    #[tokio::test(start_paused = true)]
-    async fn run_action_is_refused() {
-        let mut running = session();
-        running.watch(secs(1), true).await;
+    fn rejected(request_id: RequestId, reason: RejectReason) -> ActionResult {
+        ActionResult {
+            request_id,
+            outcome: ActionOutcome::Rejected { reason },
+            output: None,
+            duration_ms: 0,
+        }
+    }
 
+    async fn result(peer: &mut Peer) -> ActionResult {
+        loop {
+            match peer.message().await {
+                AgentToServer::ActionResult(result) => return result,
+                AgentToServer::Heartbeat { .. } => {}
+                other => panic!("not an action result: {other:?}"),
+            }
+        }
+    }
+
+    /// Nothing runs on the server's word: the request goes to the executor, which decides,
+    /// and its answer comes back. Without manifest keys it runs nothing.
+    #[tokio::test(start_paused = true)]
+    async fn run_action_goes_to_the_executor_and_its_answer_comes_back() {
+        let mut running = session().await;
+        running.watch(secs(1), true).await;
         let request_id = RequestId::new();
         running
             .peer
             .send(&ServerToAgent::RunAction(Box::new(action_request(
                 request_id,
             ))));
-        let AgentToServer::ActionResult(result) = running.peer.message().await else {
-            panic!("not an action result");
-        };
         assert_eq!(
-            result,
-            ActionResult {
-                request_id,
-                outcome: ActionOutcome::Rejected {
-                    reason: RejectReason::ActionsDisabled,
-                },
-                output: None,
-                duration_ms: 0,
-            }
+            result(&mut running.peer).await,
+            rejected(request_id, RejectReason::ActionsDisabled)
         );
 
+        // With keys, the executor gets as far as the signature, which is nobody's.
+        let mut running = session_with(with_keys()).await;
+        running.watch(secs(1), true).await;
+        running
+            .peer
+            .send(&ServerToAgent::RunAction(Box::new(action_request(
+                request_id,
+            ))));
+        let refusal = rejected(request_id, RejectReason::UnknownKey);
+        assert_eq!(result(&mut running.peer).await.outcome, refusal.outcome);
+
+        // Cancelling what is not waiting changes nothing, and the session goes on.
         running
             .peer
             .send(&ServerToAgent::CancelAction { request_id });
         let events = running.watch(secs(20), true).await;
         assert_eq!(events, []);
+        assert!(!running.task.is_finished());
+        // Sent again, the request gets its stored answer.
+        running
+            .peer
+            .send(&ServerToAgent::RunAction(Box::new(action_request(
+                request_id,
+            ))));
+        assert_eq!(result(&mut running.peer).await.outcome, refusal.outcome);
+    }
+
+    /// Results that no session sent go out as soon as the next one starts, before any
+    /// heartbeat and whether or not the machine can be read.
+    #[tokio::test(start_paused = true)]
+    async fn results_that_waited_go_out_when_a_session_starts() {
+        let (runner, disk) = in_memory(with_keys(), FakeClock::at(NOW)).await;
+        let actions = runner.actions();
+        let first = RequestId::new();
+        let second = RequestId::new();
+        actions.submit(Box::new(action_request(first)));
+        actions.submit(Box::new(action_request(second)));
+        sleep(Duration::from_millis(1)).await;
+
+        let mut running = start_session(runner, disk);
+        running.collector.fail(true);
+        let mut answered = vec![
+            result(&mut running.peer).await.request_id,
+            result(&mut running.peer).await.request_id,
+        ];
+        answered.sort();
+        let mut sent = vec![first, second];
+        sent.sort();
+        assert_eq!(answered, sent);
+        assert_eq!(running.elapsed(), Duration::ZERO);
+        // Sent once: the next session has nothing to send.
+        assert_eq!(running.actions.next_to_send(), None);
+    }
+
+    /// A result lost with its session is sent by the next one.
+    #[tokio::test(start_paused = true)]
+    async fn a_result_lost_with_its_session_goes_out_with_the_next() {
+        let (runner, disk) = in_memory(with_keys(), FakeClock::at(NOW)).await;
+        let mut running = start_session(runner, disk);
+        running.watch(secs(1), true).await;
+        // The connection stops taking frames, and drops.
+        running.peer.hang_up();
+        assert_eq!(running.task.await.unwrap(), SessionEnd::ServerClosed);
+        let request_id = RequestId::new();
+        running.actions.submit(Box::new(action_request(request_id)));
+        sleep(Duration::from_millis(1)).await;
+
+        let mut next = start_session(running._runner, running.disk);
+        assert_eq!(result(&mut next.peer).await.request_id, request_id);
+    }
+
+    /// A `RunAction` that does not parse is dropped like any other message (ADR-0006): no
+    /// answer, and nothing of it in the log. The name of an unknown field is the server's
+    /// choice, so not even the parser's error goes there.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_action_that_does_not_parse_gets_no_answer_and_leaves_no_text() {
+        let log = LogCapture::start();
+        let mut running = session_with(with_keys()).await;
+        running.watch(secs(1), true).await;
+        let mut request = serde_json::to_value(ServerToAgent::RunAction(Box::new(action_request(
+            RequestId::new(),
+        ))))
+        .unwrap();
+        request["campo_escolhido_pelo_servidor"] = serde_json::json!(1);
+        running.peer.send_frame(Message::text(request.to_string()));
+        let mut request = serde_json::to_value(ServerToAgent::RunAction(Box::new(action_request(
+            RequestId::new(),
+        ))))
+        .unwrap();
+        request["expires_at"] = serde_json::json!("amanha_cedo");
+        running.peer.send_frame(Message::text(request.to_string()));
+
+        let events = running.watch(secs(29), true).await;
+        assert_eq!(events, []);
+        assert_eq!(running.disk.files().writes, []);
+        let text = log.text();
+        assert!(text.contains("message dropped"), "{text}");
+        for chosen in ["campo_escolhido", "amanha_cedo", "expires_at"] {
+            assert!(!text.contains(chosen), "{chosen} in:\n{text}");
+        }
+    }
+
+    /// A server that floods the agent with requests gets one answer each, and the disk
+    /// sees nothing of it: refusals that describe the agent are never recorded.
+    #[tokio::test(start_paused = true)]
+    async fn a_flood_of_requests_writes_nothing() {
+        let mut running = session().await;
+        running.watch(secs(1), true).await;
+        for _ in 0..200 {
+            running
+                .peer
+                .send(&ServerToAgent::RunAction(Box::new(action_request(
+                    RequestId::new(),
+                ))));
+        }
+        let repeated = RequestId::new();
+        for _ in 0..200 {
+            running
+                .peer
+                .send(&ServerToAgent::RunAction(Box::new(action_request(
+                    repeated,
+                ))));
+        }
+        let events = running.watch(secs(5), true).await;
+        let refused = events
+            .iter()
+            .filter(|(_, event)| matches!(event, Event::Rejected(_)))
+            .count();
+        assert!((201..=400).contains(&refused), "{refused}");
+        assert_eq!(running.disk.files().writes, []);
         assert!(!running.task.is_finished());
     }
 
@@ -438,7 +617,7 @@ mod tests {
     /// newer server must not be able to knock an older agent off by talking to it.
     #[tokio::test(start_paused = true)]
     async fn what_the_agent_cannot_read_is_dropped_and_the_session_goes_on() {
-        let mut running = session();
+        let mut running = session().await;
         running.watch(secs(1), true).await;
 
         for _ in 0..20 {
@@ -472,7 +651,7 @@ mod tests {
             },
             ServerToAgent::Welcome {},
         ] {
-            let mut running = session();
+            let mut running = session().await;
             running.watch(secs(1), true).await;
             running.peer.send(&message);
 
@@ -485,12 +664,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_session_ends_when_the_server_closes_or_the_connection_drops() {
-        let mut running = session();
+        let mut running = session().await;
         running.watch(secs(1), true).await;
         running.peer.send_frame(Message::Close(None));
         assert_eq!(running.end().await, SessionEnd::ServerClosed);
 
-        let mut running = session();
+        let mut running = session().await;
         running.watch(secs(1), true).await;
         running.peer.hang_up();
         assert_eq!(running.end().await, SessionEnd::ServerClosed);
@@ -500,7 +679,7 @@ mod tests {
     /// and it does not end the session.
     #[tokio::test(start_paused = true)]
     async fn a_failed_reading_skips_a_heartbeat_and_nothing_else() {
-        let mut running = session();
+        let mut running = session().await;
         running.collector.fail(true);
         let events = running.watch(secs(65), true).await;
         assert_eq!(heartbeats(&events), []);
@@ -517,12 +696,14 @@ mod tests {
         let (_peer, mut stream, _) = pipe();
         let mut sink = stuck_sink();
         let (_stop, mut stopped) = watch::channel(false);
+        let (runner, _) = in_memory(settings(""), FakeClock::at(NOW)).await;
         let start = Instant::now();
 
         let end = run(
             &mut stream,
             &mut sink,
             &FakeCollector::default(),
+            &runner.actions(),
             &Timing::default(),
             &mut stopped,
         )
@@ -534,7 +715,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn the_session_ends_when_the_agent_stops() {
-        let mut running = session();
+        let mut running = session().await;
         running.watch(secs(45), true).await;
         running.stop.send(true).unwrap();
         sleep(Duration::ZERO).await;
