@@ -23,8 +23,9 @@ anyhow = "1"
 # no PHC strings; the KDF's memory is wiped when it is dropped.
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 axum = "0.8"
-# `ponte-sign` only, with the argon2 above. Nonces come from getrandom.
-chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc"] }
+# `ponte-sign` only, with the argon2 above. Nonces come from getrandom; the cipher wipes its
+# copy of the key when dropped.
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 ed25519-dalek = "3"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
