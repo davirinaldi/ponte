@@ -208,7 +208,8 @@ pub enum RejectReason {
     /// The request's `expires_at` lies more than 24 hours and 5 minutes ahead (ADR-0012).
     RequestTooFarAhead,
     /// The signed text is not a valid manifest: it does not parse or breaks a shape rule
-    /// or a limit (ADR-0011).
+    /// or a limit (ADR-0011). Also a validity that ends before it starts, or a date past
+    /// `i64::MAX` (ADR-0010).
     InvalidManifest,
     /// A step uses a primitive this release refuses (ADR-0011).
     PrimitiveRefused,

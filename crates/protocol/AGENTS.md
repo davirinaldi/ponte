@@ -42,7 +42,8 @@ Wire types for every message between agent, server and web console.
 - Text a peer says about itself before it has proven anything is a `Label`, never a `String`.
   Handshake messages stay under `MAX_HANDSHAKE_MESSAGE_BYTES`.
 - No business logic here. Types, serde attributes, tiny constructors and the layout of signed
-  bytes only. No cryptography: signing and verifying belong to the agent and the server.
+  bytes only. No cryptography: signing and verifying belong to the agent and the server, and
+  verifying a manifest to `ponte_actions::verify`, which both use.
 - Fields named `output` or containing free text from a machine are untrusted (AGENTS.md,
   invariant 4). A `Label` is bounded, and still untrusted.
 - Why something failed or was refused is a `FailReason` or a `RejectReason`, never text: what
