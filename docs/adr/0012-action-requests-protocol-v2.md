@@ -79,10 +79,17 @@ The agent keeps a journal of requests on disk, keyed by `RequestId`.
 - A request is marked "started" before anything acts on the machine. An entry found
   "started" with no end when the agent starts becomes `Failed { reason: Interrupted }` and
   never runs again.
-- Refusals are recorded too, so a refused request stays refused.
 - An entry is kept until the request's expiry plus 24 hours, and never longer than 48 hours
-  from when it was written. The journal holds at most 4,096 entries; a full journal
-  refuses new requests, and so does a journal the agent cannot write.
+  from when it was written.
+- Entries of requests whose steps began are what the at-most-once promise rests on, and
+  they are never dropped early. The rate limits bound them: at most 60 an hour by
+  configuration, so at most 2,880 in 48 hours, against room for 4,096. A full journal
+  refuses new requests, and so does a journal the agent cannot write, read or parse: an
+  unreadable entry is never taken as "not seen".
+- Refusals are recorded too, so a repeat gets the same answer, but in a separate ring of
+  1,024 entries where the oldest goes first. A request that never ran cannot run twice,
+  so dropping its refusal costs at most a new evaluation if it comes back, and a stream
+  of requests that are all refused cannot fill the journal.
 - The journal, the clock mark of ADR-0010 and the identity files are written through:
   `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`. That is the
   "renames written through to the disk" the roadmap promised for M2.
@@ -133,14 +140,17 @@ message the agent receives. Within M2 that is enough to:
 
 - run any manifest that is signed by a key the agent trusts, not expired, and allowed by
   the agent's local policy, on any device that trusts that key, at a moment of its
-  choosing: restart the ERP during a sale, or delete a lock file the configuration lets it
-  delete;
+  choosing: restart the ERP during a sale, delete a lock file the configuration lets it
+  delete, or run a manifest that stops a service and never send the one that starts it,
+  leaving the ERP down;
 - do that as often as the limits allow: 20 actions an hour and one run of a manifest every
   10 minutes per device by default, one at a time;
 - run a version of a manifest that the catalog has replaced but that has not expired,
   since the agent does not know which version is current;
-- lie about who asked (`Initiator`), withhold or delay requests and results, and fill a
-  device's journal or queue so that it refuses everything for up to two days;
+- hold a request back and deliver it up to 24 hours and 5 minutes later, since it writes
+  `expires_at` itself;
+- lie about who asked (`Initiator`), withhold or delay requests and results, and keep the
+  queue full so that the device refuses whatever else arrives;
 - read what the agent already sends: telemetry, outcomes, and `output` when a primitive
   produces one (none in M2).
 
