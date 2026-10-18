@@ -23,8 +23,9 @@ pub const MAX_CLOCK_SKEW_SECS: u64 = 5 * 60;
 /// How far behind its high-water mark the clock may be before every action is refused
 /// (ADR-0010).
 pub const MAX_CLOCK_BACK_SECS: u64 = 60 * 60;
-/// Latest date a manifest may carry. Anything later does not fit the `i64` seconds of
-/// `chrono` and of the server's database, and no real manifest gets near it.
+/// Latest date a manifest may carry: anything later does not fit the signed `BIGINT` of
+/// the server's database, and the subtraction below is then safe. No real manifest gets
+/// near it; an accepted one ends within 365 days and 5 minutes of the clock.
 const MAX_DATE: u64 = i64::MAX.unsigned_abs();
 
 /// The manifest keys a verifier accepts: the agent's `manifest_keys`, or the server's

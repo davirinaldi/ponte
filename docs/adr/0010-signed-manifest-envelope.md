@@ -67,8 +67,8 @@ with `verify_strict`, then parses the TOML, never before.
   counted from `issued_at`: 90 days by default, 365 at most.
 - The agent refuses a window (`expires_at - issued_at`) longer than 365 days, an
   `issued_at` more than 5 minutes ahead of its clock, and an `expires_at` that has passed.
-  A window that ends before or when it starts, or a date past `i64::MAX` (which neither
-  `chrono` nor the server's database can hold), is an invalid manifest: both are refused
+  A window that ends before or when it starts, or a date past `i64::MAX` (which the
+  server's database cannot hold as a signed `BIGINT`), is an invalid manifest: both are refused
   before any subtraction, so no arithmetic on a date the server chose can wrap. All of it
   is `ponte_actions::verify`, which the agent, the server's catalog and `ponte-sign`
   share.
