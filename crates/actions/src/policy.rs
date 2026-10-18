@@ -199,7 +199,9 @@ impl RunnableManifest {
         self.0.public_key()
     }
 
-    /// Seconds since the Unix epoch. Steps never start after it.
+    /// Seconds since the Unix epoch. [`verify`](crate::verify) refused it once passed; a
+    /// run that started before then goes to its end, bounded by `timeout_secs`, because
+    /// stopping between steps could leave a service stopped (ADR-0012).
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
         self.0.expires_at()

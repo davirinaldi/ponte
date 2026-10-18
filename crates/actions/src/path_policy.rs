@@ -114,6 +114,46 @@ impl PathPolicy {
         };
         self.roots.iter().any(|root| segments.starts_with(root))
     }
+
+    /// Whether `path` and a root overlap: the path lies inside a root, or a root inside
+    /// the path. For what must stay out of every root (the agent's executable, its
+    /// configuration, its data directory, the enrollment token, ADR-0011), so case is
+    /// folded over every letter, not only ASCII: matching too much here refuses a
+    /// configuration, and matching too little would let a manifest delete the journal.
+    ///
+    /// Without roots nothing overlaps, and any path will do.
+    ///
+    /// # Errors
+    /// The path is not one this policy reads, or a segment has a short 8.3 name (`~`),
+    /// which could name a root under another spelling.
+    pub fn overlaps(&self, path: &str) -> Result<bool, NotComparable> {
+        if self.roots.is_empty() {
+            return Ok(false);
+        }
+        let segments = normalize(path).ok_or(NotComparable)?;
+        if segments.iter().any(|segment| segment.contains('~')) {
+            return Err(NotComparable);
+        }
+        // The shorter of the two decides: a prefix either way is an overlap.
+        Ok(self.roots.iter().any(|root| {
+            root.iter()
+                .zip(&segments)
+                .all(|(root, segment)| same_name(root, segment))
+        }))
+    }
+}
+
+/// A path [`PathPolicy::overlaps`] cannot compare with the roots. Says nothing of the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "the path is not an absolute Windows path with plain names and no short 8.3 name (`~`), \
+     so it cannot be compared with the roots"
+)]
+pub struct NotComparable;
+
+/// Whether two names may be the same folder, folding case both ways.
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
 }
 
 /// The segments of a root that ADR-0011 allows, or the rule it breaks.
@@ -185,6 +225,14 @@ impl Roots {
     #[must_use]
     pub const fn delete(&self) -> &PathPolicy {
         &self.delete
+    }
+
+    /// [`PathPolicy::overlaps`] over the allowed roots, which hold every delete root.
+    ///
+    /// # Errors
+    /// As [`PathPolicy::overlaps`].
+    pub fn overlaps(&self, path: &str) -> Result<bool, NotComparable> {
+        self.allowed.overlaps(path)
     }
 }
 
@@ -523,5 +571,76 @@ mod tests {
             Roots::new([r"C:\FakeErp"], [r"C:\"]).unwrap_err().rule,
             RootRule::Drive
         );
+    }
+
+    /// What must stay out of every root may lie neither inside one nor around one.
+    #[test]
+    fn a_path_overlaps_a_root_inside_it_or_around_it() {
+        let roots = Roots::new(
+            [r"C:\FakeErp\data", r"D:\Logs\erp"],
+            [r"C:\FakeErp\data\run"],
+        )
+        .unwrap();
+        for overlapping in [
+            r"C:\FakeErp\data",
+            r"C:\FakeErp\data\run",
+            r"C:\FakeErp\data\ponte\journal.json",
+            r"C:\FakeErp",
+            r"C:\",
+            r"c:/fakeerp/DATA/x",
+            r"D:\Logs",
+            r"D:\LOGS\ERP\agent",
+        ] {
+            assert_eq!(roots.overlaps(overlapping), Ok(true), "{overlapping}");
+        }
+        for apart in [
+            r"C:\FakeErpX",
+            r"C:\FakeErp\dataX",
+            r"C:\FakeErp\other\data",
+            r"C:\ProgramData\Ponte",
+            r"D:\Logs\erp2",
+            r"E:\FakeErp\data",
+        ] {
+            assert_eq!(roots.overlaps(apart), Ok(false), "{apart}");
+        }
+    }
+
+    /// `is_allowed` folds ASCII only, because a manifest must spell a root exactly. Here a
+    /// match too many only refuses a configuration, so every Latin letter folds.
+    #[test]
+    fn overlapping_folds_case_over_every_letter() {
+        let policy = PathPolicy::new(["C:\\\u{c9}rp"]).unwrap();
+        assert_eq!(policy.overlaps("C:\\\u{e9}rp\\ponte"), Ok(true));
+        assert_eq!(policy.overlaps("C:\\\u{c9}RP"), Ok(true));
+        assert!(!policy.is_allowed("C:\\\u{e9}rp\\ponte"));
+        // Dotless i and long s fold to the ASCII letters one way or the other.
+        let policy = PathPolicy::new([r"C:\Erp\Lista"]).unwrap();
+        assert_eq!(policy.overlaps("C:\\Erp\\L\u{131}\u{17f}ta"), Ok(true));
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_compared_is_an_error() {
+        let policy = PathPolicy::new([r"C:\FakeErp"]).unwrap();
+        for unreadable in [
+            r"C:\FAKEER~1\data",
+            r"C:\Ponte~\data",
+            r"\\server\share\ponte",
+            r"\\?\C:\FakeErp",
+            r"FakeErp\data",
+            "/var/lib/ponte",
+            r"C:\FakeErp\..\Windows",
+            r"C:\FakeErp\data.",
+            "",
+        ] {
+            assert_eq!(
+                policy.overlaps(unreadable),
+                Err(NotComparable),
+                "{unreadable}"
+            );
+        }
+        // Without roots there is nothing to compare with.
+        let none = PathPolicy::new(Vec::<String>::new()).unwrap();
+        assert_eq!(none.overlaps("/var/lib/ponte"), Ok(false));
+        assert_eq!(Roots::default().overlaps(r"C:\FAKEER~1"), Ok(false));
     }
 }

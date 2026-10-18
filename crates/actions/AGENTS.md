@@ -8,6 +8,9 @@ The closed catalog of what an agent can do. This crate is the main security boun
   runs a fixed query from a signed manifest on a read-only connection, nothing else.
 - Every path, in a step or in a check, must go through `PathPolicy`. Keep the lexical check
   strict; the agent re-checks the resolved path at execution time.
+- `PathPolicy::overlaps` is the other direction: what must stay out of every root (the
+  agent's own files). It folds case over every letter and refuses a path it cannot read,
+  because there matching too much is the safe mistake. Never use it to allow a path.
 - `Manifest::validate_shape` checks everything that does not depend on a machine: limits,
   the shape of every field that names something (service, process image, connection,
   mount, path), risk, the primitives this release runs, and verification coverage

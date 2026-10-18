@@ -26,7 +26,7 @@ pub use manifest::{
     Check, CheckList, ExpectedServiceState, Location, MAX_CHECKS, MAX_DESCRIPTION_CHARS,
     MAX_ID_LEN, MAX_STEPS, MAX_TITLE_CHARS, Manifest, ManifestError, TextField, ValidManifest,
 };
-pub use path_policy::{InvalidRoot, PathPolicy, RootRule, Roots};
+pub use path_policy::{InvalidRoot, NotComparable, PathPolicy, RootRule, Roots};
 pub use policy::{
     AllowedServices, AllowedServicesError, LocalPolicy, MAX_ALLOWED_SERVICES, PolicyError,
     REFUSED_SERVICES, RiskCeiling, RunnableManifest, is_refused_service,
