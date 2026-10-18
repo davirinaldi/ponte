@@ -1190,7 +1190,14 @@ mod tests {
             ]
             .map(|step| check_step(&step, Location::Step(0)))
         };
-        for name in NOT_NAMES.iter().copied().chain([too_long.as_str()]) {
+        // Letters, but not ones a reviewer tells apart from Latin: Cyrillic and Greek.
+        let look_alikes = ["\u{430}rp.exe", "\u{3bf}rp.exe", "erp\u{2163}.exe"];
+        for name in NOT_NAMES
+            .iter()
+            .copied()
+            .chain([too_long.as_str()])
+            .chain(look_alikes)
+        {
             for result in named(name) {
                 assert_eq!(
                     result,
