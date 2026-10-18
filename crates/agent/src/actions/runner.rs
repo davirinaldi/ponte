@@ -2349,6 +2349,58 @@ path = 'C:\FakeErp\run\erp.lock'
         assert_eq!(harness.machine.steps(), 3);
     }
 
+    /// The lazy writes put the started requests first, and leave the ring for later when
+    /// that write fails: the ring never reaches the disk before the file an id left.
+    #[tokio::test(start_paused = true)]
+    async fn the_ring_waits_for_the_started_requests_to_be_written() {
+        let mut harness = Harness::new("");
+        let actions = harness.start().await;
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
+        assert_eq!(
+            outcome(&actions, request_with(2, badly_signed(RESTART), NOW + HOUR)).await,
+            refused(RejectReason::BadSignature)
+        );
+        // Both files are dirty now: the delivered mark of 1, the refusal of 2.
+        let before = harness.disk.files().writes.len();
+        harness.disk.fail_after(0);
+        tokio::time::sleep(LAZY_WRITES_EVERY).await;
+        settle().await;
+        assert_eq!(
+            harness.disk.files().writes[before..],
+            [JournalFile::Started]
+        );
+        harness.disk.works_again();
+        tokio::time::sleep(LAZY_WRITES_EVERY).await;
+        settle().await;
+        assert_eq!(
+            harness.disk.files().writes[before..],
+            [
+                JournalFile::Started,
+                JournalFile::Started,
+                JournalFile::Ended
+            ]
+        );
+    }
+
+    /// A disk that refuses every start costs the log no more than refusals do.
+    #[tokio::test(start_paused = true)]
+    async fn starts_that_cannot_be_written_are_logged_within_the_budget() {
+        let log = crate::testkit::LogCapture::start();
+        let mut harness = Harness::new("min_manifest_interval_secs = 60");
+        let actions = harness.start().await;
+        harness.disk.fail_after(0);
+        for n in 1..=100 {
+            assert_eq!(
+                outcome(&actions, request(n, RESTART)).await,
+                refused(RejectReason::JournalUnavailable)
+            );
+        }
+        let text = log.text();
+        let lines = text.matches("the start could not be written").count()
+            + text.matches("action refused").count();
+        assert_eq!(lines, 20, "{text}");
+    }
+
     /// A text that could not be serialized is empty, and never replaces a journal.
     #[tokio::test(start_paused = true)]
     async fn an_empty_text_is_never_written() {
