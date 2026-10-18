@@ -88,8 +88,10 @@ impl journal::JournalDisk for ActionFiles {
         if held.is_some() {
             return Ok(());
         }
-        if let Some(dir) = self.lock.parent() {
-            std::fs::create_dir_all(dir)?;
+        // Often the first file of a new data directory, which is then made as the identity
+        // makes it: private where files have modes (step 5 gives Windows its ACL).
+        if let Some(dir) = self.lock.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            platform::create_private_dir(dir)?;
         }
         // Nothing is ever written to it: the lock is the point.
         let file = OpenOptions::new()
@@ -141,6 +143,22 @@ mod tests {
             files.read(JournalFile::Ended).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    /// The lock is often the first file of a new data directory, which it then makes
+    /// private, as the identity would.
+    #[cfg(unix)]
+    #[test]
+    fn the_data_directory_the_lock_makes_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::journal::JournalDisk;
+
+        let dir = TempDir::new();
+        let data = dir.path().join("made-here");
+        ActionFiles::new(&data).lock().unwrap();
+        let mode = std::fs::metadata(&data).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     /// Two agents on one data directory, a service and a console: the second gets no

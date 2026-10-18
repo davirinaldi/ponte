@@ -59,6 +59,10 @@ pub(crate) const MAX_REQUEST_AHEAD_SECS: u64 = 24 * 60 * 60 + 5 * 60;
 /// How often the ring and the delivered marks go to disk, at most. A refusal lost in a
 /// crash costs a new evaluation; a write per refusal would let a server wear the disk.
 pub(crate) const LAZY_WRITES_EVERY: Duration = Duration::from_secs(60);
+/// How often, a second apart, the journal's lock is tried at start: about ten seconds for
+/// an agent that is still stopping to let go of it.
+const LOCK_ATTEMPTS: u32 = 10;
+const LOCK_RETRY: Duration = Duration::from_secs(1);
 /// The window of `max_actions_per_hour`.
 const HOUR_SECS: u64 = 60 * 60;
 /// Refusals, cancels and failed starts the executor logs per [`LOG_WINDOW`]. A server that
@@ -179,26 +183,34 @@ pub(crate) async fn start(
     clock: Arc<dyn Clock>,
     machine: Arc<dyn Machine>,
 ) -> ActionRunner {
-    let loaded = spawn_blocking({
-        let (disk, mark_disk, clock) = (
-            Arc::clone(&disk),
-            Arc::clone(&mark_disk),
-            Arc::clone(&clock),
-        );
-        move || {
-            let journal = Journal::load(disk.as_ref());
-            let floor = journal.as_ref().map_or(0, Journal::latest_time);
-            (journal, HighWater::start(clock, mark_disk.as_ref(), floor))
+    // An agent that is still on its way out holds the journal for a moment.
+    let mut attempt = 1;
+    let mut journal = loop {
+        let disk = Arc::clone(&disk);
+        let journal = spawn_blocking(move || Journal::load(disk.as_ref()))
+            .await
+            // Only in a build that unwinds: a release build ends the process on a panic.
+            .unwrap_or(Err(Unavailable::Read));
+        if journal.as_ref().err() != Some(&Unavailable::Locked) || attempt == LOCK_ATTEMPTS {
+            break journal;
         }
-    })
-    .await;
-    let (mut journal, mark) = match loaded {
-        Ok(loaded) => loaded,
-        // Only in a build that unwinds: a release build ends the process on a panic.
-        Err(_) => (
-            Err(Unavailable::Read),
-            HighWater::unavailable(Arc::clone(&clock)),
-        ),
+        attempt += 1;
+        tokio::time::sleep(LOCK_RETRY).await;
+    };
+    // Another process runs the actions of this data directory: this one leaves the mark
+    // alone too, so that the two never write the same file.
+    let locked = journal.as_ref().err() == Some(&Unavailable::Locked);
+    let mark = if locked {
+        HighWater::unavailable(Arc::clone(&clock))
+    } else {
+        let floor = journal.as_ref().map_or(0, Journal::latest_time);
+        let (mark_disk, clock) = (Arc::clone(&mark_disk), Arc::clone(&clock));
+        spawn_blocking({
+            let clock = Arc::clone(&clock);
+            move || HighWater::start(clock, mark_disk.as_ref(), floor)
+        })
+        .await
+        .unwrap_or_else(|_| HighWater::unavailable(clock))
     };
     match &mut journal {
         Ok(journal) => {
@@ -214,6 +226,11 @@ pub(crate) async fn start(
                 );
             }
         }
+        Err(Unavailable::Locked) => error!(
+            "another agent process holds the journal of this data directory: this one runs \
+             no action. Stop the other one (a console started by hand, or a second service) \
+             and start this one again"
+        ),
         Err(problem) => error!(
             %problem,
             "the journal of actions cannot be used: every request is refused. If the file \
@@ -244,11 +261,15 @@ pub(crate) async fn start(
         machine,
     });
     let (stop_keeper, keeper_stopped) = watch::channel(false);
-    let keeper = tokio::spawn(clock::keep(
-        Arc::clone(&shared.mark),
-        mark_disk,
-        keeper_stopped,
-    ));
+    let keeper = if locked {
+        tokio::spawn(async {})
+    } else {
+        tokio::spawn(clock::keep(
+            Arc::clone(&shared.mark),
+            mark_disk,
+            keeper_stopped,
+        ))
+    };
     let executor = tokio::spawn(Arc::clone(&shared).execute());
     ActionRunner {
         actions: Actions { shared },
@@ -2335,17 +2356,38 @@ path = 'C:\FakeErp\run\erp.lock'
         assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
     }
 
-    /// Another agent holds the journal: everything is refused.
+    /// Another agent holds the journal: after about ten seconds of trying, everything is
+    /// refused, and this one leaves the mark alone.
     #[tokio::test(start_paused = true)]
     async fn a_journal_another_process_holds_refuses_everything() {
         let mut harness = Harness::new("");
         harness.disk.files().locked = true;
+        let began = tokio::time::Instant::now();
         let actions = harness.start().await;
+        assert_eq!(began.elapsed(), Duration::from_secs(9));
         assert_eq!(
             outcome(&actions, request(1, RESTART)).await,
             refused(RejectReason::JournalUnavailable)
         );
         assert_eq!(harness.machine.calls(), Vec::<String>::new());
+        harness.stop().await;
+        assert_eq!(*harness.mark.0.lock().unwrap(), None);
+    }
+
+    /// The twin: an agent that is still stopping lets go in time.
+    #[tokio::test(start_paused = true)]
+    async fn a_journal_let_go_of_in_time_is_taken() {
+        let mut harness = Harness::new("");
+        harness.disk.files().locked = true;
+        let disk = harness.disk.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(2_500)).await;
+            disk.files().locked = false;
+        });
+        let began = tokio::time::Instant::now();
+        let actions = harness.start().await;
+        assert_eq!(began.elapsed(), Duration::from_secs(3));
+        assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
     }
 
     /// A mark that cannot be read refuses everything, like a clock set back. And the

@@ -32,7 +32,7 @@ pub(crate) fn machine(_roots: &Roots) -> Arc<dyn Machine> {
 
 /// Creates `dir` and whatever is missing above it. Where files have modes, only the
 /// owner gets in.
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
