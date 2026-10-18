@@ -234,6 +234,21 @@ right. The code follows this section.
   after a refusal that describes the agent, a second, different result once a copy is
   decided again. The first two are identical and harmless. Step 6 logs a different second
   result as the anomaly described above, and an identical one at debug level.
+- **What the security review of step 4 left as it is**, with reasons:
+  - A request is its id and its expiry. Once its entry is gone (a day past the expiry by the
+    mark), the same id sent with a later `expires_at` is a new request and may run. Only the
+    server can do that, it can as easily choose a new id, and the limits still apply.
+  - A clock set ahead before a restart, then back within the hour of tolerance, moves the
+    window of the limits by up to an hour per restart. It takes control of the clock and a
+    restart, and each round pushes the mark further ahead, which the validity of manifests
+    bounds.
+  - Deciding on a request costs a parse, a signature check and, for one that gets that far,
+    reads of the service manager, and nothing limits how often a server asks. The queue of
+    4 and one at a time bound it; the load test of M5 decides whether it needs a budget,
+    as the review of step 1 already said.
+  - Renames are not yet written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`), so a
+    power cut could roll a start back. Nothing acts until step 5, which brings both, and the
+    Windows machine must not land without it.
 
 ## Consequences
 
