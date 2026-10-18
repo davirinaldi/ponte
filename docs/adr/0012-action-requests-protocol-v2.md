@@ -221,7 +221,9 @@ right. The code follows this section.
 - **One process holds the journal.** `journal.lock`, in the data directory, is locked for
   the life of the process (`File::try_lock`). Two agents on one data directory, a service
   and a console, would each trust their own copy and could both run a request; the second
-  one refuses everything with `JournalUnavailable`.
+  one refuses everything with `JournalUnavailable`. It tries for about ten seconds first, for an agent that is still
+  stopping, and then leaves the clock's mark alone as well, so the two never write the same
+  file.
 - **The queue counts duplicates.** A copy of a request that runs or waits takes a place in
   the queue of 4 like any request, so copies cannot grow the memory.
 - **Cancelling a request that left the queue** takes its waiting copies and answers
