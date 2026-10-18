@@ -25,6 +25,8 @@ use ponte_actions::{Check, Primitive};
 pub(crate) enum ServiceRefusal {
     Structure,
     Unreadable,
+    /// The time the manifest had left ran out.
+    TimedOut,
 }
 
 /// A check that could not be evaluated. A check that does not hold is `Ok(false)`.
@@ -56,9 +58,10 @@ pub(crate) enum StepError {
 /// The operations of a platform. Calls block; the executor makes them from a blocking
 /// task, one at a time.
 pub(crate) trait Machine: Send + Sync + 'static {
-    /// Whether the service `name` may be touched, by its structure (ADR-0011). Asked of
-    /// every service a manifest names, in steps and checks, before any precondition.
-    fn service_allowed(&self, name: &str) -> Result<(), ServiceRefusal>;
+    /// Whether the service `name` may be touched, by its structure (ADR-0011), within
+    /// `remaining`. Asked of every service a manifest names, in steps and checks, before any
+    /// precondition.
+    fn service_allowed(&self, name: &str, remaining: Duration) -> Result<(), ServiceRefusal>;
     /// Whether `check` holds, within `remaining`.
     fn check(&self, check: &Check, remaining: Duration) -> Result<bool, CheckError>;
     /// Runs `step`, within `remaining`.
@@ -72,7 +75,7 @@ pub(crate) trait Machine: Send + Sync + 'static {
 pub(crate) struct Unsupported;
 
 impl Machine for Unsupported {
-    fn service_allowed(&self, _: &str) -> Result<(), ServiceRefusal> {
+    fn service_allowed(&self, _: &str, _: Duration) -> Result<(), ServiceRefusal> {
         Err(ServiceRefusal::Unreadable)
     }
 

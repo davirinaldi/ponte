@@ -45,7 +45,7 @@ use tracing::{debug, error, info, warn};
 
 use super::clock::{self, Clock, HighWater, MarkDisk, Reading};
 use super::journal::{Ended, Journal, JournalDisk, JournalFile, Known, StartError, Unavailable};
-use super::machine::{CheckError, Machine, StepError};
+use super::machine::{CheckError, Machine, ServiceRefusal, StepError};
 use crate::config::ActionSettings;
 
 /// Most requests waiting in the queue, the running one not counted (ADR-0012).
@@ -263,18 +263,24 @@ impl ActionRunner {
         self.actions.clone()
     }
 
-    /// Takes no new request, drops the queue without answering (the server sends those
-    /// again), and waits up to `timeout` for the running action, the last writes of the
-    /// journal and the last write of the mark. A run that does not end in time stays
-    /// "started" on disk and is reported interrupted at the next start; the ring and the
-    /// delivered marks since the last write are then lost.
-    pub(crate) async fn stop(self, timeout: Duration) {
+    /// Takes no new request and drops the queue without answering: the server sends those
+    /// again. At once, when the agent is told to stop, so that nothing more starts while
+    /// the session closes.
+    pub(crate) fn halt(&self) {
         {
             let mut state = self.actions.shared.lock();
             state.stopping = true;
             state.queue.clear();
         }
         self.actions.shared.work.notify_one();
+    }
+
+    /// [`ActionRunner::halt`], then waits up to `timeout` for the running action, the last
+    /// writes of the journal and the last write of the mark. A run that does not end in time stays
+    /// "started" on disk and is reported interrupted at the next start; the ring and the
+    /// delivered marks since the last write are then lost.
+    pub(crate) async fn stop(self, timeout: Duration) {
+        self.halt();
         let _ = self.stop_keeper.send(true);
         let done = async {
             let _ = self.executor.await;
@@ -697,7 +703,13 @@ impl Shared {
         let left = || deadline.saturating_sub(self.clock.monotonic());
 
         for name in named_services(manifest) {
-            if let Err(refusal) = self.machine.service_allowed(name) {
+            let remaining = left();
+            let allowed = if remaining.is_zero() {
+                Err(ServiceRefusal::TimedOut)
+            } else {
+                self.machine.service_allowed(name, remaining)
+            };
+            if let Err(refusal) = allowed {
                 debug!(request = %id, ?refusal, "a service is refused by its structure");
                 return RunEnd::Refused(RejectReason::ServiceRefused);
             }
@@ -930,7 +942,7 @@ mod tests {
 
     use super::super::journal::MAX_STARTED;
     use super::super::journal::tests::{FakeJournalDisk, id};
-    use super::super::machine::{ServiceRefusal, Unsupported};
+    use super::super::machine::Unsupported;
     use super::*;
     use crate::AgentConfig;
     use crate::testkit::{FakeClock, MemoryMark};
@@ -1117,9 +1129,10 @@ path = 'C:\FakeErp\run\erp.lock'
     }
 
     impl Machine for FakeMachine {
-        fn service_allowed(&self, name: &str) -> Result<(), ServiceRefusal> {
+        fn service_allowed(&self, name: &str, remaining: Duration) -> Result<(), ServiceRefusal> {
             let mut state = self.state();
             state.calls.push(format!("service {name}"));
+            state.remaining.push(remaining);
             if state.refused.contains(&name) {
                 Err(ServiceRefusal::Structure)
             } else {
@@ -1398,14 +1411,12 @@ path = 'C:\FakeErp\run\erp.lock'
         harness.machine.state().step_takes = Duration::from_secs(25);
         let actions = harness.start().await;
         assert_eq!(outcome(&actions, request(1, RESTART)).await, succeeded());
-        // `timeout_secs = 60`: the precondition, the step, then the check 25 s later.
+        // `timeout_secs = 60`: the two services, the precondition, the step, then the check
+        // 25 s later.
+        let full = Duration::from_secs(60);
         assert_eq!(
             harness.machine.state().remaining,
-            [
-                Duration::from_secs(60),
-                Duration::from_secs(60),
-                Duration::from_secs(35)
-            ]
+            [full, full, full, full, Duration::from_secs(35)]
         );
     }
 
@@ -2191,6 +2202,28 @@ path = 'C:\FakeErp\run\erp.lock'
         );
         assert_eq!(harness.machine.steps(), 0);
         assert_eq!(harness.disk.files().started, None);
+    }
+
+    /// The moment the agent is told to stop, the queue is gone and nothing new starts, even
+    /// before the session has closed and the runner is waited for.
+    #[tokio::test(start_paused = true)]
+    async fn a_halt_drops_the_queue_at_once() {
+        let mut harness = Harness::new("");
+        let mut gate = harness.machine.gate();
+        let actions = harness.start().await;
+        actions.submit(request(1, RESTART));
+        gate.step_started().await;
+        actions.submit(request(2, CLEAR_LOCK));
+        harness.runner.as_ref().unwrap().halt();
+        actions.submit(request(3, CLEAR_LOCK));
+        harness.machine.open();
+        gate.release();
+        assert_eq!(next(&actions).await.request_id, id(3));
+        assert_eq!(next(&actions).await.outcome, succeeded());
+        settle().await;
+        assert_eq!(drain(&actions), []);
+        assert_eq!(harness.machine.steps(), 1);
+        harness.stop().await;
     }
 
     /// The twin of the test above: an action that ends in time ends as it should.

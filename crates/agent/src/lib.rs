@@ -177,6 +177,8 @@ pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future
     tokio::select! {
         () = &mut work => {}
         () = shutdown => {
+            // Nothing new starts from here, while the session closes.
+            runner.halt();
             let _ = stop.send(true);
             // Everything `work` waits on also watches the signal, so this is a matter of
             // closing the connection politely.
