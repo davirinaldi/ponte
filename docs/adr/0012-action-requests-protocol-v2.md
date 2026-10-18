@@ -79,9 +79,11 @@ The agent keeps a journal of requests on disk, keyed by `RequestId`.
 - A request is marked "started" after its preconditions pass and before its first step,
   in one write-through write. Preconditions only read the machine, so nothing has acted
   before the mark. The write is a conditional insert that fails when the id is already in
-  the journal, and that failure is answered as a duplicate, so at-most-once does not rest
-  on there being one executor. There is one anyway: for each request, the check at
-  dequeue, the preconditions, the mark and the steps happen in one turn of it. An entry found "started" with no end when the agent starts becomes
+  the journal, and that failure makes the request a duplicate, which gets the first one's
+  outcome once that ends and never an outcome of its own. At-most-once therefore does not
+  rest on there being one executor. There is one anyway: for each request, the check at
+  dequeue, the preconditions, the mark and the steps happen in one turn of it.
+- An entry found "started" with no end when the agent starts becomes
   `Failed { reason: Interrupted }` and never runs again. A crash before the mark leaves no
   entry: nothing acted, and a resend is checked from the start.
 - An entry is kept until the request's expiry plus 24 hours, and never longer than 48 hours
