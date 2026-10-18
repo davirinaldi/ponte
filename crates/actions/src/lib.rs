@@ -12,6 +12,7 @@ mod manifest;
 mod path_policy;
 mod primitive;
 mod risk;
+mod signed;
 
 pub use manifest::{
     Check, CheckList, ExpectedServiceState, Location, MAX_CHECKS, MAX_DESCRIPTION_CHARS,
@@ -20,3 +21,7 @@ pub use manifest::{
 pub use path_policy::{InvalidRoot, PathPolicy, RootRule, Roots};
 pub use primitive::Primitive;
 pub use risk::RiskLevel;
+pub use signed::{
+    MAX_CLOCK_BACK_SECS, MAX_CLOCK_SKEW_SECS, MAX_TRUSTED_KEYS, MAX_VALIDITY_SECS, TrustedKeys,
+    TrustedKeysError, VerifiedManifest, VerifyError, verify,
+};
