@@ -13,7 +13,8 @@ pub struct AgentConfig {
     /// It is written to the log: never put a secret in it.
     pub server_url: ServerUrl,
     /// Directories that file-touching actions may access. None may be a drive, a system
-    /// folder or a folder every user shares (ADR-0011).
+    /// folder or a folder every user shares, and names hold printable ASCII and Latin
+    /// letters only, without dashes or quotes from a word processor (ADR-0011).
     #[serde(default)]
     pub allowed_roots: Vec<String>,
     /// Where the agent keeps its device key and its identity. Only administrators may
