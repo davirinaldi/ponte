@@ -860,7 +860,7 @@ mod tests {
         peer.send(text(&AgentToServer::ActionResult(ActionResult {
             request_id: RequestId::new(),
             outcome: ActionOutcome::Succeeded {},
-            output: Some("nobody asked".to_owned()),
+            output: Some("nobody asked".parse().unwrap()),
             duration_ms: 1,
         })));
         peer.send(text(&heartbeat(3)));

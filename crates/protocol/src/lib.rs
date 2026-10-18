@@ -17,10 +17,13 @@ pub use ids::{DeviceId, RequestId};
 pub use keys::{EnrollmentToken, InvalidHex, Nonce, PublicKey, Signature};
 pub use manifest::{InvalidManifestText, MAX_MANIFEST_BYTES, ManifestText, SignedManifest};
 pub use messages::{
-    ActionOutcome, ActionRequest, ActionResult, AgentToServer, Initiator, ServerToAgent,
+    ActionOutcome, ActionRequest, ActionResult, AgentToServer, FailReason, Initiator, Output,
+    OutputTooLarge, RejectReason, ServerToAgent,
 };
-pub use telemetry::{DiskUsage, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot};
-pub use text::{InvalidLabel, Label};
+pub use telemetry::{
+    DiskUsage, MAX_LISTED, MemoryUsage, ServiceState, ServiceStatus, TelemetrySnapshot,
+};
+pub use text::{InvalidLabel, InvalidServiceName, Label, ServiceName};
 pub use transcript::{Transcript, enroll_transcript, hello_transcript, manifest_transcript};
 pub use version::ProtocolVersion;
 
@@ -29,12 +32,18 @@ pub use version::ProtocolVersion;
 /// version to know which fields the other side understands (ADR-0006).
 ///
 /// This is not the version of a connection. That one is negotiated: see [`ProtocolVersion`].
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// Version 2 (ADR-0012) carries the signed manifest in `RunAction`, an expiry on every
+/// request, reasons as codes, and a bound on every string.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Oldest version this build still speaks. Both sides speak every version from here to
 /// [`PROTOCOL_VERSION`]. Raising it on the server locks out every agent older than the new
 /// value, auto-update included (ADR-0007).
-pub const MIN_PROTOCOL_VERSION: u16 = 1;
+///
+/// Version 1 is not spoken any more (ADR-0012): it had no agent in the field, and keeping it
+/// would have meant two types for every message that changed.
+pub const MIN_PROTOCOL_VERSION: u16 = 2;
 
 const _: () = assert!(1 <= MIN_PROTOCOL_VERSION && MIN_PROTOCOL_VERSION <= PROTOCOL_VERSION);
 

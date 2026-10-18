@@ -132,6 +132,19 @@ mod tests {
         }
     }
 
+    /// Version 1 is gone (ADR-0012): neither side offers it nor accepts it.
+    #[test]
+    fn version_1_is_not_spoken() {
+        assert_eq!(ProtocolVersion::from_subprotocol("ponte.v1"), None);
+        assert!(ProtocolVersion::supported().all(|version| version.number() >= 2));
+        assert_eq!(
+            ProtocolVersion::supported()
+                .map(ProtocolVersion::subprotocol)
+                .collect::<Vec<_>>(),
+            ["ponte.v2"]
+        );
+    }
+
     /// A well-formed name of a version outside the range is no version at all: the server
     /// skips it in an offer and the agent refuses it as an answer.
     #[test]

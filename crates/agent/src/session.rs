@@ -10,15 +10,15 @@
 //! the server ends the connection on anything that is not the answer to its challenge.
 //!
 //! **The server is not trusted** (invariant 2 in `AGENTS.md`). Nothing it sends runs
-//! anything: `RunAction` is answered with a rejection until the agent verifies manifests
-//! (M2). `CollectNow` gets a heartbeat, but not more often than `Timing::min_collect_gap`,
+//! anything: `RunAction` is answered with `actions_disabled` until the agent verifies
+//! manifests (M2). `CollectNow` gets a heartbeat, but not more often than `Timing::min_collect_gap`,
 //! so asking fast does not turn into reading the machine fast. A message that does not
 //! parse is dropped and the session goes on (ADR-0006). The device key is not here at all:
 //! a challenge after the handshake ends the session, and so does any other handshake
 //! message.
 
 use futures_util::{Sink, Stream, StreamExt};
-use ponte_protocol::{ActionOutcome, ActionResult, AgentToServer, ServerToAgent};
+use ponte_protocol::{ActionOutcome, ActionResult, AgentToServer, RejectReason, ServerToAgent};
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 use tracing::{debug, warn};
@@ -31,8 +31,8 @@ use crate::wire::{self, Message};
 /// that keeps sending what the agent does not take must not fill the machine's disk.
 const DROPS_LOGGED: u32 = 8;
 
-/// Said to the server for every `RunAction` until the agent can verify a manifest.
-const ACTIONS_NOT_SUPPORTED: &str = "actions are not supported by this agent yet";
+/// The answer to every `RunAction` until the agent can verify a manifest.
+const REFUSAL: RejectReason = RejectReason::ActionsDisabled;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SessionEnd {
@@ -127,13 +127,11 @@ where
             Ok(ServerToAgent::RunAction(request)) => {
                 // Only the id: the rest of the request is text the server chose.
                 if drops.log_this_one() {
-                    warn!(request = %request.request_id, "action refused: {ACTIONS_NOT_SUPPORTED}");
+                    warn!(request = %request.request_id, reason = ?REFUSAL, "action refused");
                 }
                 let refusal = AgentToServer::ActionResult(ActionResult {
                     request_id: request.request_id,
-                    outcome: ActionOutcome::Rejected {
-                        reason: ACTIONS_NOT_SUPPORTED.to_owned(),
-                    },
+                    outcome: ActionOutcome::Rejected { reason: REFUSAL },
                     output: None,
                     duration_ms: 0,
                 });
@@ -179,12 +177,12 @@ impl Drops {
 mod tests {
     use std::time::Duration;
 
-    use ponte_protocol::{ActionRequest, Initiator, Nonce, RequestId};
+    use ponte_protocol::{Nonce, RequestId};
     use tokio::task::JoinHandle;
     use tokio::time::{sleep, timeout_at};
 
     use super::*;
-    use crate::testkit::{FakeCollector, Peer, Sent, device_id, pipe, stuck_sink};
+    use crate::testkit::{FakeCollector, Peer, Sent, action_request, device_id, pipe, stuck_sink};
 
     const fn secs(secs: u64) -> Duration {
         Duration::from_secs(secs)
@@ -408,14 +406,11 @@ mod tests {
         running.watch(secs(1), true).await;
 
         let request_id = RequestId::new();
-        running.peer.send(&ServerToAgent::RunAction(ActionRequest {
-            request_id,
-            manifest_id: "erp.restart-service".to_owned(),
-            manifest_version: 1,
-            initiator: Initiator::Human {
-                user_id: "u1".to_owned(),
-            },
-        }));
+        running
+            .peer
+            .send(&ServerToAgent::RunAction(Box::new(action_request(
+                request_id,
+            ))));
         let AgentToServer::ActionResult(result) = running.peer.message().await else {
             panic!("not an action result");
         };
@@ -424,7 +419,7 @@ mod tests {
             ActionResult {
                 request_id,
                 outcome: ActionOutcome::Rejected {
-                    reason: "actions are not supported by this agent yet".to_owned(),
+                    reason: RejectReason::ActionsDisabled,
                 },
                 output: None,
                 duration_ms: 0,

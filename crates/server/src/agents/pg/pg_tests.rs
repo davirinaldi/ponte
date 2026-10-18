@@ -508,36 +508,6 @@ async fn pg_a_database_that_hangs_frees_the_call_in_time(
     held.rollback().await.unwrap();
 }
 
-/// Telemetry is free text from the machine. A value the database refuses must not come
-/// back in the error, which goes to the log.
-#[sqlx::test]
-#[ignore = "needs PostgreSQL: DATABASE_URL"]
-async fn pg_an_error_carries_no_value_of_the_call(pool: PgPoolOptions, options: PgConnectOptions) {
-    let store = store(pool, options).await;
-    issue(&store, 1, 1).await;
-    let device_id = enrolled(&store, 1, [10; 32]).await;
-    let mut poisoned = telemetry(1);
-    // PostgreSQL refuses a NUL in JSON text, and the context of its error quotes the JSON
-    // around it. `tests::an_error_keeps_the_kind_and_drops_the_text` covers a message that
-    // quotes a value itself.
-    poisoned.disks.push(DiskUsage {
-        mount: "\0SECRET-CUSTOMER-RECORD".to_owned(),
-        total_bytes: 1,
-        available_bytes: 1,
-    });
-
-    let error = store
-        .heartbeat(device_id, &poisoned, at(1))
-        .await
-        .unwrap_err();
-    for text in [error.to_string(), format!("{error:?}")] {
-        assert!(!text.contains("SECRET"), "{text}");
-    }
-    assert!(matches!(error.kind(), ErrorKind::Database(_)), "{error:?}");
-    let record = store.device_record(device_id).await.unwrap().unwrap();
-    assert_eq!(record.telemetry, None);
-}
-
 /// Neither the token, nor its whole hash, nor what the machine reported, nor the database
 /// password reaches the log, whatever the level.
 #[sqlx::test]
@@ -549,7 +519,7 @@ async fn pg_logs_hold_no_secret(pool: PgPoolOptions, options: PgConnectOptions) 
     let device_id = enrolled(&store, 1, [10; 32]).await;
     let mut reported = telemetry(1);
     reported.disks.push(DiskUsage {
-        mount: "MOUNT-CHOSEN-BY-THE-MACHINE".to_owned(),
+        mount: "MOUNT-CHOSEN-BY-THE-MACHINE".parse().unwrap(),
         total_bytes: 1,
         available_bytes: 1,
     });

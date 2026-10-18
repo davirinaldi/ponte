@@ -143,8 +143,8 @@ fn snapshot_of(reading: Reading, collected_at: DateTime<Utc>) -> TelemetrySnapsh
             })
         })
         .collect();
-    disks.sort_by(|a, b| a.mount.cmp(&b.mount));
-    // With these names there are at most 27 of them, so the list needs no other limit.
+    disks.sort_by(|a, b| a.mount.as_str().cmp(b.mount.as_str()));
+    // With these names there are at most 27 of them, under the `MAX_LISTED` of the protocol.
     disks.dedup_by(|a, b| a.mount == b.mount);
 
     TelemetrySnapshot {
@@ -169,14 +169,16 @@ fn snapshot_of(reading: Reading, collected_at: DateTime<Utc>) -> TelemetrySnapsh
 /// The name a disk is reported under: `C:` for a Windows drive, `/` for the root of
 /// anything else. Every other mount point is left out, because a path can carry a user
 /// name or the label somebody gave a volume (invariant 6 in `AGENTS.md`).
-fn mount_name(mount: &str) -> Option<String> {
-    match mount.as_bytes() {
-        [b'/'] => Some("/".to_owned()),
+fn mount_name(mount: &str) -> Option<Label> {
+    let name = match mount.as_bytes() {
+        [b'/'] => "/".to_owned(),
         [letter, b':'] | [letter, b':', b'\\'] if letter.is_ascii_alphabetic() => {
-            Some(format!("{}:", char::from(letter.to_ascii_uppercase())))
+            format!("{}:", char::from(letter.to_ascii_uppercase()))
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    // Both shapes are labels already, so nothing is replaced.
+    Some(Label::from_lossy(&name))
 }
 
 /// What the agent says its operating system is, in `Enroll` and `Hello`.
@@ -231,7 +233,7 @@ mod tests {
                     used_bytes: 3,
                 },
                 disks: vec![DiskUsage {
-                    mount: "C:".to_owned(),
+                    mount: "C:".parse().unwrap(),
                     total_bytes: 10,
                     available_bytes: 4,
                 }],
@@ -287,9 +289,9 @@ mod tests {
     /// root goes out.
     #[test]
     fn only_drive_letters_and_the_root_are_reported() {
-        assert_eq!(mount_name(r"C:\").as_deref(), Some("C:"));
-        assert_eq!(mount_name("d:").as_deref(), Some("D:"));
-        assert_eq!(mount_name("/").as_deref(), Some("/"));
+        assert_eq!(mount_name(r"C:\").as_ref().map(Label::as_str), Some("C:"));
+        assert_eq!(mount_name("d:").as_ref().map(Label::as_str), Some("D:"));
+        assert_eq!(mount_name("/").as_ref().map(Label::as_str), Some("/"));
         for left_out in [
             "",
             r"C:\Users\someone\mounted",
@@ -346,7 +348,10 @@ mod tests {
         assert!(snapshot.disks.len() <= 27);
         for disk in &snapshot.disks {
             assert!(disk.available_bytes <= disk.total_bytes, "{disk:?}");
-            assert!(disk.mount == "/" || disk.mount.len() == 2, "{disk:?}");
+            assert!(
+                disk.mount.as_str() == "/" || disk.mount.as_str().len() == 2,
+                "{disk:?}"
+            );
         }
         assert!(snapshot.services.is_empty());
 
