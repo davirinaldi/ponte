@@ -28,7 +28,7 @@
 //!
 //! What ends before "started" is recorded in the ring of the journal, except the refusals
 //! that describe the agent (no keys, a full queue or journal, a journal or a clock that
-//! cannot be trusted, a stop).
+//! cannot be trusted, a stop) and a service the machine could not read, or not in time.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -456,6 +456,9 @@ impl Actions {
 enum RunEnd {
     /// Ended before "started": recorded in the ring unless it describes the agent.
     Refused(RejectReason),
+    /// Ended before "started" on something the machine could not answer then, such as a
+    /// service it could not read in time: sent, never recorded, so a copy is decided again.
+    NotRecorded(RejectReason),
     /// The journal knows the id already: its answer is the answer.
     Duplicate,
     /// Started, ran and ended: recorded already.
@@ -640,6 +643,16 @@ impl Shared {
         match run {
             Ok(RunEnd::Done) => {}
             Ok(RunEnd::Refused(reason)) => self.end_before_start(&request, reason, began),
+            Ok(RunEnd::NotRecorded(reason)) => {
+                let refusal = rejected(
+                    id,
+                    reason,
+                    millis(self.clock.monotonic().saturating_sub(began)),
+                );
+                let mut state = self.lock();
+                self.log_refusal(&mut state, id, reason);
+                self.push_unrecorded(&mut state, refusal);
+            }
             Ok(RunEnd::Duplicate) => self.answer_known(id),
             // Only in a build that unwinds. Whether a step acted is not known, so the
             // request ends interrupted, as after a crash.
@@ -734,9 +747,17 @@ impl Shared {
             } else {
                 self.machine.service_allowed(name, remaining)
             };
-            if let Err(refusal) = allowed {
-                debug!(request = %id, ?refusal, "a service is refused by its structure");
-                return RunEnd::Refused(RejectReason::ServiceRefused);
+            match allowed {
+                Ok(()) => {}
+                Err(ServiceRefusal::Structure) => {
+                    debug!(request = %id, "a service is refused by its structure");
+                    return RunEnd::Refused(RejectReason::ServiceRefused);
+                }
+                // The machine, not the request: decided again if it comes back.
+                Err(refusal @ (ServiceRefusal::Unreadable | ServiceRefusal::TimedOut)) => {
+                    debug!(request = %id, ?refusal, "a service could not be read");
+                    return RunEnd::NotRecorded(RejectReason::ServiceRefused);
+                }
             }
         }
         for (index, check) in manifest.preconditions.iter().enumerate() {
@@ -1077,6 +1098,8 @@ path = 'C:\FakeErp\run\erp.lock'
     struct MachineState {
         /// Services refused by their structure.
         refused: Vec<&'static str>,
+        /// Services the machine could not read, or not in time.
+        unread: Vec<(&'static str, ServiceRefusal)>,
         /// Answers to checks, in order; after them every check holds.
         checks: VecDeque<Result<bool, CheckError>>,
         /// Answers to steps, in order; after them every step works.
@@ -1164,9 +1187,11 @@ path = 'C:\FakeErp\run\erp.lock'
             state.calls.push(format!("service {name}"));
             state.remaining.push(remaining);
             if state.refused.contains(&name) {
-                Err(ServiceRefusal::Structure)
-            } else {
-                Ok(())
+                return Err(ServiceRefusal::Structure);
+            }
+            match state.unread.iter().find(|(unread, _)| *unread == name) {
+                Some((_, refusal)) => Err(*refusal),
+                None => Ok(()),
             }
         }
 
@@ -1772,6 +1797,43 @@ path = 'C:\FakeErp\run\erp.lock'
         );
     }
 
+    /// A service the machine could not read, or not in time, says something about the
+    /// machine at that moment, not about the request: the refusal is sent and not recorded,
+    /// so a copy is decided again. A refusal by structure is recorded like any other.
+    #[tokio::test(start_paused = true)]
+    async fn a_service_that_could_not_be_read_is_refused_and_not_recorded() {
+        for refusal in [ServiceRefusal::Unreadable, ServiceRefusal::TimedOut] {
+            let mut harness = Harness::new("");
+            let actions = harness.start().await;
+            harness.machine.state().unread.push(("FakeErp", refusal));
+            assert_eq!(
+                outcome(&actions, request(1, RESTART)).await,
+                refused(RejectReason::ServiceRefused),
+                "{refusal:?}"
+            );
+            harness.machine.state().unread.clear();
+            assert_eq!(
+                outcome(&actions, request(1, RESTART)).await,
+                succeeded(),
+                "{refusal:?}"
+            );
+        }
+
+        let mut harness = Harness::new("");
+        let actions = harness.start().await;
+        harness.machine.state().refused.push("FakeErp");
+        assert_eq!(
+            outcome(&actions, request(1, RESTART)).await,
+            refused(RejectReason::ServiceRefused)
+        );
+        harness.machine.state().refused.clear();
+        assert_eq!(
+            outcome(&actions, request(1, RESTART)).await,
+            refused(RejectReason::ServiceRefused)
+        );
+        assert_eq!(harness.machine.steps(), 0);
+    }
+
     /// The compiled list wins over the configuration: a refused service is refused, not
     /// "not allowed", and never reaches the machine.
     #[tokio::test(start_paused = true)]
@@ -1808,6 +1870,11 @@ path = 'C:\FakeErp\run\erp.lock'
         );
         harness.stop().await;
         assert_eq!(harness.disk.files().started, None);
+        // Recorded: a server sending them again gets the stored answers, decided once.
+        let ended = harness.disk.files().ended.clone().unwrap();
+        for n in 1..=3 {
+            assert!(ended.contains(&id(n).to_string()), "{n}");
+        }
     }
 
     // ----- At most once ----------------------------------------------------------------
