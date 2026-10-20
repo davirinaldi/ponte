@@ -13,7 +13,8 @@ use ponte_actions::{Check, Primitive};
 
 /// Why a service may not be touched, read from the service manager when the action runs
 /// (ADR-0011): its type, its protection or where its binary lies, or that it could not be
-/// read at all.
+/// read at all. A service that does not exist is refused by `Structure`; `Unreadable` and
+/// `TimedOut` describe the machine at that moment and are not recorded (ADR-0013).
 #[cfg_attr(
     not(test),
     expect(
@@ -75,8 +76,10 @@ pub(crate) trait Machine: Send + Sync + 'static {
 pub(crate) struct Unsupported;
 
 impl Machine for Unsupported {
+    /// Refused as by structure, so the refusal is recorded: a server cannot make the agent
+    /// decide the same request again and again on a platform that runs nothing.
     fn service_allowed(&self, _: &str, _: Duration) -> Result<(), ServiceRefusal> {
-        Err(ServiceRefusal::Unreadable)
+        Err(ServiceRefusal::Structure)
     }
 
     fn check(&self, _: &Check, _: Duration) -> Result<bool, CheckError> {
