@@ -147,6 +147,12 @@ the machine is not trusted, and runs code beside a SYSTEM process.
   root as the roots resolved at start (`roots.rs`); `\\?\UNC` and volumes with no letter
   are refused, and `delete_file` deletes through the handle it checked. `path_absent` holds
   only for "file not found" and "path not found".
+- **No reparse point is followed on the way.** A root is walked from its drive without
+  following one, must resolve to itself and is recorded by its file id; a root that fails is
+  left out, never a reason to refuse the start. Every check or delete walks again from the
+  drive, holding each folder (listing access, no delete sharing) for that operation only,
+  and the root on the way must be the recorded folder. Nothing is held between actions, so
+  installers may rename an ERP's folders.
 - **Writes are written through**: a new temporary file, flushed, renamed over the old one
   through its own handle (`FileRenameInfo`), then flushed again, which commits the rename
   on NTFS (`MOVEFILE_WRITE_THROUGH` only promises that for a copy). A write never makes a
