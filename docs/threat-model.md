@@ -76,6 +76,16 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
   escape: nothing runs beside it. Opening without waiting on an oplock needs `NtCreateFile`
   with `FILE_COMPLETE_IF_OPLOCKED`, which the agent does not call yet; the threat model
   review of M5 decides.
+- From step 5 of M2, the folders on the way to a manifest's path are held during a check or
+  a delete, which stops renames but not a reparse point set on an empty folder a user may
+  write. After the walk, the final open by name would cross it before the check of where
+  the path ended refuses it. Junctions reach only local folders, so what is left is a
+  directory symbolic link to another machine, which makes SYSTEM authenticate there: only
+  where users may create symbolic links (Developer Mode, or the privilege granted). Opening
+  relative to the held folder (`NtCreateFile` with `OBJ_DONT_REPARSE`) would close it and
+  waits for the review of M5; the install guidance is to keep symbolic links to
+  administrators and remote-to-local evaluation off (`fsutil behavior set
+  SymlinkEvaluation`).
 - Until M3 nothing ties a request to a person. A compromised server, or whoever terminates
   TLS in front of it, can run any manifest that is signed, unexpired and allowed by a
   device's local policy, at a moment of its choosing, up to the rate limits (ADR-0012).
