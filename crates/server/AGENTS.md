@@ -5,7 +5,8 @@ MCP server for models, helpdesk connectors.
 
 - Keep handlers thin: parse and authorize, call a domain function, map the result to HTTP.
 - `router()` in `lib.rs` must stay constructible without a network or database, so tests can
-  drive it in-process (see `tests/http.rs`).
+  drive it in-process (see `tests/http.rs`). Inside a Tokio runtime it also starts the sweep
+  that sends queued actions (`agents::delivery`); outside one it serves and sends nothing.
 - Database (from milestone M1): PostgreSQL via `sqlx`, migrations in `crates/server/migrations`.
   Never edit a migration that has been merged; add a new one.
 - Every state-changing operation writes an audit event with actor (human or AI), device,
@@ -81,10 +82,66 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
 - Tests run without a socket (`testkit::Peer`) and with a paused clock. Tests named
   `ws_loopback_*` bind `127.0.0.1` and cover only what needs a real socket.
 
+## Actions (`src/agents/delivery.rs`, `src/agents/store/actions.rs`)
+
+ADR-0010 and ADR-0012 say what the server does with signed manifests and requests. Nothing
+here can make an agent run anything: the agent verifies the signature with its own keys and
+applies its own policy (invariant 2). These rules keep the server's own state honest, and
+its log clean.
+
+- **Two traits, as for devices.** `ActionStore` is what delivery needs (claim, release,
+  `unanswered`, `finish`, `expire`); `ActionAdmin` adds what an operator does (keys,
+  catalog, requests, cancel). Sessions and the sweep are generic over `ActionStore` only:
+  nothing a device sends reaches a method that trusts a key or queues a request. Every rule
+  is a scenario in `store/action_scenarios.rs`, run on both stores.
+- **Only an active device is sent anything** (RF-49, RF-04): checked when a request is
+  queued and again in the statement that claims it.
+- **One request in flight per device.** The sweep claims a device's oldest queued request
+  only when it has no other request sent, unanswered and unexpired. What waits stays
+  `queued`, where it can still be cancelled; a sent request that expired with no answer no
+  longer holds the turn. Across devices the oldest go first, at most
+  `MAX_CLAIMED_PER_SWEEP` a sweep.
+- **Claiming, cancelling and expiring each recheck `status = 'queued'` on the row they
+  write**, outside any `LIMIT` subquery: whichever commits first wins, never both. A result
+  is judged inside a transaction that holds the row (`FOR UPDATE`), so two answers to one
+  request take turns. Queueing locks the device's row, and adding a key the table, so the
+  limits (16 open requests per device, four keys) hold under concurrent calls. The tests in
+  `pg/pg_action_tests.rs` hold a row in an open transaction to make each race happen.
+- **A result is stored only from the request's device and only for a `sent` request.** A
+  second answer is judged by `store::actions::judge`: identical (same status, reason and
+  step) is a copy, at `debug`; different is an anomaly, at `warn`, and changes nothing,
+  except that a later answer replaces one of the six refusals the agent sends without
+  recording them (`describes_the_agent`): they say a copy did not run, not that the request
+  never will.
+- **A store that fails never ends a session over a result.** The request stays `sent` and
+  the next session sends it again; the agent answers from its journal. Ending the session
+  would bring the same result back in a loop.
+- **A request that never reached a connection goes back to the queue** (`release`), and
+  `action_sent` is audited only once a session has it. A session that starts sends again
+  what its device never answered (`unanswered`: still trusted keys, at most four, unexpired
+  first, none expired for more than 23 hours).
+- **Bounds on what a device sends:** 32 results a minute per session reach the store; a
+  `duration_ms` past `i64::MAX` is dropped before it; lines about dropped results and
+  anomalies are 8 per session and 8 every 10 minutes per device (`DeviceLogs`).
+- **`output` is text from the machine.** It is stored (64 KiB at most, checked by the
+  database too) and never logged or printed: audit events carry codes, the step index and
+  the duration, and `action show` gives its size. A manifest's text, title and descriptions
+  are never logged or printed either: ids, versions, risk, dates and hashes are.
+- **Dates of the wire are `bigint` seconds**, converted with `try_from` both ways and
+  refused, never saturated, when they do not fit.
+
 ## Operator subcommands (`src/admin.rs`)
 
 Until the console exists, `ponte-server <subcommand>` is how an operator adds customers,
-issues and revokes tokens, and approves and revokes devices (`ponte-server help`).
+issues and revokes tokens, approves and revokes devices, trusts manifest keys, fills the
+catalog and asks for actions (`ponte-server help`).
+
+- **`catalog add` verifies against the server's keys**, never the key the envelope names,
+  with the same `ponte_actions::verify` the agent runs (expired, not yet valid and shapeless
+  envelopes are refused). The file is read bounded and parse errors never quote it.
+  `catalog key add` refuses a key that would make the whole list unusable to `verify` (weak,
+  not a point, a fifth one). `action run` verifies the envelope it picks once more: the
+  newest `issued_at` that verifies, of the highest version unless `--version` names one.
 
 - **A token is shown once, in a file, and nowhere else.** `token create` makes it from the
   operating system's random bytes and writes it to a new file (`--out`, never over an

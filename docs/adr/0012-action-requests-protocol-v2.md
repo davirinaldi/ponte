@@ -258,6 +258,53 @@ right. The code follows this section.
     answered `ServiceRefused` and not recorded, like the refusals that describe the agent
     (ADR-0011, "Step 5 of M2 settled the details").
 
+### Step 6 of M2 settled the details
+
+Building the server's queue showed where the text above was not enough. The code follows
+this section; `crates/server/AGENTS.md` keeps the rules.
+
+- **One request in flight per device.** The sweep claims a device's oldest queued request
+  only when no other request of that device is sent, unanswered and not expired. The agent
+  runs one at a time anyway, and what waits on the server stays `queued`, where an operator
+  can still cancel it. A sent request that expired with no answer no longer holds the turn,
+  so one the agent cannot read (ADR-0010) blocks the device for its validity at most.
+  Across devices the oldest requests go first, at most 64 a sweep.
+- **Who may be sent what.** Only an active device, checked when a request is queued and
+  again in the statement that claims it, and only an envelope signed by a key the server
+  still trusts (`catalog key remove` stops what was already queued, which then expires).
+- **Limits.** At most 16 open requests per device, counting queued ones and sent ones that
+  have not expired; a sent one that expired unanswered does not count, or an agent that
+  never answers would lock its device out for good. `--minutes` is 1 to 1440, 60 by
+  default.
+- **"Sends again every request it marked `sent`"** became: when a session starts, the sent
+  requests of that device with no answer, signed by a key still trusted, the unexpired
+  first, at most four, none expired for more than 23 hours. Older ones stay `sent` with no
+  answer: the agent forgets a request a day past its expiry, and a resend would then get a
+  `request_expired` that may not be what happened. The window protects the record, not the
+  machine: the agent refuses what has expired on its own.
+- **A request that never reached a connection goes back to the queue.** The sweep marks a
+  request sent before its session has it; if the session is gone or not taking requests,
+  the request returns to `queued`, and `action_sent` is audited only once a session holds it.
+- **Identical** means the same status, reason and step. The duration and the `output` do
+  not count: the journal answers with what it recorded, without the `output`.
+- **The refusals that describe the agent can be replaced.** `actions_disabled`,
+  `queue_full`, `shutting_down`, `journal_full`, `journal_unavailable` and
+  `clock_went_back` say that the copy which got them did not run, not that the request never
+  will: another copy may still wait in the agent's queue. A later answer of the same device
+  replaces one of them once, audited with `replaced`; any other second answer that differs
+  is the anomaly above and changes nothing.
+- **A store that fails never ends a session over a result.** The request stays `sent` and is
+  sent again at the next session; ending the session would bring the same result back in a
+  loop. Results that reach the store are bounded to 32 a minute per session, and lines about
+  dropped results and anomalies to 8 per session and 8 every 10 minutes per device, so a
+  noisy device can neither tie up the database's connections nor silence another device.
+- **Atomicity.** Claiming, cancelling and expiring each check `status = 'queued'` again on
+  the row they write, so whichever commits first wins; a result is judged in a transaction
+  that holds its row, so two answers to one request (a session that was replaced, and the
+  new one) take turns.
+- Results for a `sent` request are taken after its expiry: the agent may have run it in
+  time and answered late.
+
 ## Consequences
 
 - Every agent must be updated at once, and M1 lab machines on Windows enroll again. That
