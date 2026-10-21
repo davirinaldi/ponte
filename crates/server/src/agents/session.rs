@@ -333,7 +333,12 @@ where
     } in unanswered
     {
         let request_id = request.request_id;
-        send_within(gateway.limits.write, sink, &ServerToAgent::RunAction(request)).await?;
+        send_within(
+            gateway.limits.write,
+            sink,
+            &ServerToAgent::RunAction(request),
+        )
+        .await?;
         audit::record(&AuditEvent::ActionSent {
             request: request_id,
             device,
@@ -491,7 +496,12 @@ async fn take_result<D: ActionStore>(
                 );
             }
         }
-        Ok(why @ (Finish::NotSent | Finish::OtherDevice | Finish::Unknown)) => {
+        Ok(
+            why @ (Finish::NotSent
+            | Finish::OtherDevice
+            | Finish::DeviceNotActive
+            | Finish::Unknown),
+        ) => {
             if may_log() {
                 warn!(device = %id, %request, ?why, "action result dropped: not a request this device was sent");
             }
@@ -1565,7 +1575,10 @@ mod tests {
             peer.receive().await,
             Some(Sent::Message(ServerToAgent::Welcome {}))
         );
-        inner.add_signing_key(manifest_public(1), at(0)).await.unwrap();
+        inner
+            .add_signing_key(manifest_public(1), at(0))
+            .await
+            .unwrap();
         let entry = catalog_entry(1, "erp.restart-service", 1, 0);
         inner.add_manifest(&entry, at(0)).await.unwrap();
         let request = RequestId::new();

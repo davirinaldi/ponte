@@ -300,6 +300,8 @@ pub enum Finish {
     NotSent,
     /// The request belongs to another device.
     OtherDevice,
+    /// The device is no longer active: a revoked key writes no outcome (RF-04, RF-49).
+    DeviceNotActive,
     /// No such request.
     Unknown,
 }
@@ -421,6 +423,22 @@ fn is_about_the_agent(outcome: &ActionOutcome) -> bool {
     matches!(outcome, ActionOutcome::Rejected { reason } if describes_the_agent(*reason))
 }
 
+/// The code of an outcome's reason as the wire and the database spell it (`queue_full`),
+/// and the index of its step.
+pub(crate) fn reason_of(outcome: &ActionOutcome) -> (Option<String>, Option<u8>) {
+    let code = |value: serde_json::Result<serde_json::Value>| match value {
+        Ok(serde_json::Value::String(code)) => Some(code),
+        _ => None,
+    };
+    match outcome {
+        ActionOutcome::Failed { reason, step } => (code(serde_json::to_value(reason)), *step),
+        ActionOutcome::Rejected { reason } => (code(serde_json::to_value(reason)), None),
+        ActionOutcome::Succeeded {} | ActionOutcome::Cancelled {} | ActionOutcome::TimedOut {} => {
+            (None, None)
+        }
+    }
+}
+
 /// Seconds since the Unix epoch, as a store keeps them.
 pub(crate) fn secs(now: DateTime<Utc>) -> i64 {
     now.timestamp()
@@ -464,7 +482,7 @@ pub trait ActionStore: DeviceStore {
     ) -> impl Future<Output = Result<Vec<Outgoing>, Self::Error>> + Send;
 
     /// Stores what `device` answered, in one atomic step. Only the device the request was
-    /// for, only a request that was sent. An answer to a request that already has one is
+    /// for, while it is active, only a request that was sent. An answer to a request that already has one is
     /// [`Finish::Repeated`] or [`Finish::Conflicting`] and changes nothing, unless the
     /// stored one is a refusal that [`describes_the_agent`]: then it is replaced.
     fn finish(
@@ -717,11 +735,15 @@ impl ActionStore for MemoryStore {
         now: DateTime<Utc>,
     ) -> Result<Finish, Self::Error> {
         let mut inner = self.lock();
+        let active = inner.device_is_active(device);
         let Some(record) = inner.requests.get_mut(&result.request_id) else {
             return Ok(Finish::Unknown);
         };
         if record.device != device {
             return Ok(Finish::OtherDevice);
+        }
+        if !active {
+            return Ok(Finish::DeviceNotActive);
         }
         let (judged, sent_at) = match &record.state {
             RequestState::Sent { at } => (judge(Stored::Sent, &result.outcome), *at),

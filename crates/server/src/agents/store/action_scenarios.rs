@@ -36,6 +36,7 @@ macro_rules! for_each_action_scenario {
         $test!(requests_that_got_no_answer_are_sent_again);
         $test!(a_request_that_never_reached_the_connection_goes_back_to_the_queue);
         $test!(requests_are_listed_newest_first);
+        $test!(a_revoked_device_writes_no_outcome);
         $test!(a_claim_whose_answer_was_lost_is_put_back_and_nothing_else);
     };
 }
@@ -732,9 +733,7 @@ pub(crate) async fn a_request_that_never_reached_the_connection_goes_back_to_the
 
 /// What one claim marked, if its answer was lost, goes back to the queue; what another
 /// claim marked, or what was answered since, stays as it is.
-pub(crate) async fn a_claim_whose_answer_was_lost_is_put_back_and_nothing_else<
-    S: ActionAdmin,
->(
+pub(crate) async fn a_claim_whose_answer_was_lost_is_put_back_and_nothing_else<S: ActionAdmin>(
     store: &S,
 ) {
     let entry = catalog(store).await;
@@ -758,6 +757,20 @@ pub(crate) async fn a_claim_whose_answer_was_lost_is_put_back_and_nothing_else<
     assert_eq!(state(store, other).await, RequestState::Sent { at: at(2) });
     assert_eq!(state(store, answered).await.name(), "succeeded");
     assert_eq!(store.unclaim(at(3)).await.unwrap(), 0);
+}
+
+/// RF-04: a revoked key may still hold a connection for a moment; it writes no outcome.
+pub(crate) async fn a_revoked_device_writes_no_outcome<S: ActionAdmin>(store: &S) {
+    let entry = catalog(store).await;
+    let device = active(store, 1).await;
+    let id = ask(store, device, &entry).await;
+    assert_eq!(claim(store, &[device], 1).await, [id]);
+    assert!(store.revoke_device(device).await.unwrap());
+    assert_eq!(
+        finish(store, device, id, succeeded()).await,
+        Finish::DeviceNotActive
+    );
+    assert_eq!(state(store, id).await, RequestState::Sent { at: at(1) });
 }
 
 pub(crate) async fn requests_are_listed_newest_first<S: ActionAdmin>(store: &S) {

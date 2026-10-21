@@ -298,7 +298,7 @@ async fn a_result_is_stored_and_audited_without_its_output() {
 
     let logs = logs.text();
     assert!(logs.contains("event=\"action_finished\""), "{logs}");
-    assert!(logs.contains("reason=ServiceNotAllowed"), "{logs}");
+    assert!(logs.contains("reason=service_not_allowed"), "{logs}");
     assert!(!logs.contains("SECRET"), "{logs}");
 }
 
@@ -563,7 +563,10 @@ async fn a_peer_that_stops_reading_is_disconnected_at_the_write_deadline() {
     stalled.finished().await;
     assert_eq!(started.elapsed(), Limits::default().write);
     assert_eq!(store.record(id).unwrap().online, None);
-    assert_eq!(state(&store, request).await, RequestState::Sent { at: at(0) });
+    assert_eq!(
+        state(&store, request).await,
+        RequestState::Sent { at: at(0) }
+    );
 }
 
 /// A queued request that expires is marked so by the sweep, and audited.

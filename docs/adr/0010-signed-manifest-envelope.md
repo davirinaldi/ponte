@@ -154,8 +154,11 @@ Step 6 of M2 settled the server's side:
   reason.
 - Without `--version`, `action run` takes the highest version that has an envelope that
   verifies now; with it, that version. Either way the envelope is verified again when it is
-  picked, so a catalog row changed in the database is not sent, and an envelope whose key
-  was removed is not sent either, even when it was queued before the removal.
+  picked, so `action run` never queues a row changed in the database under the name it
+  claims. The sweep sends a queued request's envelope as the row holds it then, without
+  verifying it again: the agent verifies whatever arrives, and a server that can change the
+  database can send anything anyway (ADR-0012). An envelope whose key was removed is not
+  sent, even when it was queued before the removal.
 - The catalog keeps envelopes whose key was removed (requests point at them); listings say
   which can be sent.
 - The server keeps no high-water mark of its clock: it passes its clock as both `now` and

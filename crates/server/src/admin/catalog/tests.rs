@@ -496,7 +496,7 @@ async fn requests_are_shown_listed_and_cancelled_while_queued() {
 
     let (_, out) = run_on(&store, Command::ActionShow { request: sent }).await;
     assert!(
-        out.contains("status    rejected ServiceNotAllowed"),
+        out.contains("status    rejected service_not_allowed"),
         "{out}"
     );
     assert!(out.contains("duration  12 ms"), "{out}");

@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::handshake::{Claim, Rejection};
 use super::session::SessionEnd;
-use super::store::actions::{EnvelopeHash, ManifestId, outcome_name};
+use super::store::actions::{EnvelopeHash, ManifestId, outcome_name, reason_of};
 use super::store::{CustomerId, DeviceStatus, SessionId, TokenHash};
 
 /// The `tracing` target of every audit event.
@@ -298,11 +298,7 @@ pub(crate) fn record(event: &AuditEvent) {
             replaced,
         } => {
             // Codes and the step's index, never text: the outcome carries none.
-            let (reason, step) = match outcome {
-                ActionOutcome::Failed { reason, step } => (Some(format!("{reason:?}")), *step),
-                ActionOutcome::Rejected { reason } => (Some(format!("{reason:?}")), None),
-                _ => (None, None),
-            };
+            let (reason, step) = reason_of(outcome);
             info!(
                 target: TARGET,
                 event = "action_finished",
