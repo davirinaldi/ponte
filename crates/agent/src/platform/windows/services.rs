@@ -430,6 +430,7 @@ mod tests {
             r"\\server\share\erp.exe",
             r"\\?\C:\FakeErp\fake-erp.exe",
             r"%ProgramFiles%\FakeErp\fake-erp.exe",
+            r"C:\FakeErp\%UNSET%\fake-erp.exe",
             r"C:\FakeErp\fake-erp.bat",
             r"C:\FakeErp\fake-erp",
             r"C:\fake-erp.exe\..\x.exe",
@@ -477,6 +478,26 @@ mod tests {
             .find(|answer| **answer != Err(Refused::Missing))
             .expect("no protected service on this machine");
         assert_eq!(*first, Err(Refused::Protected));
+    }
+
+    /// A binary path that leads into the Windows folder through a junction is in the
+    /// Windows folder: where it resolves decides, not how it is written.
+    #[test]
+    fn a_binary_reached_through_a_junction_into_windows_is_refused() {
+        let windows = windows_folder().unwrap();
+        let dir = crate::testkit::TempDir::new();
+        let link = dir.path().join("erp");
+        let system32 = format!(r"{}\System32", windows[1].to_text().unwrap());
+        crate::platform::windows::files::tests::junction(&link, Path::new(&system32));
+        let binary = link.join("cmd.exe");
+        assert_eq!(
+            check_binary(binary.to_str().unwrap(), &windows),
+            Err(Refused::InWindows)
+        );
+        assert_eq!(
+            check_binary(&format!(r"{system32}\cmd.exe"), &windows),
+            Err(Refused::InWindows)
+        );
     }
 
     #[test]
