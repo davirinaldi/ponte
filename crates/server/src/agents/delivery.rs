@@ -10,9 +10,11 @@
 //! Nothing here can make a request run: the agent verifies the signature, the validity and
 //! its own policy (ADR-0003). What is guarded here is the server's own state, and its log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError, Weak};
 use std::time::Duration;
+
+use chrono::{DateTime, TimeDelta, Utc};
 
 use ponte_protocol::DeviceId;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -28,6 +30,38 @@ pub(crate) const SWEEP_EVERY: Duration = Duration::from_millis(500);
 
 /// While the store keeps failing, one line every this many sweeps: one a minute.
 const FAILURES_LOGGED_EVERY: u32 = 120;
+
+/// How long the requests of a claim that failed are put back, sweep after sweep. A claim
+/// given up at `CALL_LIMIT` may still be committing in the database, and an `unclaim` that
+/// runs before that commit finds nothing: only a later one puts its requests back. The
+/// database's own limits (5 s a statement, 10 s idle in a transaction) end such a claim
+/// well inside this.
+const UNCLAIM_FOR: TimeDelta = TimeDelta::seconds(60);
+
+/// The most claims that failed kept for [`UNCLAIM_FOR`]: two minutes of sweeps whose claim
+/// takes the whole `CALL_LIMIT`.
+const MAX_FAILED_CLAIMS: usize = 16;
+
+/// The instants of the claims that failed recently, oldest first.
+#[derive(Debug, Default)]
+pub(crate) struct FailedClaims(Mutex<VecDeque<DateTime<Utc>>>);
+
+impl FailedClaims {
+    fn add(&self, at: DateTime<Utc>) {
+        let mut claims = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if claims.len() == MAX_FAILED_CLAIMS {
+            claims.pop_front();
+        }
+        claims.push_back(at);
+    }
+
+    /// Those still to put back at `now`; the older ones are forgotten.
+    fn due(&self, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+        let mut claims = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        claims.retain(|at| now - *at < UNCLAIM_FOR);
+        claims.iter().copied().collect()
+    }
+}
 
 /// Sweeps until the router that owns `gateway` is gone.
 pub(crate) async fn run<D: ActionStore>(gateway: Weak<Gateway<D>>) {
@@ -56,9 +90,19 @@ pub(crate) async fn run<D: ActionStore>(gateway: Weak<Gateway<D>>) {
     }
 }
 
-/// One sweep: expire, claim, hand over.
+/// One sweep: put back what failed claims marked, expire, claim, hand over.
 pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(), D::Error> {
     let now = gateway.now();
+    for claimed_at in gateway.failed_claims.due(now) {
+        // Logged at `debug`: while the database fails, the sweep's own error says so.
+        match gateway.store.unclaim(claimed_at).await {
+            Ok(0) => {}
+            Ok(count) => warn!(count, "requests of a claim that failed were queued again"),
+            Err(error) => {
+                debug!(%error, "the requests of a claim that failed are not queued again yet")
+            }
+        }
+    }
     for (request, device) in gateway.store.expire(now).await? {
         audit::record(&AuditEvent::ActionExpired { request, device });
     }
@@ -70,10 +114,12 @@ pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(
     let claimed = match gateway.store.claim_due(&online, now).await {
         Ok(claimed) => claimed,
         Err(error) => {
-            // The claim may have committed and lost its answer: whatever it marked would
-            // stay `sent`, delivered to nobody, until each device's next session.
+            // The claim may have committed, or may commit yet, and lost its answer: what it
+            // marked would stay `sent`, delivered to nobody, until each device's next
+            // session. It is put back now, and again by the next sweeps.
+            gateway.failed_claims.add(now);
             if let Err(again) = gateway.store.unclaim(now).await {
-                warn!(error = %again, "the requests of a claim that failed could not be queued again");
+                debug!(error = %again, "the requests of a claim that failed are not queued again yet");
             }
             return Err(error);
         }
