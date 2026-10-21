@@ -14,10 +14,15 @@ mod unsupported;
 #[cfg(not(windows))]
 pub use unsupported::NAME;
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs::{self, File};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(not(windows))]
+use std::{
+    fs::OpenOptions,
+    io::{Read, Write},
+};
 
 use ponte_actions::Roots;
 
@@ -45,8 +50,17 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 
 /// Writes `bytes` to `path` so that whoever reads it later, after a crash or a power cut
 /// included, finds the old content or the new one and never a part of either. Where files
-/// have modes, only the owner can read the result.
+/// have modes, only the owner can read the result. On Windows the folder must exist, the
+/// rename is written through and a link is never followed (`windows::files`).
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows::files::write_private(path, bytes);
+    #[cfg(not(windows))]
+    write_private_here(path, bytes)
+}
+
+#[cfg(not(windows))]
+fn write_private_here(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = match path.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
@@ -79,8 +93,17 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Reads the file at `path` if it has at most `max` bytes. `None` if there is no such
 /// file, and `InvalidData` if it is larger: what the agent reads has a known size, and a
-/// path that points somewhere else must not be pulled into memory.
+/// path that points somewhere else must not be pulled into memory. On Windows it must be a
+/// regular file of one link on a disk, and a link at the path is refused, not followed.
 pub(crate) fn read_bounded(path: &Path, max: usize) -> io::Result<Option<Vec<u8>>> {
+    #[cfg(windows)]
+    return windows::files::read_bounded(path, max);
+    #[cfg(not(windows))]
+    read_bounded_here(path, max)
+}
+
+#[cfg(not(windows))]
+fn read_bounded_here(path: &Path, max: usize) -> io::Result<Option<Vec<u8>>> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -95,6 +118,31 @@ pub(crate) fn read_bounded(path: &Path, max: usize) -> io::Result<Option<Vec<u8>
     Ok(Some(bytes))
 }
 
+/// Removes the file at `path`, if there is one. On Windows only a regular file of one link
+/// is removed, through the handle that was checked.
+pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows::files::remove(path);
+    #[cfg(not(windows))]
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Opens, creating it if needed, a file held for the life of the process to lock it.
+pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
+    #[cfg(windows)]
+    return windows::files::open_lock(path);
+    #[cfg(not(windows))]
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +152,7 @@ mod tests {
     fn a_write_replaces_the_file_and_leaves_nothing_else_behind() {
         let dir = TempDir::new();
         let path = dir.path().join("nested").join("identity.toml");
+        create_private_dir(path.parent().unwrap()).unwrap();
 
         write_private(&path, b"first").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"first");

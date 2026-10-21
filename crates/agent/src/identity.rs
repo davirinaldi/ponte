@@ -450,10 +450,7 @@ impl Disk for DataDir {
         let Some(token) = &self.token else {
             return Ok(());
         };
-        match std::fs::remove_file(token) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-            _ => Ok(()),
-        }
+        platform::remove_file(token)
     }
 }
 
@@ -1082,6 +1079,8 @@ mod tests {
     fn an_identity_survives_on_a_real_disk() {
         let dir = TempDir::new();
         let data = dir.path().join("data");
+        // The agent makes it when it starts.
+        platform::create_private_dir(&data).unwrap();
         let token_file = dir.path().join("enrollment-token");
         std::fs::write(&token_file, format!("{}\n", token(1).expose_hex())).unwrap();
         let open = || IdentityStore::new(DataDir::new(&data, Some(&token_file)));
