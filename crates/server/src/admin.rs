@@ -11,6 +11,8 @@
 //! ponte-server device list [<customer-id>]
 //! ponte-server device approve <device-id>
 //! ponte-server device revoke <device-id>
+//! ponte-server catalog ...                             keys, manifests (see `catalog`)
+//! ponte-server action ...                              requests (see `catalog`)
 //! ```
 //!
 //! **A token is shown once, to a file, and nowhere else.** `token create` writes it to a new
@@ -27,13 +29,19 @@ use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, SubsecRound, TimeDelta, Utc};
-use ponte_protocol::{DeviceId, EnrollmentToken};
+use ponte_actions::TrustedKeysError;
+use ponte_protocol::{DeviceId, EnrollmentToken, PublicKey, RequestId};
 use uuid::Uuid;
 
 use crate::agents::audit::{self, AuditEvent, Outcome};
 use crate::agents::{
-    CustomerId, CustomerName, DeviceAdmin, DeviceRecord, TokenGrant, TokenHash, TokenInfo,
+    ActionAdmin, CatalogError, CustomerId, CustomerName, DeviceRecord, DeviceStatus, ManifestId,
+    RequestRefusal, TokenGrant, TokenHash, TokenInfo,
 };
+
+mod catalog;
+
+pub use catalog::{LISTED_REQUESTS, MAX_ENVELOPE_FILE_BYTES, MAX_MINUTES};
 
 /// What `ponte-server --help` and a mistyped command print.
 pub const USAGE: &str = "\
@@ -48,11 +56,23 @@ usage:
   ponte-server device list [<customer-id>]
   ponte-server device approve <device-id>
   ponte-server device revoke <device-id>
+  ponte-server catalog key add <public-key>
+  ponte-server catalog key list
+  ponte-server catalog key remove <public-key>
+  ponte-server catalog add <envelope-file>
+  ponte-server catalog list
+  ponte-server action run <device-id> <manifest-id> [--version N] [--minutes M]
+  ponte-server action show <request-id>
+  ponte-server action list [<device-id>]
+  ponte-server action cancel <request-id>
 
 DATABASE_URL names the PostgreSQL database; serving and migrate bring its schema up to
 date, the other subcommands only use it. A token is written to the --out file only,
 for the agent's enrollment_token_file; --uses is 1 to 10000 (default 1), --hours 1 to 720
-(default 24).";
+(default 24). catalog add takes an envelope written by ponte-sign and verifies it against
+the keys the server trusts; action run sends the newest envelope that verifies, of the
+highest version unless --version says which, to an active device; --minutes is 1 to 1440
+(default 60). Only a queued request can be cancelled.";
 
 /// Machines one token may enroll, at most. A rollout larger than this takes more tokens.
 pub const MAX_USES: u32 = 10_000;
@@ -90,6 +110,33 @@ pub enum Command {
     },
     DeviceRevoke {
         device: DeviceId,
+    },
+    CatalogKeyAdd {
+        key: PublicKey,
+    },
+    CatalogKeyList,
+    CatalogKeyRemove {
+        key: PublicKey,
+    },
+    CatalogAdd {
+        file: PathBuf,
+    },
+    CatalogList,
+    ActionRun {
+        device: DeviceId,
+        manifest: ManifestId,
+        /// The highest version with a valid envelope when `None`.
+        version: Option<u32>,
+        minutes: u32,
+    },
+    ActionShow {
+        request: RequestId,
+    },
+    ActionList {
+        device: Option<DeviceId>,
+    },
+    ActionCancel {
+        request: RequestId,
     },
 }
 
@@ -147,6 +194,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, UsageE
             "customer" | "token" | "device",
             "create" | "revoke" | "approve",
         ] => Err(UsageError::Missing("an argument")),
+        ["catalog" | "action", ..] => catalog::parse(args.as_slice()),
         _ => Err(UsageError::UnknownCommand),
     }
 }
@@ -265,11 +313,52 @@ pub enum AdminError<E: std::error::Error + 'static> {
     NoRandomness,
     #[error("writing the output: {0}")]
     Output(io::ErrorKind),
+    #[error("the key cannot be trusted: {0}")]
+    KeyNotUsable(TrustedKeysError),
+    #[error("the server trusts {} keys already: remove one first", ponte_actions::MAX_TRUSTED_KEYS)]
+    TooManyKeys,
+    #[error("the server does not trust that key")]
+    UnknownKey,
+    #[error("the server trusts no key yet: add one with catalog key add")]
+    NoTrustedKeys,
+    #[error("the keys the server stored cannot be used: {0}")]
+    TrustedKeys(TrustedKeysError),
+    #[error("the envelope file: {0}")]
+    EnvelopeFile(io::ErrorKind),
+    #[error("the envelope file is larger than {} bytes", catalog::MAX_ENVELOPE_FILE_BYTES)]
+    EnvelopeTooLarge,
+    #[error("the file is not an envelope written by ponte-sign")]
+    NotAnEnvelope,
+    #[error("the envelope is refused: {0}")]
+    Catalog(#[from] CatalogError),
+    #[error("no envelope of that manifest verifies now against the keys the server trusts")]
+    NoValidManifest,
+    #[error("{}", refusal_text(*.0))]
+    Refused(RequestRefusal),
+    #[error("no request with that id")]
+    UnknownRequest,
+    #[error("only a queued request can be cancelled: this one was sent to the agent, or has ended")]
+    NotQueued,
+}
+
+fn refusal_text(refusal: RequestRefusal) -> &'static str {
+    match refusal {
+        RequestRefusal::UnknownDevice => "no device with that id",
+        RequestRefusal::DeviceNotActive(DeviceStatus::Pending) => {
+            "the device is pending: approve it first"
+        }
+        RequestRefusal::DeviceNotActive(_) => "the device is revoked: it is sent nothing",
+        RequestRefusal::TooManyOpen => {
+            "the device has too many requests waiting: wait, or cancel some"
+        }
+        RequestRefusal::UnknownManifest => "the envelope is no longer in the catalog",
+        RequestRefusal::ExpiryOutOfRange => "the expiry does not fit the database",
+    }
 }
 
 /// Runs one command other than [`Command::Serve`], [`Command::Help`] and
 /// [`Command::Migrate`], writing what it shows to `out`.
-pub async fn run<S: DeviceAdmin>(
+pub async fn run<S: ActionAdmin>(
     store: &S,
     command: Command,
     out: &mut impl Write,
@@ -395,6 +484,15 @@ pub async fn run<S: DeviceAdmin>(
             )
             .map_err(written)?;
         }
+        command @ (Command::CatalogKeyAdd { .. }
+        | Command::CatalogKeyList
+        | Command::CatalogKeyRemove { .. }
+        | Command::CatalogAdd { .. }
+        | Command::CatalogList
+        | Command::ActionRun { .. }
+        | Command::ActionShow { .. }
+        | Command::ActionList { .. }
+        | Command::ActionCancel { .. }) => catalog::run(store, command, out, now).await?,
     }
     Ok(())
 }
@@ -414,7 +512,7 @@ fn may_have_changed<T, E: std::error::Error + 'static>(
 
 /// Makes a token, writes it to a new file at `path`, and issues it. If the store does not
 /// take it, the file is removed: a token that enrolls nobody is not left lying around.
-async fn issue_to_file<S: DeviceAdmin>(
+async fn issue_to_file<S: ActionAdmin>(
     store: &S,
     path: &Path,
     grant: TokenGrant,
@@ -497,9 +595,9 @@ fn token_line(token: &TokenInfo, now: DateTime<Utc>) -> String {
 
 fn device_line(device: &DeviceRecord) -> String {
     let status = match device.status {
-        crate::agents::DeviceStatus::Pending => "pending",
-        crate::agents::DeviceStatus::Active => "active",
-        crate::agents::DeviceStatus::Revoked => "revoked",
+        DeviceStatus::Pending => "pending",
+        DeviceStatus::Active => "active",
+        DeviceStatus::Revoked => "revoked",
     };
     let online = if device.online.is_some() {
         "online"
@@ -511,7 +609,25 @@ fn device_line(device: &DeviceRecord) -> String {
         .map_or_else(|| "never".to_owned(), |at| at.to_rfc3339());
     // Labels are ASCII without control characters (`Label`): safe in a terminal.
     format!(
-        "{}  customer {}  {status}  {online}  last seen {last_seen}  agent {}  {}",
-        device.id, device.customer, device.about.agent_version, device.about.os,
+        "{}  customer {}  {status}  {online}  last seen {last_seen}  {}  agent {}  {}",
+        device.id,
+        device.customer,
+        clock_offset(device),
+        device.about.agent_version,
+        device.about.os,
     )
+}
+
+/// How far the device's clock was from the server's at its last heartbeat (ADR-0010): the
+/// time it says it collected the reading, less the time the server stored it. A device
+/// whose clock is off refuses actions, and this is where that gets noticed. The delay of
+/// the network and of the heartbeat itself makes it a little negative on a good clock.
+fn clock_offset(device: &DeviceRecord) -> String {
+    match (&device.telemetry, device.telemetry_at) {
+        (Some(telemetry), Some(stored)) => {
+            let offset = (telemetry.collected_at - stored).num_seconds();
+            format!("clock {offset:+}s")
+        }
+        _ => "clock unknown".to_owned(),
+    }
 }
