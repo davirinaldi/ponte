@@ -291,8 +291,10 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   `queue_full`, `shutting_down`, `journal_full`, `journal_unavailable` and
   `clock_went_back` say that the copy which got them did not run, not that the request never
   will: another copy may still wait in the agent's queue. A later answer of the same device
-  replaces one of them once, audited with `replaced`; any other second answer that differs
-  is the anomaly above and changes nothing.
+  about the request itself (not another of these six) replaces one of them, once, audited
+  with `replaced`; any other second answer that differs is the anomaly above and changes
+  nothing. The security review of step 6 found that letting one of the six replace another
+  let a device rewrite its answer back and forth.
 - **A store that fails never ends a session over a result.** The request stays `sent` and is
   sent again at the next session; ending the session would bring the same result back in a
   loop. Results that reach the store are bounded to 32 a minute per session, and lines about
