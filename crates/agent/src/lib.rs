@@ -316,14 +316,13 @@ fn make_data_dir(data_dir: &Path, strict: bool) -> Result<(), StartError> {
         let existing = data_dir.ancestors().find(|folder| folder.exists());
         if let Some(existing) = existing.filter(|existing| *existing != data_dir) {
             platform::check_trusted(existing, Leaf::Above).map_err(untrusted)?;
+            // Below the folder that was checked, and nowhere else: nothing is looked up
+            // again between the check and the creation.
+            platform::create_private_dir_below(existing, data_dir).map_err(StartError::DataDir)?;
         }
-    }
-    if strict {
-        platform::create_private_dir_exclusive(data_dir)
     } else {
-        platform::create_private_dir(data_dir)
+        platform::create_private_dir(data_dir).map_err(StartError::DataDir)?;
     }
-    .map_err(StartError::DataDir)?;
     if strict {
         platform::check_trusted(data_dir, Leaf::Directory).map_err(untrusted)?;
     }

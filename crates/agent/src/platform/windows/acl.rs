@@ -424,13 +424,9 @@ pub(crate) fn check_chain(path: &Path, leaf: Leaf) -> Result<(), AclError> {
 
 /// Creates `dir` and whatever is missing above it, each with [`PRIVATE_FOLDER`]. A folder
 /// that already exists keeps its ACL: when the agent runs elevated, [`check_chain`] decides
-/// whether it may be used.
-///
-/// `exclusive`: a folder that appears between the look and the creation is a refusal, not
-/// a folder to go on through. The folder above the first one made lets others create
-/// entries (`C:\ProgramData` does), and one made in that moment could be a junction; every
-/// folder the agent makes after it is private, so nothing below can be swapped.
-pub(crate) fn create_private_dir(dir: &Path, exclusive: bool) -> io::Result<()> {
+/// whether it may be used. An elevated agent makes its data directory with
+/// [`create_private_dir_below`] instead.
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let dir = std::path::absolute(dir)?;
     let mut missing = Vec::new();
     for folder in dir.ancestors() {
@@ -449,7 +445,37 @@ pub(crate) fn create_private_dir(dir: &Path, exclusive: bool) -> io::Result<()> 
         lpSecurityDescriptor: descriptor.as_ptr(),
         bInheritHandle: 0,
     };
-    make_each(missing.into_iter().rev(), &attributes, exclusive)
+    make_each(missing.into_iter().rev(), &attributes, false)
+}
+
+/// Makes every folder from below `checked`, a folder that exists and passed its rule, down
+/// to `dir`, each with [`PRIVATE_FOLDER`], and refuses any that already exists. Nothing is
+/// looked up again: a junction made at the first missing folder after `checked` passed its
+/// rule makes the creation fail, rather than shift what is made through it.
+pub(crate) fn create_private_dir_below(checked: &Path, dir: &Path) -> io::Result<()> {
+    let below = dir
+        .strip_prefix(checked)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut folders = Vec::new();
+    let mut at = checked.to_path_buf();
+    for name in below.components() {
+        let std::path::Component::Normal(name) = name else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        at.push(name);
+        folders.push(at.clone());
+    }
+    let descriptor = Descriptor::from_sddl(PRIVATE_FOLDER)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        lpSecurityDescriptor: descriptor.as_ptr(),
+        bInheritHandle: 0,
+    };
+    make_each(
+        folders.iter().map(std::path::PathBuf::as_path),
+        &attributes,
+        true,
+    )
 }
 
 /// Makes each of `folders`, in order.
@@ -792,12 +818,31 @@ mod tests {
         assert!(second.is_dir());
     }
 
+    /// The race of the security review: after the folder above passed its rule, a user
+    /// makes the first missing folder a junction. Nothing is made through it.
+    #[test]
+    fn folders_below_a_checked_one_are_made_exclusively() {
+        let dir = TempDir::new();
+        let elsewhere = TempDir::new();
+        let checked = dir.path().to_path_buf();
+        let data = checked.join("Vendor").join("Ponte");
+        super::super::files::tests::junction(&checked.join("Vendor"), elsewhere.path());
+        assert!(create_private_dir_below(&checked, &data).is_err());
+        assert!(!elsewhere.path().join("Ponte").exists());
+
+        let clean = checked.join("Other").join("Ponte");
+        create_private_dir_below(&checked, &clean).unwrap();
+        assert!(clean.is_dir());
+        assert!(create_private_dir_below(&checked, &clean).is_err());
+        assert!(create_private_dir_below(&clean, &checked).is_err());
+    }
+
     #[test]
     fn a_private_folder_has_the_protected_acl() {
         let dir = TempDir::new();
         let made = dir.path().join("one").join("two");
-        create_private_dir(&made, true).unwrap();
-        create_private_dir(&made, false).unwrap();
+        create_private_dir(&made).unwrap();
+        create_private_dir(&made).unwrap();
         for folder in [dir.path().join("one"), made] {
             let file = open_for_rule(folder.to_str().unwrap()).unwrap();
             let descriptor = Descriptor::of(&file).unwrap();
