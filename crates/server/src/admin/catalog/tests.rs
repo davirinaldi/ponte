@@ -260,7 +260,18 @@ async fn a_key_is_checked_before_it_is_trusted() {
     assert_eq!(result.unwrap_err(), "the server does not trust that key");
 
     let logs = logs.text();
-    assert_eq!(logs.matches("signing_key_added").count(), 4, "{logs}");
+    let line_of = |event: &str, key: &PublicKey| {
+        logs.lines()
+            .any(|line| line.contains(event) && line.contains(&key.to_string()))
+    };
+    assert!(line_of("signing_key_added", &manifest_public(4)), "{logs}");
+    assert!(
+        line_of("signing_key_removed", &manifest_public(2)),
+        "{logs}"
+    );
+    for refused in [PublicKey::from_bytes(weak), manifest_public(5)] {
+        assert!(!logs.contains(&refused.to_string()), "{logs}");
+    }
     assert_eq!(logs.matches("signing_key_removed").count(), 1, "{logs}");
 }
 

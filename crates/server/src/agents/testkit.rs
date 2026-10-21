@@ -316,6 +316,53 @@ impl Peer {
     }
 }
 
+/// Makes every test's captured log see every event of its own thread.
+///
+/// Each test captures with a subscriber of its own thread (`set_default`). `tracing` keeps,
+/// per log line in the code, whether any subscriber wants it, and recomputes that whenever
+/// a subscriber comes or goes; with tests starting and ending on other threads at the same
+/// moment, it can settle on "nobody" for a while, and a test that looks for an audit line
+/// misses it now and then (seen on Linux). A global subscriber that answers "sometimes"
+/// for every line, and keeps nothing, makes "nobody" impossible: every event is then
+/// offered to its thread's subscriber.
+fn ask_every_subscriber() {
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Metadata, Subscriber};
+
+    struct Sometimes;
+
+    impl Subscriber for Sometimes {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, _: &Event<'_>) {}
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // Another test binary's global subscriber, if any, stays: it is set once per process.
+    ONCE.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(Sometimes);
+    });
+}
+
 /// Everything logged on this thread while the guard lives.
 #[derive(Clone, Default)]
 pub(crate) struct Logs(Arc<Mutex<Vec<u8>>>);
@@ -330,6 +377,7 @@ impl Logs {
     pub(crate) fn capture_with(
         directives: Option<&str>,
     ) -> (Self, tracing::subscriber::DefaultGuard) {
+        ask_every_subscriber();
         let logs = Self::default();
         let writer = logs.clone();
         let layer = fmt::layer()
