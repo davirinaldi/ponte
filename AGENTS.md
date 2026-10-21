@@ -40,7 +40,7 @@ cargo fmt --all
 cargo run -p ponte-server                                   # needs DATABASE_URL; http://127.0.0.1:8080/healthz
 cargo run -p ponte-server -- help                           # operator subcommands: customers, tokens, devices
 cargo test -p ponte-server -- --ignored pg_                 # tests that need Postgres (DATABASE_URL)
-cargo run -p ponte-agent -- crates/agent/agent.example.toml
+cargo run -p ponte-agent -- run crates/agent/agent.example.toml
 cargo run -p ponte-sign -- help                             # keygen, sign, verify, show
 cargo deny check                                            # needs: cargo install cargo-deny
 docker compose -f deploy/docker-compose.yml up -d           # Postgres for local dev

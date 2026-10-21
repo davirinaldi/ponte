@@ -70,7 +70,7 @@ cargo run -p ponte-server -- customer create "Demo Customer"     # prints the cu
 mkdir -p keys/agent-dev                                          # ignored by git
 cargo run -p ponte-server -- token create <customer-id> --out keys/agent-dev/enrollment-token
 cargo run -p ponte-server            # then open http://127.0.0.1:8080/healthz
-cargo run -p ponte-agent -- crates/agent/agent.example.toml
+cargo run -p ponte-agent -- run crates/agent/agent.example.toml
 cargo run -p ponte-server -- device list
 ```
 

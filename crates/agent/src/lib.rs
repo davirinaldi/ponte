@@ -40,6 +40,7 @@ mod wire;
 mod testkit;
 
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +54,8 @@ use tracing::{debug, error, info, warn};
 
 pub use config::{AgentConfig, ConfigError, InvalidServerUrl, ServerUrl};
 pub use platform::NAME as PLATFORM;
+pub use platform::{Elevation, Untrusted};
+pub use ponte_protocol::ServiceName;
 
 use actions::ActionFiles;
 use actions::clock::SystemClock;
@@ -60,7 +63,7 @@ use actions::runner::{self as executor, Actions};
 use config::Security;
 use handshake::{About, Accepted};
 use identity::{DataDir, IdentityStore};
-use platform::keystore;
+use platform::{Leaf, keystore};
 use session::SessionEnd;
 use telemetry::Collector;
 use tokio::task::JoinHandle;
@@ -132,12 +135,139 @@ pub fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .build()
 }
 
+/// An agent that passed every check of [`prepare`], ready to [`run`].
+#[derive(Debug)]
+pub struct Prepared {
+    config: AgentConfig,
+    elevation: Elevation,
+}
+
+impl Prepared {
+    #[must_use]
+    pub fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    /// Whether the agent runs elevated, which decided the rules it was held to.
+    #[must_use]
+    pub fn elevation(&self) -> Elevation {
+        self.elevation
+    }
+}
+
+/// Why the agent did not start. [`StartError::code`] and [`StartError::setting`] are what
+/// may reach the Event Log (ADR-0013); the text of a configuration error may quote the file.
+#[derive(Debug, thiserror::Error)]
+pub enum StartError {
+    #[error("the configuration was refused, {}: {error}", error.setting())]
+    Config { error: ConfigError },
+    #[error("{setting} {problem} (ADR-0011)")]
+    Untrusted {
+        setting: &'static str,
+        problem: Untrusted,
+    },
+    #[error("server_url is ws://, which an elevated agent refuses even to this machine (ADR-0011)")]
+    PlainUrl,
+    #[error("data_dir could not be made: {0}")]
+    DataDir(std::io::Error),
+}
+
+impl StartError {
+    /// A fixed number for each kind of failure, the event id in the Event Log.
+    #[must_use]
+    pub fn code(&self) -> u32 {
+        match self {
+            Self::Config { .. } => 1,
+            Self::Untrusted { .. } => 2,
+            Self::PlainUrl => 3,
+            Self::DataDir(_) => 4,
+        }
+    }
+
+    /// The setting at fault, or what the agent could not trust.
+    #[must_use]
+    pub fn setting(&self) -> &'static str {
+        match self {
+            Self::Config { error } => error.setting(),
+            Self::Untrusted { setting, .. } => setting,
+            Self::PlainUrl => "server_url",
+            Self::DataDir(_) => "data_dir",
+        }
+    }
+}
+
+/// Everything the agent checks before it runs (ADR-0011, ADR-0013), for the configuration
+/// at `config_path` and an agent registered with the service manager as `registered_as`.
+///
+/// When the token is elevated, or cannot be read, the agent's executable, the configuration,
+/// the data directory and the token must pass the owner and ACL rules, every path must be
+/// absolute, and `ws://` is refused. The data directory is made if missing, private.
+///
+/// # Errors
+/// The first check that failed.
+pub fn prepare(
+    config_path: &Path,
+    registered_as: Option<&ServiceName>,
+) -> Result<Prepared, StartError> {
+    prepare_as(config_path, registered_as, platform::elevation())
+}
+
+fn prepare_as(
+    config_path: &Path,
+    registered_as: Option<&ServiceName>,
+    elevation: Elevation,
+) -> Result<Prepared, StartError> {
+    let strict = elevation.strict();
+    let trusted = |path: &Path, leaf, setting| {
+        if !strict {
+            return Ok(());
+        }
+        platform::check_trusted(path, leaf)
+            .map_err(|problem| StartError::Untrusted { setting, problem })
+    };
+    if strict {
+        let executable = std::env::current_exe().map_err(|_| StartError::Config {
+            error: ConfigError::NoExecutable,
+        })?;
+        trusted(&executable, Leaf::Executable, "the agent's executable")?;
+    }
+    trusted(config_path, Leaf::File, "the configuration file")?;
+    let text = platform::read_config(config_path).map_err(|error| StartError::Config {
+        error: ConfigError::Read(error),
+    })?;
+    let config = AgentConfig::from_file_text(config_path, &text, registered_as)
+        .map_err(|error| StartError::Config { error })?;
+    refuse_plain_url(&config, strict)?;
+    platform::create_private_dir(&config.data_dir).map_err(StartError::DataDir)?;
+    trusted(&config.data_dir, Leaf::Directory, "data_dir")?;
+    if let Some(token) = &config.enrollment_token_file {
+        // The token may be gone, once used; its folder may not.
+        match token.parent() {
+            Some(folder) if !token.exists() => {
+                trusted(folder, Leaf::Directory, "enrollment_token_file")?;
+            }
+            _ => trusted(token, Leaf::File, "enrollment_token_file")?,
+        }
+    }
+    Ok(Prepared { config, elevation })
+}
+
+/// An elevated agent refuses `ws://`, even to this machine: any local process that binds
+/// the port first would be "the server", and could take the enrollment token (ADR-0011).
+fn refuse_plain_url(config: &AgentConfig, strict: bool) -> Result<(), StartError> {
+    if strict && config.server_url.security() == Security::PlainLoopback {
+        return Err(StartError::PlainUrl);
+    }
+    Ok(())
+}
+
 /// Runs the agent until `shutdown` completes: connects, enrolls if it has to, keeps a
 /// session going and connects again whenever it ends.
 ///
 /// Nothing that the server, the network or the disk does ends it. It only returns once
 /// `shutdown` has completed.
-pub async fn run(config: AgentConfig, shutdown: impl Future<Output = ()>) {
+pub async fn run(prepared: Prepared, shutdown: impl Future<Output = ()>) {
+    let config = prepared.config;
     let timing = Timing {
         heartbeat: Duration::from_secs(config.heartbeat_secs),
         ..Timing::default()
@@ -508,6 +638,78 @@ mod tests {
                 start.elapsed()
             );
         });
+    }
+
+    fn config_file(dir: &Path, url: &str) -> std::path::PathBuf {
+        let path = dir.join("agent.toml");
+        let data = dir.join("data");
+        std::fs::write(
+            &path,
+            format!(
+                "server_url = '{url}'\ndata_dir = '{}'\nenrollment_token_file = '{}'\n",
+                data.display(),
+                data.join("token").display()
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// An ordinary console runs from wherever it was built, and makes its data directory.
+    #[test]
+    fn a_console_that_is_not_elevated_starts_where_it_stands() {
+        let dir = crate::testkit::TempDir::new();
+        let path = config_file(dir.path(), "ws://127.0.0.1:8080/agent");
+        let prepared = prepare_as(&path, None, Elevation::NotElevated).unwrap();
+        assert_eq!(prepared.elevation(), Elevation::NotElevated);
+        assert!(dir.path().join("data").is_dir());
+
+        let refused = prepare_as(
+            &dir.path().join("missing.toml"),
+            None,
+            Elevation::NotElevated,
+        )
+        .unwrap_err();
+        assert_eq!((refused.code(), refused.setting()), (1, "the file"));
+    }
+
+    /// Elevated, or not knowing, the agent trusts nothing a user could have changed: a
+    /// build in a user's folder, a configuration in a temporary one. Only Windows has the
+    /// rules.
+    #[cfg(windows)]
+    #[test]
+    fn an_elevated_agent_refuses_what_a_user_could_change() {
+        let dir = crate::testkit::TempDir::new();
+        let path = config_file(dir.path(), "wss://ponte.example.com/agent");
+        for elevation in [Elevation::Elevated, Elevation::Unknown] {
+            let refused = prepare_as(&path, None, elevation).unwrap_err();
+            assert!(
+                matches!(refused, StartError::Untrusted { .. }),
+                "{elevation:?}: {refused}"
+            );
+            assert_eq!(refused.code(), 2);
+        }
+        assert!(!dir.path().join("data").exists());
+    }
+
+    #[test]
+    fn an_elevated_agent_refuses_plain_ws() {
+        let plain: AgentConfig = "server_url = 'ws://127.0.0.1:8080/agent'\ndata_dir = 'data'"
+            .parse()
+            .unwrap();
+        let tls: AgentConfig = "server_url = 'wss://ponte.example.com'\ndata_dir = 'data'"
+            .parse()
+            .unwrap();
+        assert!(matches!(
+            refuse_plain_url(&plain, true),
+            Err(StartError::PlainUrl)
+        ));
+        assert!(refuse_plain_url(&plain, false).is_ok());
+        assert!(refuse_plain_url(&tls, true).is_ok());
+        assert_eq!(
+            (StartError::PlainUrl.code(), StartError::PlainUrl.setting()),
+            (3, "server_url")
+        );
     }
 
     #[test]

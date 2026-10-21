@@ -117,14 +117,16 @@ heartbeat_secs = 60
 '@ | Set-Content -Encoding ascii keys/walkthrough/agent.toml
 ```
 
-In the agent terminal:
+In the agent terminal, an ordinary one: an agent started from an elevated console is held
+to the rules of the service (ADR-0011, ADR-0013), refuses `ws://` and refuses to run from a
+folder its user can change.
 
 ```sh
-cargo run -q --release -p ponte-agent -- keys/walkthrough/agent.toml
+cargo run -q --release -p ponte-agent -- run keys/walkthrough/agent.toml
 ```
 
 ```
-INFO  agent starting server=ws://127.0.0.1:8080/agent allowed_roots=1 protocol=2 platform="windows"
+INFO  agent starting server=ws://127.0.0.1:8080/agent allowed_roots=1 protocol=2 platform="windows" elevation=NotElevated
 INFO  action policy actions="disabled" max_risk=Medium max_actions_per_hour=20 min_manifest_interval_secs=600 shutdown_timeout_secs=10
 WARN  the configuration names no manifest_keys: this agent runs no action (ADR-0010)
 WARN  the device key is stored without encryption ... This build is for development only (ADR-0008)
@@ -171,7 +173,7 @@ cargo run -q --release -p ponte-server -- token create $CUSTOMER --uses 2 --hour
 In the second agent terminal:
 
 ```sh
-cargo run -q --release -p ponte-agent -- keys/walkthrough/second.toml
+cargo run -q --release -p ponte-agent -- run keys/walkthrough/second.toml
 ```
 
 It enrolls and connects like the first, and the server logs `status=Pending`. `device list

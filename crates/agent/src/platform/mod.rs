@@ -14,13 +14,13 @@ mod unsupported;
 #[cfg(not(windows))]
 pub use unsupported::NAME;
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(not(windows))]
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{Read, Write},
 };
 
@@ -35,9 +35,101 @@ pub(crate) fn machine(_roots: &Roots) -> Arc<dyn Machine> {
     Arc::new(Unsupported)
 }
 
-/// Creates `dir` and whatever is missing above it. Where files have modes, only the
-/// owner gets in.
+/// Whether the agent's token is elevated (ADR-0013). Outside Windows it never is: those
+/// builds are for development.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elevation {
+    Elevated,
+    NotElevated,
+    /// The token could not be read.
+    Unknown,
+}
+
+impl Elevation {
+    /// Whether the rules for an elevated agent apply: the owner and ACL rules, and no
+    /// `ws://`. A token that could not be read gets them too.
+    #[must_use]
+    pub fn strict(self) -> bool {
+        self != Self::NotElevated
+    }
+}
+
+/// What the last part of a path is, for [`check_trusted`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leaf {
+    /// The configuration or the token: the file and its folder are the agent's own.
+    File,
+    /// The data directory, or the folder of a token not there yet: the folder is its own.
+    Directory,
+    /// An executable: the file and its folder may also belong to TrustedInstaller.
+    Executable,
+}
+
+/// Why a path is not one an elevated agent may trust (ADR-0011). Says which rule, never
+/// the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Untrusted {
+    #[error("is not an absolute path on a drive with a letter, in plain names")]
+    NotAbsolute,
+    #[error("does not exist")]
+    Missing,
+    #[error("or a folder above it is a junction, a link or a mount point")]
+    ReparsePoint,
+    #[error("or a folder above it is not on a local disk")]
+    NotDisk,
+    #[error("lies on a volume that keeps no access lists")]
+    NoAcls,
+    #[error("resolves to another path than the one written (a short 8.3 name?)")]
+    Moved,
+    #[error("or a folder above it has an owner other than SYSTEM or Administrators")]
+    Owner,
+    #[error("or a folder above it lets another account change, delete or replace it")]
+    Grants,
+    #[error("or a folder above it has no access list, or an entry the agent cannot read")]
+    Unreadable,
+}
+
+/// Holds `path` and every folder above it to the owner and ACL rules of ADR-0011. Only
+/// Windows has them; elsewhere nothing is checked, and nothing runs elevated.
+pub(crate) fn check_trusted(path: &Path, leaf: Leaf) -> Result<(), Untrusted> {
+    #[cfg(windows)]
+    return windows::acl::check_chain(path, leaf);
+    #[cfg(not(windows))]
+    {
+        let _ = (path, leaf);
+        Ok(())
+    }
+}
+
+/// The configuration is a few lines; anything this large is not one.
+const MAX_CONFIG_BYTES: usize = 256 * 1024;
+
+/// Reads the configuration file as text, opened as the agent's own files are.
+pub(crate) fn read_config(path: &Path) -> io::Result<String> {
+    let bytes = read_bounded(path, MAX_CONFIG_BYTES)?.ok_or(io::ErrorKind::NotFound)?;
+    String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// Reads the agent's token.
+pub(crate) fn elevation() -> Elevation {
+    #[cfg(windows)]
+    return windows::elevation::probe();
+    #[cfg(not(windows))]
+    Elevation::NotElevated
+}
+
+/// Creates `dir` and whatever is missing above it, private to the agent: on Windows with
+/// a protected ACL for SYSTEM, Administrators and the folder's owner; where files have
+/// modes, for the owner only.
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows::acl::create_private_dir(dir);
+    #[cfg(not(windows))]
+    create_private_dir_here(dir)
+}
+
+#[cfg(not(windows))]
+fn create_private_dir_here(dir: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -145,8 +237,17 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::testkit::TempDir;
+
+    #[test]
+    fn an_unknown_elevation_gets_the_strict_rules() {
+        assert!(Elevation::Elevated.strict());
+        assert!(Elevation::Unknown.strict());
+        assert!(!Elevation::NotElevated.strict());
+    }
 
     #[test]
     fn a_write_replaces_the_file_and_leaves_nothing_else_behind() {
