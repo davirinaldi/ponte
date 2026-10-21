@@ -18,6 +18,8 @@
 //!   service's account.
 
 use std::fs::OpenOptions;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use ponte_protocol::{ServiceName, ServiceState, ServiceStatus};
@@ -140,15 +142,16 @@ fn wide_in(buffer: &[u64], text: *mut u16) -> Option<Vec<u16>> {
     if text.is_null() {
         return None;
     }
-    let start = buffer.as_ptr() as usize;
-    let end = start + buffer.len() * 8;
-    let at = text as usize;
-    if at < start || at >= end || !(at - start).is_multiple_of(2) {
+    // Where it points is only compared; what is read comes from `buffer` itself.
+    let offset = (text as usize).checked_sub(buffer.as_ptr() as usize)?;
+    if !offset.is_multiple_of(2) || offset >= buffer.len() * 8 {
         return None;
     }
-    let room = (end - at) / 2;
-    // SAFETY: `text` lies inside `buffer`, 2-aligned, with `room` units up to its end.
-    let units = unsafe { std::slice::from_raw_parts(text.cast_const(), room) };
+    // SAFETY: every bit pattern is a valid u16, and a u64 slice holds four u16s per item,
+    // aligned, for as long as `buffer` is borrowed.
+    let units =
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u16>(), buffer.len() * 4) };
+    let units = &units[offset / 2..];
     let length = units.iter().position(|unit| *unit == 0)?;
     Some(units[..length].to_vec())
 }
@@ -361,7 +364,7 @@ pub(crate) fn stop(name: &str) -> Result<(), Refused> {
 
 /// The state of each service in `names`, for the telemetry (RF-06), read within about two
 /// seconds in all: what does not answer by then is `Unknown`.
-pub(crate) fn report(names: &[ServiceName]) -> Vec<ServiceStatus> {
+pub(crate) fn report(names: &[ServiceName], reading: &Arc<AtomicBool>) -> Vec<ServiceStatus> {
     let unknown = |names: &[ServiceName]| {
         names
             .iter()
@@ -371,7 +374,13 @@ pub(crate) fn report(names: &[ServiceName]) -> Vec<ServiceStatus> {
             })
             .collect()
     };
+    // One reading at a time: if the last one still waits on the service manager, this
+    // snapshot says "unknown" rather than leave another thread waiting beside it.
+    if reading.swap(true, Ordering::AcqRel) {
+        return unknown(names);
+    }
     let owned = names.to_vec();
+    let done = Arc::clone(reading);
     let (send, receive) = std::sync::mpsc::sync_channel(1);
     let spawned = std::thread::Builder::new()
         .name("ponte-services".to_owned())
@@ -389,9 +398,11 @@ pub(crate) fn report(names: &[ServiceName]) -> Vec<ServiceStatus> {
                     ServiceStatus { name, state }
                 })
                 .collect();
+            done.store(false, Ordering::Release);
             let _ = send.send(states);
         });
     if spawned.is_err() {
+        reading.store(false, Ordering::Release);
         return unknown(names);
     }
     receive
@@ -547,12 +558,20 @@ mod tests {
             .iter()
             .map(|name| name.parse().unwrap())
             .collect();
-        let report = report(&names);
+        let reading = Arc::new(AtomicBool::new(false));
+        let report = report(&names, &reading);
         assert_eq!(report.len(), 2);
         assert_eq!(report[0].name.as_str(), "Schedule");
         assert_eq!(report[0].state, ServiceState::Running);
         assert_eq!(report[1].state, ServiceState::Unknown);
-        assert!(super::report(&[]).is_empty());
+        assert!(super::report(&[], &reading).is_empty());
+        // While a reading is still out, the next one does not wait beside it.
+        reading.store(true, Ordering::Release);
+        assert!(
+            super::report(&names, &reading)
+                .iter()
+                .all(|status| status.state == ServiceState::Unknown)
+        );
     }
 
     #[test]

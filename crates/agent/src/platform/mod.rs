@@ -60,12 +60,17 @@ pub(crate) fn machine(
 
 /// The state of each service the configuration allows, for the telemetry (RF-06). None
 /// outside Windows.
-pub(crate) fn service_states(names: &[ServiceName]) -> Vec<ServiceStatus> {
+/// `reading` is set while a reading is out: the caller's own, so a reading that still waits
+/// on the service manager is not joined by another.
+pub(crate) fn service_states(
+    names: &[ServiceName],
+    reading: &Arc<std::sync::atomic::AtomicBool>,
+) -> Vec<ServiceStatus> {
     #[cfg(windows)]
-    return windows::services::report(names);
+    return windows::services::report(names, reading);
     #[cfg(not(windows))]
     {
-        let _ = names;
+        let _ = (names, reading);
         Vec::new()
     }
 }

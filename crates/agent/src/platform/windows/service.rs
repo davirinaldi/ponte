@@ -176,17 +176,23 @@ fn service_main(arguments: Vec<OsString>) {
     });
     status.tick();
     // A checkpoint every second while the agent starts, so the service manager waits.
+    // Without a thread for it the service manager only waits longer between checkpoints.
     let ticker = {
         let status = Arc::clone(&status);
-        std::thread::spawn(move || {
-            while status.tick() {
-                std::thread::sleep(Duration::from_secs(1));
-            }
-        })
+        std::thread::Builder::new()
+            .name("ponte-service-status".to_owned())
+            .spawn(move || {
+                while status.tick() {
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            })
+            .ok()
     };
     let exit = run(&registered, &status, stopped);
     status.stopped(exit);
-    let _ = ticker.join();
+    if let Some(ticker) = ticker {
+        let _ = ticker.join();
+    }
 }
 
 /// Everything between `START_PENDING` and `STOPPED`; the exit code the service ends with.
@@ -215,7 +221,8 @@ fn run(
     let runtime = match crate::runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
-            error!(%error, "the async runtime could not be started");
+            // The code, not Windows' text.
+            error!(code = ?error.raw_os_error(), "the async runtime could not be started");
             return ServiceExitCode::ServiceSpecific(RUNTIME_FAILED);
         }
     };
