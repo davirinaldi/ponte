@@ -569,6 +569,46 @@ async fn a_peer_that_stops_reading_is_disconnected_at_the_write_deadline() {
     );
 }
 
+/// The same for a request the sweep hands over while the session runs.
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_stops_reading_a_handed_over_request_is_disconnected_in_time() {
+    let Connected {
+        gateway,
+        store,
+        device,
+        id,
+        mut peer,
+        entry,
+    } = connected().await;
+    peer.finished().await;
+    let mut stalled = Peer::connect_stalling(&gateway, 2);
+    let nonce = stalled.challenge().await;
+    stalled.send(text(&device.hello(&nonce, id)));
+    assert_eq!(
+        stalled.receive().await,
+        Some(Sent::Message(ServerToAgent::Welcome {}))
+    );
+    eventually("the session started", || {
+        gateway.registry.current(id).is_some()
+    })
+    .await;
+
+    let request = ask(&store, id, &entry).await;
+    sweep_once(&gateway).await.unwrap();
+    // The session takes the request and is held in the write before the peer leaves.
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    let started = tokio::time::Instant::now();
+    stalled.finished().await;
+    assert_eq!(started.elapsed(), Limits::default().write);
+    assert_eq!(store.record(id).unwrap().online, None);
+    assert_eq!(
+        state(&store, request).await,
+        RequestState::Sent { at: at(0) }
+    );
+}
+
 /// A queued request that expires is marked so by the sweep, and audited.
 #[tokio::test(start_paused = true)]
 async fn the_sweep_expires_what_waited_too_long() {
