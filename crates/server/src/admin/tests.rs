@@ -460,11 +460,11 @@ impl ActionStore for Down {
         Err(DownError)
     }
 
-    async fn unclaim(&self, _: DateTime<Utc>) -> Result<u64, DownError> {
+    async fn unclaim(&self, _: &[DateTime<Utc>]) -> Result<u64, DownError> {
         Err(DownError)
     }
 
-    async fn unanswered(&self, _: DeviceId, _: DateTime<Utc>) -> Result<Vec<Outgoing>, DownError> {
+    async fn resend(&self, _: DeviceId, _: DateTime<Utc>) -> Result<Vec<Outgoing>, DownError> {
         Err(DownError)
     }
 

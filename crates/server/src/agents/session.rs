@@ -318,7 +318,7 @@ where
     D: ActionStore,
     Si: Sink<Message> + Unpin,
 {
-    let unanswered = match gateway.store.unanswered(id, gateway.now()).await {
+    let unanswered = match gateway.store.resend(id, gateway.now()).await {
         Ok(unanswered) => unanswered,
         Err(error) => {
             error!(device = %id, %error, "the store failed to list the requests to send again");
@@ -1452,7 +1452,7 @@ mod tests {
             Ok(claimed)
         }
 
-        async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Broken> {
+        async fn unclaim(&self, claimed_at: &[DateTime<Utc>]) -> Result<u64, Broken> {
             self.check()?;
             let unclaimed = self.inner.unclaim(claimed_at).await.map_err(never);
             let late = self.late_claim.lock().unwrap().take();
@@ -1467,13 +1467,13 @@ mod tests {
             self.inner.release(id).await.map_err(never)
         }
 
-        async fn unanswered(
+        async fn resend(
             &self,
             device: DeviceId,
             now: DateTime<Utc>,
         ) -> Result<Vec<Outgoing>, Broken> {
             self.check()?;
-            self.inner.unanswered(device, now).await.map_err(never)
+            self.inner.resend(device, now).await.map_err(never)
         }
 
         async fn finish(

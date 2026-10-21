@@ -560,7 +560,10 @@ async fn a_peer_that_stops_reading_is_disconnected_at_the_write_deadline() {
     })
     .await;
     let started = tokio::time::Instant::now();
-    stalled.finished().await;
+    // Bounded, so a write with no deadline fails the test instead of hanging it.
+    tokio::time::timeout(Limits::default().write * 2, stalled.finished())
+        .await
+        .expect("the stalled write never ended");
     assert_eq!(started.elapsed(), Limits::default().write);
     assert_eq!(store.record(id).unwrap().online, None);
     assert_eq!(
@@ -600,7 +603,10 @@ async fn a_peer_that_stops_reading_a_handed_over_request_is_disconnected_in_time
         tokio::task::yield_now().await;
     }
     let started = tokio::time::Instant::now();
-    stalled.finished().await;
+    // Bounded, so a write with no deadline fails the test instead of hanging it.
+    tokio::time::timeout(Limits::default().write * 2, stalled.finished())
+        .await
+        .expect("the stalled write never ended");
     assert_eq!(started.elapsed(), Limits::default().write);
     assert_eq!(store.record(id).unwrap().online, None);
     assert_eq!(

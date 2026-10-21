@@ -1,11 +1,11 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT r.id, r.device_id, r.expires_at, r.initiator,\n                          m.manifest_id, m.version, m.manifest, m.issued_at,\n                          m.expires_at AS manifest_expires_at, m.public_key, m.signature\n                   FROM action_requests r\n                   JOIN devices d ON d.id = r.device_id AND d.status = 'active'\n                   JOIN manifests m ON m.hash = r.manifest_hash\n                   JOIN signing_keys k ON k.public_key = m.public_key\n                   WHERE r.device_id = $1 AND r.status = 'sent' AND r.expires_at > $3\n                   ORDER BY r.expires_at > $2 DESC, r.created_at, r.id\n                   LIMIT $4",
+  "query": "WITH chosen AS (\n                       SELECT r.id, r.expires_at > $2 AS live, r.created_at\n                       FROM action_requests r\n                       JOIN devices d ON d.id = r.device_id AND d.status = 'active'\n                       JOIN manifests m ON m.hash = r.manifest_hash\n                       JOIN signing_keys k ON k.public_key = m.public_key\n                       WHERE r.device_id = $1 AND r.status = 'sent' AND r.expires_at > $3\n                       ORDER BY r.expires_at > $2 DESC, r.created_at, r.id\n                       LIMIT $4\n                   )\n                   UPDATE action_requests r SET sent_at = $5\n                   FROM chosen, manifests m\n                   WHERE r.id = chosen.id AND r.status = 'sent' AND m.hash = r.manifest_hash\n                   RETURNING r.id AS \"id!\", r.device_id AS \"device_id!\",\n                             r.expires_at AS \"expires_at!\", r.initiator AS \"initiator!\",\n                             m.manifest_id AS \"manifest_id!\", m.version AS \"version!\",\n                             m.manifest AS \"manifest!\", m.issued_at AS \"issued_at!\",\n                             m.expires_at AS \"manifest_expires_at!\",\n                             m.public_key AS \"public_key!\", m.signature AS \"signature!\",\n                             chosen.live AS \"live!\", chosen.created_at AS \"created_at!\"",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id!",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -16,7 +16,7 @@
       },
       {
         "ordinal": 1,
-        "name": "device_id",
+        "name": "device_id!",
         "type_info": "Uuid",
         "origin": {
           "Table": {
@@ -27,7 +27,7 @@
       },
       {
         "ordinal": 2,
-        "name": "expires_at",
+        "name": "expires_at!",
         "type_info": "Int8",
         "origin": {
           "Table": {
@@ -38,7 +38,7 @@
       },
       {
         "ordinal": 3,
-        "name": "initiator",
+        "name": "initiator!",
         "type_info": "Jsonb",
         "origin": {
           "Table": {
@@ -49,7 +49,7 @@
       },
       {
         "ordinal": 4,
-        "name": "manifest_id",
+        "name": "manifest_id!",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -60,7 +60,7 @@
       },
       {
         "ordinal": 5,
-        "name": "version",
+        "name": "version!",
         "type_info": "Int8",
         "origin": {
           "Table": {
@@ -71,7 +71,7 @@
       },
       {
         "ordinal": 6,
-        "name": "manifest",
+        "name": "manifest!",
         "type_info": "Text",
         "origin": {
           "Table": {
@@ -82,7 +82,7 @@
       },
       {
         "ordinal": 7,
-        "name": "issued_at",
+        "name": "issued_at!",
         "type_info": "Int8",
         "origin": {
           "Table": {
@@ -93,7 +93,7 @@
       },
       {
         "ordinal": 8,
-        "name": "manifest_expires_at",
+        "name": "manifest_expires_at!",
         "type_info": "Int8",
         "origin": {
           "Table": {
@@ -104,7 +104,7 @@
       },
       {
         "ordinal": 9,
-        "name": "public_key",
+        "name": "public_key!",
         "type_info": "Bytea",
         "origin": {
           "Table": {
@@ -115,12 +115,29 @@
       },
       {
         "ordinal": 10,
-        "name": "signature",
+        "name": "signature!",
         "type_info": "Bytea",
         "origin": {
           "Table": {
             "table": "manifests",
             "name": "signature"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "live!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "created_at"
           }
         }
       }
@@ -130,7 +147,8 @@
         "Uuid",
         "Int8",
         "Int8",
-        "Int8"
+        "Int8",
+        "Timestamptz"
       ]
     },
     "nullable": [
@@ -144,8 +162,10 @@
       false,
       false,
       false,
+      false,
+      null,
       false
     ]
   },
-  "hash": "b160a16819e7d3e5c56f55a4eccba42672176a752c6b62ead861a6934840feed"
+  "hash": "306736a2e4ba6730f589ef6216beb93cf88e539ea6ace32514621f81f4bb8d64"
 }

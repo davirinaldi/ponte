@@ -287,8 +287,12 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   the request returns to `queued`, and `action_sent` is audited only once a session holds it. The
   security review of step 6 added two cases: a claim whose answer was lost (it may have
   committed) puts back everything that sweep marked, found by the instant it claimed at, at
-  once and again at every sweep of the next minute (a claim given up at the store's limit may
-  still commit after the first try; the re-review of the fix found that); and
+  once and again at every sweep of the next minute, counted by a monotonic clock from when it
+  failed and all in one statement (a claim given up at the store's limit may still commit
+  after the first try; the re-reviews of the fix found that). A session that sends a request
+  again marks it sent at its own instant, so putting back an older claim never takes back
+  what is on its way to the agent. Past the minute, a claim that commits even later leaves
+  its requests for their device's next session, as before; and
   a claimed row that does not read is left `sent` and undelivered while the others go out.
   One narrow race is accepted: a session that starts between a failed hand-over and the
   return to the queue may send the request, and its answer is then dropped as "never
