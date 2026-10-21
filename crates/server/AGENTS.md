@@ -61,7 +61,9 @@ ADR-0007 and ADR-0008 say what it does; these rules keep it that way.
   not authenticated yet are counted and capped (`Limits`).
 - **Revocation does not wait for the device.** A session reads the device's status again at
   least every `Limits::status_check`, with or without a heartbeat, and ends when the device
-  is revoked. The store has the last word when a session starts, too.
+  is revoked. Every message written after `Welcome` has a deadline (`Limits::write`): a
+  peer that stops reading would otherwise hold the session inside a write, where the check
+  never runs. The store has the last word when a session starts, too.
 - **One session per device, started one at a time.** A session is recorded in the store
   first and takes the device's place in the registry second, both under the device's turn
   (`Registry::starting`). The old session is only replaced once the store accepted the new

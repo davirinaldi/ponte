@@ -530,6 +530,42 @@ async fn a_noisy_device_does_not_silence_another() {
     assert_eq!(lines_of(quiet_id), 1, "{logs}");
 }
 
+/// A peer that stops reading cannot hold its session inside a write, where the status
+/// check never runs: a revoked device would stay connected. Each write has a deadline.
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_stops_reading_is_disconnected_at_the_write_deadline() {
+    let Connected {
+        gateway,
+        store,
+        device,
+        id,
+        mut peer,
+        entry,
+    } = connected().await;
+    let request = ask(&store, id, &entry).await;
+    sweep_once(&gateway).await.unwrap();
+    run_action(&mut peer).await;
+    peer.finished().await;
+
+    // Reads the challenge and `Welcome`, then nothing: the request sent again stalls.
+    let mut stalled = Peer::connect_stalling(&gateway, 2);
+    let nonce = stalled.challenge().await;
+    stalled.send(text(&device.hello(&nonce, id)));
+    assert_eq!(
+        stalled.receive().await,
+        Some(Sent::Message(ServerToAgent::Welcome {}))
+    );
+    eventually("the session started", || {
+        store.record(id).unwrap().online.is_some()
+    })
+    .await;
+    let started = tokio::time::Instant::now();
+    stalled.finished().await;
+    assert_eq!(started.elapsed(), Limits::default().write);
+    assert_eq!(store.record(id).unwrap().online, None);
+    assert_eq!(state(&store, request).await, RequestState::Sent { at: at(0) });
+}
+
 /// A queued request that expires is marked so by the sweep, and audited.
 #[tokio::test(start_paused = true)]
 async fn the_sweep_expires_what_waited_too_long() {

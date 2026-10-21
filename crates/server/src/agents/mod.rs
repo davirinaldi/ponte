@@ -68,6 +68,10 @@ pub(crate) struct Limits {
     pub(crate) status_check: Duration,
     /// Connections that have not authenticated yet. Past this, upgrades are refused.
     pub(crate) unauthenticated: usize,
+    /// How long one message the server sends after `Welcome` may take to be written. A
+    /// peer that stops reading would otherwise hold the session inside a write, where the
+    /// status check never runs and a revoked device stays connected.
+    pub(crate) write: Duration,
 }
 
 impl Default for Limits {
@@ -78,6 +82,7 @@ impl Default for Limits {
             session: Duration::from_secs(24 * 60 * 60),
             status_check: Duration::from_secs(60),
             unauthenticated: 256,
+            write: Duration::from_secs(10),
         }
     }
 }

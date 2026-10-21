@@ -188,23 +188,35 @@ pub(crate) enum Sent {
     Closed,
 }
 
-struct RecordingSink(mpsc::UnboundedSender<Sent>);
+/// Records what the server sends. With `stall_after`, it takes that many messages and then
+/// never another one, like a peer that stopped reading.
+struct RecordingSink {
+    sent: mpsc::UnboundedSender<Sent>,
+    stall_after: Option<usize>,
+}
 
 impl Sink<Message> for RecordingSink {
     type Error = Infallible;
 
     fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        if self.stall_after == Some(0) {
+            // Never woken: the peer never reads again.
+            return Poll::Pending;
+        }
         Poll::Ready(Ok(()))
     }
 
-    fn start_send(self: Pin<&mut Self>, frame: Message) -> Result<(), Infallible> {
+    fn start_send(mut self: Pin<&mut Self>, frame: Message) -> Result<(), Infallible> {
         let Message::Text(text) = frame else {
             panic!("the server sent a frame that is not text: {frame:?}");
         };
         // Parsed with the agent's own strict types: whatever the server sends, an agent
         // must be able to read.
         let message = serde_json::from_str(text.as_str()).unwrap();
-        let _ = self.0.send(Sent::Message(message));
+        let _ = self.sent.send(Sent::Message(message));
+        if let Some(left) = self.stall_after.as_mut() {
+            *left = left.saturating_sub(1);
+        }
         Ok(())
     }
 
@@ -213,7 +225,7 @@ impl Sink<Message> for RecordingSink {
     }
 
     fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        let _ = self.0.send(Sent::Closed);
+        let _ = self.sent.send(Sent::Closed);
         Poll::Ready(Ok(()))
     }
 }
@@ -228,6 +240,19 @@ pub(crate) struct Peer {
 impl Peer {
     /// Opens a connection that negotiated [`version`] and runs the server's side of it.
     pub(crate) fn connect<D: ActionStore>(gateway: &Arc<Gateway<D>>) -> Self {
+        Self::connect_with(gateway, None)
+    }
+
+    /// Like [`Peer::connect`], for a peer that reads `messages` messages and then never
+    /// another one.
+    pub(crate) fn connect_stalling<D: ActionStore>(
+        gateway: &Arc<Gateway<D>>,
+        messages: usize,
+    ) -> Self {
+        Self::connect_with(gateway, Some(messages))
+    }
+
+    fn connect_with<D: ActionStore>(gateway: &Arc<Gateway<D>>, stall_after: Option<usize>) -> Self {
         let (to_server, mut inbox) = mpsc::unbounded_channel::<Message>();
         let (outbox, from_server) = mpsc::unbounded_channel();
         let stream = stream::poll_fn(move |cx| {
@@ -237,8 +262,12 @@ impl Peer {
         });
         let permit = gateway.admit().expect("no place left for a connection");
         let gateway = Arc::clone(gateway);
+        let sink = RecordingSink {
+            sent: outbox,
+            stall_after,
+        };
         let task = tokio::spawn(async move {
-            session::run(&gateway, version(), stream, RecordingSink(outbox), permit).await;
+            session::run(&gateway, version(), stream, sink, permit).await;
         });
         Self {
             to_server: Some(to_server),

@@ -197,7 +197,11 @@ async fn session<D, St, Si, E>(
         return;
     };
 
-    let end = if send(sink, &ServerToAgent::Welcome {}).await.is_ok() {
+    let limit = gateway.limits.write;
+    let end = if send_within(limit, sink, &ServerToAgent::Welcome {})
+        .await
+        .is_ok()
+    {
         tokio::select! {
             end = async {
                 if resend(gateway, id, sink).await.is_err() {
@@ -329,7 +333,7 @@ where
     } in unanswered
     {
         let request_id = request.request_id;
-        send(sink, &ServerToAgent::RunAction(request)).await?;
+        send_within(gateway.limits.write, sink, &ServerToAgent::RunAction(request)).await?;
         audit::record(&AuditEvent::ActionSent {
             request: request_id,
             device,
@@ -369,7 +373,10 @@ where
                 // Handed over by the sweep, which already recorded `action_sent`. If the
                 // connection fails here the request stays `sent`, and the device's next
                 // session sends it again.
-                if send(sink, &ServerToAgent::RunAction(request)).await.is_err() {
+                let written =
+                    send_within(gateway.limits.write, sink, &ServerToAgent::RunAction(request))
+                        .await;
+                if written.is_err() {
                     return SessionEnd::Disconnected;
                 }
                 continue;
@@ -559,6 +566,20 @@ where
     sink.send(Message::Text(text.into()))
         .await
         .map_err(|_| SendFailed)
+}
+
+/// [`send`] within `limit`: a peer that does not read what it is sent gets no longer.
+async fn send_within<Si>(
+    limit: Duration,
+    sink: &mut Si,
+    message: &ServerToAgent,
+) -> Result<(), SendFailed>
+where
+    Si: Sink<Message> + Unpin,
+{
+    timeout(limit, send(sink, message))
+        .await
+        .unwrap_or(Err(SendFailed))
 }
 
 /// Closes with no code and no reason, the same for every ending, then gives the peer a
