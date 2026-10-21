@@ -178,6 +178,67 @@ Windows answers "file not found" or "path not found"; any other error is a faile
 never "absent". Short 8.3 names, alternate data streams and hard links are covered by the
 lexical policy, the final-path check and the link count.
 
+### Step 5 of M2 settled the details
+
+Building the Windows layer showed where the text above needed more, or was not right. The
+code follows this section.
+
+- **Which rule applies where.** The strict rule (owner SYSTEM or Administrators, no right to
+  change for anyone else) holds for the configuration file and the folder that holds it,
+  the token file and the folder that holds it, and the data directory itself. Read
+  literally, "the folders that hold them" would also put the folder that holds the data
+  directory under it: with the data directory in `C:\ProgramData\Ponte`, that is
+  `C:\ProgramData`, where every user may add files, and every standard installation would
+  fail. Every folder above, up to the drive, is held to the rule for folders above. The
+  agent's executable and its folder are held to the strict rule with TrustedInstaller also
+  allowed, and the folders above them to the rule for folders above.
+- **How the rule reads an ACL.** Generic rights count as what they map to for files, and
+  `MAXIMUM_ALLOWED` as everything. Deny entries are ignored: they only take rights away. For
+  the strict rule an entry that only children inherit still counts, since it decides what
+  the files the agent makes there inherit; for folders above it does not, since each folder
+  below is checked on its own. CREATOR OWNER and CREATOR GROUP are ignored when only
+  inherited; OWNER RIGHTS is the owner, who already passed. No DACL, an object or callback
+  entry, or an entry of any other kind refuses. A volume that keeps no access lists (FAT)
+  refuses. Mandatory labels are not part of the rule.
+- **The chain is walked, not trusted.** Each folder from the drive down is opened without
+  following a reparse point, and one that is a junction, a link or a mount point refuses
+  the start: otherwise a user who made `C:\ProgramData\Ponte` a junction before the agent
+  was installed would have the folders checked be another than the folders used. The path
+  must resolve to itself (a short 8.3 name refuses) and, when the agent runs elevated, be
+  absolute: a service starts in `System32`.
+- **The folders the agent makes** get `D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)`:
+  SYSTEM, Administrators and the folder's owner, inheriting nothing. As a service the owner
+  is SYSTEM and as an elevated console Administrators; an ordinary console that makes one
+  owns it and can use it, and a service then refuses it, as it refuses a key that console
+  protected.
+- **A binary users can change refuses its service.** The structural rules gain one: the
+  binary of a service, and every folder above it, must pass the rule for the agent's own
+  executable. Restarting a service whose binary a user can replace would run that user's
+  code as the service's account, which `docs/threat-model.md` had accepted until M5; with the
+  ACL rule written, enforcing the install guidance costs little. The binary path itself must
+  be one absolute `.exe` on a drive letter, quoted or without spaces, with nothing of the
+  environment left after expansion; anything else cannot be read and refuses. A service
+  that does not exist is refused by structure too. What remains accepted is in the threat
+  model: the service's key in the registry and its own ACL in the service manager.
+- **Unreadable is not structure.** A service the service manager could not be asked about,
+  or not within the time the manifest had left, is answered `ServiceRefused` like the
+  rest, but not recorded in the ring (ADR-0012): it describes the machine at that moment,
+  and a copy is decided again. A refusal by structure, and the unsupported platform's, are
+  recorded.
+- **Roots as they resolve.** A root is opened following whatever junction or link it is,
+  and its final path must pass the lexical rules again and the folders Windows reports for
+  itself, read from the registry without COM: the Windows folder (none may be or lie in
+  it), the `Program Files` folders, `ProgramData`, the folder of profiles and each profile
+  in the profile list (none may be one), and any folder right inside the folder of
+  profiles. A delete root must still lie inside an allowed root as both resolve, and the
+  agent's executable folder, configuration, data directory and token may not lie in a root
+  or hold one as everything resolves. Any of these refuses the start. A root that does not
+  exist when the agent starts stays unresolved until it starts again: nothing under it is
+  used, so a root made later, by whoever, is never trusted, and an agent can still start
+  on a machine where the ERP is not installed yet.
+- **`path_absent`** holds only for "file not found" and "path not found", without a check
+  of the folder above: the ERP reads the same path the agent does.
+
 ### Only a validated type runs
 
 `Manifest` → `ValidManifest` → `VerifiedManifest` → `RunnableManifest`.
@@ -247,8 +308,10 @@ so it comes after M2 with an ADR of its own.
 - The Windows file layer is the most delicate code of the milestone, and it is
   Windows-only: its tests run in the Windows job of CI, and the parts that do not depend on
   Windows (roots, coverage, limits) are tested everywhere.
-- Restarting a service whose binary a user can replace gives that user SYSTEM. The policy
-  cannot see that; it is an accepted risk in `docs/threat-model.md`, with install guidance.
+- Restarting a service whose binary a user can replace gives that user SYSTEM. Step 5 of M2
+  refuses such a service by its structure; a service whose registry key or whose own ACL
+  in the service manager a user can change is still an accepted risk in
+  `docs/threat-model.md`, with install guidance.
 - Four primitives listed in RF-11 do not run in M2, and neither do parameters (RF-12).
 
 ## Alternatives considered
