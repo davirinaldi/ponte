@@ -94,6 +94,39 @@ path with spaces lets a user plant `C:\Program.exe`), `start= auto` and `obj= Lo
 and `sc.exe failure` with restart actions for RF-44. The configuration and the data
 directory live under `C:\ProgramData\Ponte`, created with the ACL above.
 
+### Step 5 of M2 settled the details
+
+- **The command line** is `ponte-agent run <config>` in a console and `ponte-agent service
+  --config <path>` for the service manager; the bare `ponte-agent <config>` of M1 is gone.
+  `service` started by hand says to use `run`.
+- **Starting.** The service reports `START_PENDING`, with a checkpoint every second and a
+  hint of 15 seconds, while the agent checks its ground under the name the service manager
+  gives it (`AgentConfig` refuses that name in `allowed_services`) and while the executor
+  waits for the journal, which an agent still stopping may hold for up to ten seconds.
+  `RUNNING`, accepting stop and shutdown, comes once the executor holds it.
+- **Stopping** reports `STOP_PENDING` with `shutdown_timeout_secs` plus ten seconds for the
+  session's close as the hint, then `STOPPED`.
+- **The Event Log** gets a fixed event id per kind of failure and the name of the setting
+  at fault: 1 the configuration (a parse error adds its line, never the text), 2 a path
+  that fails the owner and ACL rules, 3 `ws://` while elevated, 4 a data directory that
+  cannot be made, 5 the roots as they resolve, 100 a log that cannot be opened, 101 a
+  runtime or a service manager that failed. The service stops with the same number as its
+  service-specific exit code, which `sc.exe query` shows.
+- **The log** is `<data_dir>\logs\agent.log`, turned into `agent.1.log` when the next line
+  would take it past 5 MB; it opens only after the data directory passed its checks.
+- **The key.** A file of exactly 32 bytes is the plain key of M1: refused as "no key", so a
+  new enrollment replaces it. A blob this account cannot open is an error with a message
+  that names the likely cause, never "no key": the identity does not enroll over a key it
+  could not read, and an administrator removes it on purpose.
+- **The monotonic clock** of the high-water mark is `QueryInterruptTime`, which counts the
+  time the machine slept.
+- **The machine of Windows has one slot**: every call waits for it within the time the
+  manifest has left and runs on a thread that holds it until the work returns, so a
+  `StartServiceW` that overran its deadline keeps the next action from running beside it.
+- **`Machine` still takes a step or a check**, not the `RunnableManifest` and an index: the
+  signed manifest the type would need cannot be made in the agent's tests, and the machine
+  of Windows checks every path and service again on its own.
+
 ## Consequences
 
 - The agent can finally act, and a bug in it is a bug running as SYSTEM. The policy of
