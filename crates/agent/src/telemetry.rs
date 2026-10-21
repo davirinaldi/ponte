@@ -3,13 +3,16 @@
 //! What is read is deliberately little (RNF-09): how long the machine is up, how busy its
 //! processors are, how much memory and disk is in use. Nothing here lists processes,
 //! users, network interfaces or host names, and no text from the machine goes out except
-//! a drive letter. Services (RF-06) come with the Windows platform layer in M2.
+//! a drive letter, and the state of each service the configuration allows (RF-06), by the
+//! name the configuration gave it.
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
-use ponte_protocol::{DiskUsage, Label, MemoryUsage, TelemetrySnapshot};
+use ponte_protocol::{
+    DiskUsage, Label, MemoryUsage, ServiceName, ServiceStatus, TelemetrySnapshot,
+};
 use sysinfo::{DiskRefreshKind, Disks, System};
 use tracing::warn;
 
@@ -27,7 +30,11 @@ pub(crate) trait Collect {
 /// The very first reading of the processors takes the system about half a second, so it
 /// happens on a blocking thread, like every other one, and never on the async runtime.
 #[derive(Clone)]
-pub(crate) struct Collector(Arc<Mutex<Option<Probe>>>);
+pub(crate) struct Collector {
+    probe: Arc<Mutex<Option<Probe>>>,
+    /// `allowed_services`, whose states every snapshot reports.
+    services: Arc<Vec<ServiceName>>,
+}
 
 struct Probe {
     system: System,
@@ -35,14 +42,17 @@ struct Probe {
 }
 
 impl Collector {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(None)))
+    pub(crate) fn new(services: Vec<ServiceName>) -> Self {
+        Self {
+            probe: Arc::new(Mutex::new(None)),
+            services: Arc::new(services),
+        }
     }
 
     /// Takes the first reading in the background, so that the first heartbeat has one
     /// to compare with and does not wait for it.
     pub(crate) fn warm_up(&self) {
-        let probe = Arc::clone(&self.0);
+        let probe = Arc::clone(&self.probe);
         drop(tokio::task::spawn_blocking(move || {
             locked(&probe).get_or_insert_with(Probe::new);
         }));
@@ -58,10 +68,14 @@ fn locked(probe: &Mutex<Option<Probe>>) -> std::sync::MutexGuard<'_, Option<Prob
 
 impl Collect for Collector {
     async fn snapshot(&self) -> Option<TelemetrySnapshot> {
-        let probe = Arc::clone(&self.0);
-        // Reading disks is a handful of system calls that may wait on a slow drive.
+        let probe = Arc::clone(&self.probe);
+        let services = Arc::clone(&self.services);
+        // Reading disks is a handful of system calls that may wait on a slow drive, and the
+        // service manager may take its time too.
         let reading = tokio::task::spawn_blocking(move || {
-            locked(&probe).get_or_insert_with(Probe::new).read()
+            let mut reading = locked(&probe).get_or_insert_with(Probe::new).read();
+            reading.services = crate::platform::service_states(&services);
+            reading
         })
         .await;
         match reading {
@@ -82,6 +96,7 @@ struct Reading {
     memory_total: u64,
     memory_used: u64,
     disks: Vec<DiskReading>,
+    services: Vec<ServiceStatus>,
 }
 
 struct DiskReading {
@@ -124,6 +139,7 @@ impl Probe {
                     removable: disk.is_removable(),
                 })
                 .collect(),
+            services: Vec::new(),
         }
     }
 }
@@ -162,7 +178,8 @@ fn snapshot_of(reading: Reading, collected_at: DateTime<Utc>) -> TelemetrySnapsh
             used_bytes: reading.memory_used.min(reading.memory_total),
         },
         disks,
-        services: Vec::new(),
+        // At most 32, the most `allowed_services` takes, which is `MAX_LISTED`.
+        services: reading.services,
     }
 }
 
@@ -188,6 +205,8 @@ pub(crate) fn os_label() -> Label {
 
 #[cfg(test)]
 mod tests {
+    use ponte_protocol::ServiceState;
+
     use super::*;
 
     fn at() -> DateTime<Utc> {
@@ -201,6 +220,7 @@ mod tests {
             memory_total: 8,
             memory_used: 3,
             disks: Vec::new(),
+            services: Vec::new(),
         }
     }
 
@@ -334,7 +354,12 @@ mod tests {
     /// The real thing, on whatever machine runs the tests.
     #[tokio::test]
     async fn a_snapshot_of_this_machine_is_plausible() {
-        let collector = Collector::new();
+        // One service every Windows has, and one no machine has.
+        let services: Vec<ServiceName> = ["Schedule", "ponte-surely-not-a-service"]
+            .iter()
+            .map(|name| name.parse().unwrap())
+            .collect();
+        let collector = Collector::new(services);
         collector.warm_up();
         let before = Utc::now();
         let snapshot = collector.snapshot().await.expect("the reading failed");
@@ -353,7 +378,24 @@ mod tests {
                 "{disk:?}"
             );
         }
-        assert!(snapshot.services.is_empty());
+        // By the names the configuration gave, in its order (RF-06). Outside Windows there
+        // are no services to read.
+        let reported: Vec<(&str, ServiceState)> = snapshot
+            .services
+            .iter()
+            .map(|status| (status.name.as_str(), status.state))
+            .collect();
+        if cfg!(windows) {
+            assert_eq!(
+                reported,
+                [
+                    ("Schedule", ServiceState::Running),
+                    ("ponte-surely-not-a-service", ServiceState::Unknown)
+                ]
+            );
+        } else {
+            assert!(reported.is_empty());
+        }
 
         // It is what the server expects, and small.
         let wire = serde_json::to_string(&snapshot).unwrap();

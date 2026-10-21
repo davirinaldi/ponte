@@ -37,16 +37,17 @@ pub(crate) trait Clock: Send + Sync + 'static {
     fn monotonic(&self) -> Duration;
 }
 
-/// The system's clocks. On Windows step 5 of M2 replaces the monotonic one with
-/// `QueryInterruptTime`, which also counts the time the machine slept.
+/// The system's clocks. The monotonic one is the platform's: on Windows
+/// `QueryInterruptTime`, which also counts the time the machine slept, so the mark keeps
+/// up with a machine that sleeps.
 pub(crate) struct SystemClock {
-    started: std::time::Instant,
+    started: Duration,
 }
 
 impl SystemClock {
     pub(crate) fn new() -> Self {
         Self {
-            started: std::time::Instant::now(),
+            started: crate::platform::monotonic(),
         }
     }
 }
@@ -59,7 +60,7 @@ impl Clock for SystemClock {
     }
 
     fn monotonic(&self) -> Duration {
-        self.started.elapsed()
+        crate::platform::monotonic().saturating_sub(self.started)
     }
 }
 

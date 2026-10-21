@@ -16,12 +16,11 @@
 //! - its binary, or a folder above it, can be changed by anyone but SYSTEM,
 //!   Administrators or TrustedInstaller: starting it would run that someone's code as the
 //!   service's account.
-#![expect(
-    dead_code,
-    reason = "the machine of Windows calls these, in the next commit"
-)]
 
 use std::fs::OpenOptions;
+use std::time::Duration;
+
+use ponte_protocol::{ServiceName, ServiceState, ServiceStatus};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::Path;
 
@@ -358,6 +357,46 @@ pub(crate) fn stop(name: &str) -> Result<(), Refused> {
     Ok(())
 }
 
+/// The state of each service in `names`, for the telemetry (RF-06), read within about two
+/// seconds in all: what does not answer by then is `Unknown`.
+pub(crate) fn report(names: &[ServiceName]) -> Vec<ServiceStatus> {
+    let unknown = |names: &[ServiceName]| {
+        names
+            .iter()
+            .map(|name| ServiceStatus {
+                name: name.clone(),
+                state: ServiceState::Unknown,
+            })
+            .collect()
+    };
+    let owned = names.to_vec();
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new()
+        .name("ponte-services".to_owned())
+        .spawn(move || {
+            let states: Vec<ServiceStatus> = owned
+                .into_iter()
+                .map(|name| {
+                    let state = match state(name.as_str()) {
+                        Ok(State::Running) => ServiceState::Running,
+                        Ok(State::Stopped) => ServiceState::Stopped,
+                        Ok(State::StartPending) => ServiceState::StartPending,
+                        Ok(State::StopPending) => ServiceState::StopPending,
+                        Ok(State::Other) | Err(_) => ServiceState::Unknown,
+                    };
+                    ServiceStatus { name, state }
+                })
+                .collect();
+            let _ = send.send(states);
+        });
+    if spawned.is_err() {
+        return unknown(names);
+    }
+    receive
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap_or_else(|_| unknown(names))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +494,20 @@ mod tests {
         // The task scheduler always runs.
         assert_eq!(state("Schedule"), Ok(State::Running));
         assert_eq!(state("ponte-surely-not-a-service"), Err(Refused::Missing));
+    }
+
+    #[test]
+    fn the_telemetry_reports_each_listed_service() {
+        let names: Vec<ServiceName> = ["Schedule", "ponte-surely-not-a-service"]
+            .iter()
+            .map(|name| name.parse().unwrap())
+            .collect();
+        let report = report(&names);
+        assert_eq!(report.len(), 2);
+        assert_eq!(report[0].name.as_str(), "Schedule");
+        assert_eq!(report[0].state, ServiceState::Running);
+        assert_eq!(report[1].state, ServiceState::Unknown);
+        assert!(super::report(&[]).is_empty());
     }
 
     #[test]

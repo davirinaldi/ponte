@@ -146,6 +146,12 @@ impl AllowedServices {
             .iter()
             .any(|allowed| allowed.as_str().eq_ignore_ascii_case(name))
     }
+
+    /// The names, in the order the configuration gave them: what the agent reports the
+    /// state of (RF-06).
+    pub fn iter(&self) -> impl Iterator<Item = &ServiceName> {
+        self.0.iter()
+    }
 }
 
 /// What a machine allows, built from the agent's configuration.
@@ -293,6 +299,13 @@ mod tests {
 
     fn services(names: &[&str]) -> AllowedServices {
         AllowedServices::new(names.iter().map(|name| name.parse().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn the_allowed_services_are_listed_as_configured() {
+        let allowed = services(&["FakeErp", "MSSQL$ERP"]);
+        let listed: Vec<&str> = allowed.iter().map(ServiceName::as_str).collect();
+        assert_eq!(listed, ["FakeErp", "MSSQL$ERP"]);
     }
 
     /// What a lab machine with the FakeErp would configure.

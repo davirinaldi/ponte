@@ -4,9 +4,12 @@
 //! why it is sound.
 
 pub(crate) mod acl;
+pub(crate) mod clock;
 pub(crate) mod dpapi;
 pub(crate) mod elevation;
 pub(crate) mod files;
+pub(crate) mod machine;
+pub(crate) mod roots;
 pub(crate) mod services;
 
 pub const NAME: &str = "windows";

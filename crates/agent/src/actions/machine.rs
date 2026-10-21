@@ -16,11 +16,8 @@ use ponte_actions::{Check, Primitive};
 /// read at all. A service that does not exist is refused by `Structure`; `Unreadable` and
 /// `TimedOut` describe the machine at that moment and are not recorded (ADR-0013).
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the machine of Windows gives these, in step 5 of M2"
-    )
+    not(any(test, windows)),
+    expect(dead_code, reason = "only the machine of Windows gives these")
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ServiceRefusal {
@@ -39,11 +36,8 @@ pub(crate) enum CheckError {
 
 /// A step that did not do what it says.
 #[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the machine of Windows gives these, in step 5 of M2"
-    )
+    not(any(test, windows)),
+    expect(dead_code, reason = "only the machine of Windows gives these")
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StepError {
@@ -70,7 +64,7 @@ pub(crate) trait Machine: Send + Sync + 'static {
 }
 
 /// A platform that runs nothing: every service is refused, every check and every step
-/// fails. Outside Windows, and on Windows until step 5 of M2. With the coverage rules of
+/// fails. Outside Windows, which builds are for development. With the coverage rules of
 /// `ponte_actions`, no manifest gets to "started" on it: a step that names a service has
 /// that service refused first, and `delete_file` needs a `path_exists` precondition.
 pub(crate) struct Unsupported;
