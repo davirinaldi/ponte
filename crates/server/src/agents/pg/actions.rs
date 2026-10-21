@@ -488,8 +488,10 @@ impl ActionStore for PgStore {
             // Locked until the end: two answers to one request take turns, and the second
             // is judged against what the first stored.
             let row = sqlx::query!(
-                "SELECT device_id, status, sent_at, reason, step FROM action_requests
-                 WHERE id = $1 FOR UPDATE",
+                r#"SELECT r.device_id, r.status, r.sent_at, r.reason, r.step,
+                          d.status AS "device_status"
+                   FROM action_requests r JOIN devices d ON d.id = r.device_id
+                   WHERE r.id = $1 FOR UPDATE OF r"#,
                 result.request_id.as_uuid(),
             )
             .fetch_optional(&mut *tx)
@@ -500,6 +502,9 @@ impl ActionStore for PgStore {
             };
             if row.device_id != *device.as_uuid() {
                 return Ok(Finish::OtherDevice);
+            }
+            if status_of(OPERATION, &row.device_status)? != DeviceStatus::Active {
+                return Ok(Finish::DeviceNotActive);
             }
             let before = outcome_of(
                 OPERATION,

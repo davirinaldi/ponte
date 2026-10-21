@@ -311,7 +311,10 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   that holds its row, so two answers to one request (a session that was replaced, and the
   new one) take turns.
 - Results for a `sent` request are taken after its expiry: the agent may have run it in
-  time and answered late.
+  time and answered late. They are taken only while the device is active: a revoked key
+  that still holds a connection for a moment writes no outcome (the security review of
+  step 6).
+- Audit events and listings spell reasons as the wire and the database do (`queue_full`).
 
 ## Consequences
 

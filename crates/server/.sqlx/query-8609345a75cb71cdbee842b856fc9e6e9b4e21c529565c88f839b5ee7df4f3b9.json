@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT device_id, status, sent_at, reason, step FROM action_requests\n                 WHERE id = $1 FOR UPDATE",
+  "query": "SELECT r.device_id, r.status, r.sent_at, r.reason, r.step,\n                          d.status AS \"device_status\"\n                   FROM action_requests r JOIN devices d ON d.id = r.device_id\n                   WHERE r.id = $1 FOR UPDATE OF r",
   "describe": {
     "columns": [
       {
@@ -57,6 +57,17 @@
             "name": "step"
           }
         }
+      },
+      {
+        "ordinal": 5,
+        "name": "device_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "status"
+          }
+        }
       }
     ],
     "parameters": {
@@ -69,8 +80,9 @@
       false,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "f7f6c1436a9e4a4794fcc0b7cf2fe1d6dfca798df9c26fcc5bc9a41bb9d01519"
+  "hash": "8609345a75cb71cdbee842b856fc9e6e9b4e21c529565c88f839b5ee7df4f3b9"
 }

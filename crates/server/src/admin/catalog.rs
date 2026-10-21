@@ -401,13 +401,21 @@ fn status(state: &RequestState) -> String {
             ..
         } => {
             let step = step.map_or_else(String::new, |step| format!(" at step {step}"));
-            format!("failed {reason:?}{step}")
+            format!("failed {}{step}", code(reason))
         }
         RequestState::Answered {
             outcome: ActionOutcome::Rejected { reason },
             ..
-        } => format!("rejected {reason:?}"),
+        } => format!("rejected {}", code(reason)),
         other => other.name().to_owned(),
+    }
+}
+
+/// A reason's code as the wire and the database spell it.
+fn code<T: serde::Serialize>(reason: &T) -> String {
+    match serde_json::to_value(reason) {
+        Ok(serde_json::Value::String(code)) => code,
+        _ => "unknown".to_owned(),
     }
 }
 

@@ -116,7 +116,14 @@ pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(
 /// per session, so reconnecting does not refill it, and per device and not for the whole
 /// server, so a noisy device does not silence what another one does.
 #[derive(Debug, Default)]
-pub(crate) struct DeviceLogs(Mutex<HashMap<DeviceId, Window>>);
+pub(crate) struct DeviceLogs(Mutex<Windows>);
+
+#[derive(Debug, Default)]
+struct Windows {
+    by_device: HashMap<DeviceId, Window>,
+    /// When windows that are over were last forgotten.
+    pruned: Option<Instant>,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Window {
@@ -135,11 +142,19 @@ impl DeviceLogs {
     /// ends, the first line of the next one says how many.
     pub(crate) fn allow(&self, device: DeviceId) -> bool {
         let now = Instant::now();
-        let mut windows = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        if windows.len() > Self::PRUNE_ABOVE {
-            windows.retain(|_, window| now.duration_since(window.started) < Self::WINDOW);
+        let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let windows = &mut *guard;
+        // At most once a window: past the bound, every call would walk the whole map.
+        let due = windows
+            .pruned
+            .is_none_or(|pruned| now.duration_since(pruned) >= Self::WINDOW);
+        if windows.by_device.len() > Self::PRUNE_ABOVE && due {
+            windows
+                .by_device
+                .retain(|_, window| now.duration_since(window.started) < Self::WINDOW);
+            windows.pruned = Some(now);
         }
-        let window = windows.entry(device).or_insert(Window {
+        let window = windows.by_device.entry(device).or_insert(Window {
             started: now,
             lines: 0,
             suppressed: 0,
