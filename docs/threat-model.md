@@ -84,8 +84,12 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
   where users may create symbolic links (Developer Mode, or the privilege granted). Opening
   relative to the held folder (`NtCreateFile` with `OBJ_DONT_REPARSE`) would close it and
   waits for the review of M5; the install guidance is to keep symbolic links to
-  administrators and remote-to-local evaluation off (`fsutil behavior set
-  SymlinkEvaluation`).
+  administrators and to turn local-to-remote evaluation off (`fsutil behavior set
+  SymlinkEvaluation L2R:0`, which is on by default; `R2R:0` and `R2L:0` too). The same
+  mechanism would close a narrower race when an elevated agent makes its data directory:
+  an empty folder above it that others may write to could become a mount point between its
+  check and the creation, and SYSTEM would make one empty private folder where it points
+  before the start is refused.
 - Until M3 nothing ties a request to a person. A compromised server, or whoever terminates
   TLS in front of it, can run any manifest that is signed, unexpired and allowed by a
   device's local policy, at a moment of its choosing, up to the rate limits (ADR-0012).
