@@ -13,8 +13,8 @@ point-of-sale PCs, so bugs here are expensive and visible.
 - **Never panic, never exit on bad input.** Reject, log, keep running. The service manager
   restarts a crashed agent, but a crash loop on 10,000 machines is an incident.
 - **Outbound connections only.** No listening sockets, no local HTTP server.
-- Windows-specific code lives in `src/platform/windows.rs` (and submodules). It is the only
-  place where `unsafe` is allowed; every block needs a `// SAFETY:` comment.
+- Windows-specific code lives in `src/platform/windows/`. It is the only place where
+  `unsafe` is allowed; every block needs a `// SAFETY:` comment.
 - The crate must still compile and test on Linux: Windows dependencies go under
   `[target.'cfg(windows)'.dependencies]`, and `platform/unsupported.rs` fails loudly.
 - UI, consent prompts and screen capture belong to `crates/agent-helper`, not here
@@ -132,3 +132,42 @@ server is not trusted, and neither is the user of the machine.
   the executor logs request ids, manifest ids and versions, step indexes and reason codes
   only: never a service name, a path, or anything of the request the server wrote, the
   text of a parse error included (`runner::tests::the_log_holds_no_name_*`).
+
+## Windows (`src/platform/windows/`)
+
+ADR-0011 and ADR-0013 say what the agent does on Windows. These rules keep it; the user of
+the machine is not trusted, and runs code beside a SYSTEM process.
+
+- **Every path from a manifest, the configuration or the token goes through `files.rs`**:
+  identification-level SQOS (a named pipe learns who asks and cannot act as SYSTEM), no
+  reparse point followed at the end, no delete sharing, a disk file. The agent's own files
+  must also be a regular file with one link, and a refusal is never `InvalidData` (the
+  identity reads that as "no key" and would enroll over it). A manifest's path must end, by
+  the final path of its handle compared name by name with `CompareStringOrdinal`, inside a
+  root as the roots resolved at start (`roots.rs`); `\\?\UNC` and volumes with no letter
+  are refused, and `delete_file` deletes through the handle it checked. `path_absent` holds
+  only for "file not found" and "path not found".
+- **Writes are written through**: a new temporary file, flushed, then
+  `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. A write never makes a folder; the data
+  directory and `logs` are made when the agent starts, with the protected ACL of `acl.rs`.
+- **An elevated token, or one that cannot be read, gets the strict rules** (`lib::prepare`):
+  the executable, the configuration, the data directory and the token must pass the owner
+  and ACL rules of `acl.rs`, walked from the drive without following reparse points; paths
+  must be absolute; `ws://` is refused. Never decide this from how the agent was started.
+- **The machine has one slot** (`machine.rs`). Every call takes it within the time the
+  manifest has left and works on a thread that holds it until the work returns: a call that
+  overran its deadline keeps the machine, and the next action times out rather than run
+  beside it. Never call the service manager or open a manifest's path outside it.
+- **Services** (`services.rs`) are refused by their structure whatever the configuration
+  says: not `SERVICE_WIN32_OWN_PROCESS`, protected, a binary path that is not one plain
+  `.exe`, a binary in the Windows folder or one that non-administrators can change, a
+  missing service. "Could not ask" (`Unreadable`) and a deadline are not recorded; a refusal
+  by structure is. A started service is read again five seconds later.
+- **The service** (`service.rs`) reports `START_PENDING` while it checks its ground and
+  waits for the journal, `RUNNING` once the executor holds it, and `STOP_PENDING` with
+  `shutdown_timeout_secs` as the hint. What fails before the log goes to the Event Log as a
+  code and the name of a setting (`eventlog.rs`); never a path or the configuration's text.
+  The log is `<data_dir>\logs\agent.log` and `agent.1.log`, 5 MB each.
+- Tests that need Windows are in the modules, under `cfg(windows)`. Tests named
+  `win_admin_*` install services and are `#[ignore]`: run them elevated, after building
+  `fake-erp`, with `cargo test -p ponte-agent -- --ignored win_admin_ --test-threads=1`.

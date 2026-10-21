@@ -1,10 +1,20 @@
 # Copy to agent.toml for local development: cargo run -p ponte-agent -- run agent.toml
+# from an ordinary console. Elevated, and as the Windows service (`ponte-agent service
+# --config <path>`), the agent applies the rules of ADR-0011 and ADR-0013: this file, the
+# data directory, the token and the agent's own executable must be owned by SYSTEM or
+# Administrators and changeable by nobody else, every path must be absolute, and ws:// is
+# refused. A refusal before the log goes to the Event Log, source PonteAgent.
 server_url = "ws://127.0.0.1:8080/agent"
+
+# Where path checks may look. Each is also resolved when the agent starts, through any
+# junction, and must pass the same rules where it ends up; one that does not exist yet is
+# left out until the agent starts again.
 allowed_roots = ['C:\FakeErp']
 
-# Where the device key, the identity, the journal of actions and the clock mark live. The
-# installer writes an absolute path that only administrators can change, outside every
-# root. `keys/` is ignored by git.
+# Where the device key (under DPAPI on Windows), the identity, the journal of actions, the
+# clock mark and the service's logs live. The installer writes an absolute path that only
+# administrators can change, outside every root; the agent makes it, with an ACL for SYSTEM
+# and Administrators only, if it is missing. `keys/` is ignored by git.
 data_dir = "keys/agent-dev"
 
 # The enrollment token: 64 lowercase hex characters. Read once, removed once enrolled.

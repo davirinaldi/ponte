@@ -200,10 +200,6 @@ fn replace_through(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Renames `from` over `to`, for the logs: written through like the rest.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the service's log uses it, in the next commit")
-)]
 pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
     replace_through(from, to)
 }
@@ -228,10 +224,6 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
 }
 
 /// Opens a log file to append to, creating it if needed.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the service's log uses it, in the next commit")
-)]
 pub(crate) fn open_append(path: &Path) -> io::Result<File> {
     own(path, OpenOptions::new().append(true).create(true))
 }
