@@ -30,7 +30,17 @@ impl TempDir {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         );
-        let path = std::env::temp_dir().join(name);
+        // The long form: Windows may name the temporary folder with a short 8.3 name
+        // (`RUNNER~1` on CI runners), and what the agent checks is where paths resolve.
+        let base = std::env::temp_dir();
+        let base = std::fs::canonicalize(&base)
+            .ok()
+            .and_then(|long| {
+                let text = long.to_str()?.to_owned();
+                Some(PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text)))
+            })
+            .unwrap_or(base);
+        let path = base.join(name);
         // Left by an earlier run that had the same process id.
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();

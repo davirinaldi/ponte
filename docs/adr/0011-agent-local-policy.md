@@ -225,17 +225,27 @@ code follows this section.
   rest, but not recorded in the ring (ADR-0012): it describes the machine at that moment,
   and a copy is decided again. A refusal by structure, and the unsupported platform's, are
   recorded.
-- **Roots as they resolve.** A root is opened following whatever junction or link it is,
-  and its final path must pass the lexical rules again and the folders Windows reports for
-  itself, read from the registry without COM: the Windows folder (none may be or lie in
-  it), the `Program Files` folders, `ProgramData`, the folder of profiles and each profile
-  in the profile list (none may be one), and any folder right inside the folder of
-  profiles. A delete root must still lie inside an allowed root as both resolve, and the
-  agent's executable folder, configuration, data directory and token may not lie in a root
-  or hold one as everything resolves. Any of these refuses the start. A root that does not
-  exist when the agent starts stays unresolved until it starts again: nothing under it is
-  used, so a root made later, by whoever, is never trusted, and an agent can still start
-  on a machine where the ERP is not installed yet.
+- **Roots, and the paths below them, follow no reparse point.** The plan resolved roots
+  through junctions and checked where they ended; the security review of step 5 showed
+  that a name is not enough. A root is walked from its drive, one folder at a time, without
+  following a reparse point, must resolve to itself, and every folder of the way is held
+  open, with listing access and without delete sharing, for as long as the agent runs, so
+  none can be renamed and replaced by a junction afterwards (a handle with attribute
+  access only takes no part in sharing and would not stop a rename). It must also pass the
+  lexical rules again and the folders Windows reports for itself, read from the registry
+  without COM: the Windows folder (none may be or lie in it), the `Program Files` folders,
+  `ProgramData`, the folder of profiles and each profile in the profile list (none may be
+  one), and any folder right inside the folder of profiles. A delete root must lie inside
+  an allowed root. A root that fails any of this, or does not exist yet, is **left out**
+  with a warning (its setting and index, never its path) until the agent starts again,
+  rather than refusing the start: otherwise a user who can write beside a root could keep
+  the agent from starting. Only the agent's executable folder, configuration, data
+  directory or token lying in a root, or holding one, refuses the start, since only the
+  configuration puts them there. Below a root, every folder of a manifest's path is walked
+  and held the same way for the length of the check or the delete, and a reparse point
+  anywhere refuses the path: a directory link to another machine would otherwise make
+  SYSTEM authenticate there before any check of where the path ended. The final path is
+  still checked against the roots.
 - **`path_absent`** holds only for "file not found" and "path not found", without a check
   of the folder above: the ERP reads the same path the agent does.
 
