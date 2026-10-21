@@ -293,7 +293,6 @@ impl Descriptor {
             if inherit_only && (accounts.creator_owner.is(sid) || accounts.creator_group.is(sid)) {
                 continue;
             }
-            let maximum = mask & MAXIMUM_ALLOWED;
             let mapping = GENERIC_MAPPING {
                 GenericRead: FILE_GENERIC_READ,
                 GenericWrite: FILE_GENERIC_WRITE,
@@ -302,7 +301,8 @@ impl Descriptor {
             };
             // SAFETY: both point to values that live through the call.
             unsafe { MapGenericMask(&mut mask, &mapping) };
-            if (mask | maximum) & forbidden != 0 {
+            // MAXIMUM_ALLOWED is not a generic right: it stays in the mask, and counts.
+            if mask & forbidden != 0 {
                 return Err(AclError::Grants);
             }
         }
@@ -681,6 +681,42 @@ mod tests {
             ),
             Err(AclError::Missing)
         );
+    }
+
+    /// A short 8.3 name resolves to its long name: the path checked would not be the path
+    /// written. Only where the volume keeps short names.
+    #[test]
+    fn a_path_that_resolves_elsewhere_is_refused() {
+        match check_chain(Path::new(r"C:\PROGRA~1"), Leaf::Directory) {
+            Err(AclError::Missing) => {}
+            other => assert_eq!(other, Err(AclError::Moved)),
+        }
+    }
+
+    /// The folder that holds the configuration gets the strict rule, not the one for folders
+    /// above: a folder made in `C:\ProgramData` by an administrator inherits "users may add
+    /// files", which is fine above and not where the configuration lies. Only an elevated
+    /// token makes such a folder owned by Administrators.
+    #[test]
+    fn the_folder_that_holds_a_file_is_held_to_the_strict_rule() {
+        if crate::platform::elevation() != Elevation::Elevated {
+            return;
+        }
+        let folder = PathBuf::from(format!(
+            r"C:\ProgramData\ponte-test-holder-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir(&folder).unwrap();
+        let file = folder.join("agent.toml");
+        std::fs::write(&file, "").unwrap();
+        let as_file = check_chain(&file, Leaf::File);
+        let as_folder_above = Descriptor::of(&open_for_rule(folder.to_str().unwrap()).unwrap())
+            .unwrap()
+            .check(Rule::Above);
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert_eq!(as_file, Err(AclError::Grants));
+        assert_eq!(as_folder_above, Ok(()));
     }
 
     /// A user's own folders are never trusted: here the profile, which its user controls,

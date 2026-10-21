@@ -182,17 +182,15 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     replace_through(&temporary, path)
 }
 
+/// A rename replaces what is there, and returns only once it is on the disk: the journal's
+/// "started" must survive a power cut (ADR-0012).
+const RENAME_FLAGS: u32 = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+
 /// Renames `from` over `to`, and returns once the rename is on the disk.
 fn replace_through(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (wide(from), wide(to));
     // SAFETY: both are NUL-terminated UTF-16 strings that live through the call.
-    let moved = unsafe {
-        MoveFileExW(
-            from.as_ptr(),
-            to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
+    let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), RENAME_FLAGS) };
     if moved == 0 {
         return Err(io::Error::last_os_error());
     }
@@ -578,6 +576,12 @@ pub(crate) mod tests {
             assert!(remove(&link).is_err());
             assert_eq!(fs::read(&target).unwrap(), b"theirs");
         }
+    }
+
+    /// What a power cut would show cannot be tested here; the flags that promise it can.
+    #[test]
+    fn renames_are_written_through() {
+        assert_eq!(RENAME_FLAGS, 0x1 | 0x8);
     }
 
     #[test]
