@@ -148,7 +148,7 @@ pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(
                 // The session ended, or is not taking requests, since the registry was
                 // read. Nothing was written to a connection, so the request waits again.
                 debug!(device = %device, request = %request_id, "request not handed to a session; queued again");
-                match gateway.store.release(request_id).await {
+                match gateway.store.release(request_id, now).await {
                     Ok(_) => {}
                     Err(error) => {
                         // It stays `sent`: the device's next session sends it again.

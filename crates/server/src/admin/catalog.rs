@@ -465,7 +465,8 @@ fn show(record: &RequestRecord, out: &mut impl Write) -> io::Result<()> {
     writeln!(out, "status    {}", status(&record.state))?;
     match &record.state {
         RequestState::Queued => {}
-        RequestState::Sent { at } => writeln!(out, "sent      {}", at.to_rfc3339())?,
+        // The last time: a session sends again what got no answer.
+        RequestState::Sent { at } => writeln!(out, "sent      {} (last)", at.to_rfc3339())?,
         RequestState::Cancelled { at } | RequestState::Expired { at } => {
             writeln!(out, "ended     {}", at.to_rfc3339())?;
         }
@@ -476,7 +477,7 @@ fn show(record: &RequestRecord, out: &mut impl Write) -> io::Result<()> {
             output,
             ..
         } => {
-            writeln!(out, "sent      {}", sent_at.to_rfc3339())?;
+            writeln!(out, "sent      {} (last)", sent_at.to_rfc3339())?;
             writeln!(out, "answered  {}", at.to_rfc3339())?;
             writeln!(out, "duration  {duration_ms} ms")?;
             if let Some(output) = output {

@@ -456,7 +456,7 @@ impl ActionStore for Down {
         Err(DownError)
     }
 
-    async fn release(&self, _: RequestId) -> Result<bool, DownError> {
+    async fn release(&self, _: RequestId, _: DateTime<Utc>) -> Result<bool, DownError> {
         Err(DownError)
     }
 

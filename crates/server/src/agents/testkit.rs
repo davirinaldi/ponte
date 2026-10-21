@@ -357,9 +357,11 @@ fn ask_every_subscriber() {
     }
 
     static ONCE: std::sync::Once = std::sync::Once::new();
-    // Another test binary's global subscriber, if any, stays: it is set once per process.
     ONCE.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(Sometimes);
+        // Only this does it in this test binary; anything else setting one first would
+        // silently bring the lost lines back, so it fails loudly instead.
+        tracing::subscriber::set_global_default(Sometimes)
+            .expect("no other global subscriber in the server's unit tests");
     });
 }
 

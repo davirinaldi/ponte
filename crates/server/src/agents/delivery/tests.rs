@@ -14,10 +14,10 @@ use ponte_protocol::{
 use super::*;
 use crate::agents::Limits;
 use crate::agents::session::RESULTS_PER_MINUTE;
-use crate::agents::store::MemoryStore;
 use crate::agents::store::actions::{
     ActionAdmin, CatalogEntry, NewRequest, RequestOutcome, RequestState,
 };
+use crate::agents::store::{DeviceAdmin, MemoryStore};
 use crate::agents::testkit::{
     Logs, Peer, Sent, TestDevice, at, catalog_entry, gateway_with, grant, manifest_public,
     telemetry, token,
@@ -383,6 +383,35 @@ async fn a_second_result_is_quiet_when_identical_and_an_anomaly_when_not() {
         "{logs}"
     );
     assert_eq!(state(&store, request).await.name(), "succeeded");
+}
+
+/// RF-04: a revoked key that still holds its session for a moment writes no outcome,
+/// and the log says why.
+#[tokio::test(start_paused = true)]
+async fn a_result_of_a_device_revoked_meanwhile_is_dropped() {
+    let Connected {
+        gateway,
+        store,
+        id,
+        mut peer,
+        entry,
+        ..
+    } = connected().await;
+    let request = ask(&store, id, &entry).await;
+    sweep_once(&gateway).await.unwrap();
+    run_action(&mut peer).await;
+    store.revoke_device(id).await.unwrap();
+
+    let (logs, _guard) = Logs::capture();
+    peer.send(text(&result(request, ActionOutcome::Succeeded {})));
+    eventually("the result is read", || {
+        logs.text().contains("the device is not active")
+    })
+    .await;
+    assert_eq!(
+        state(&store, request).await,
+        RequestState::Sent { at: at(0) }
+    );
 }
 
 /// A duration past what the store keeps is no run that happened: dropped before the store.

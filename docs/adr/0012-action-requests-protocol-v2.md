@@ -294,9 +294,12 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   what is on its way to the agent. Past the minute, a claim that commits even later leaves
   its requests for their device's next session, as before; and
   a claimed row that does not read is left `sent` and undelivered while the others go out.
-  One narrow race is accepted: a session that starts between a failed hand-over and the
-  return to the queue may send the request, and its answer is then dropped as "never
-  sent"; the request is sent again by the next sweep and the agent answers from its journal.
+  A session that sends a request again stamps it with its own instant, and putting back
+  (a failed hand-over or a failed claim) only takes what still carries the claim's
+  instant, so nothing on its way to the agent goes back to the queue. `action show` gives
+  the last time a request was sent. A session's resend and the put-back of two failed
+  claims can lock rows of one device in different orders; PostgreSQL then cancels one
+  statement, and each is tried again (the next sweep, the next session).
 - **Identical** means the same status, reason and step. The duration and the `output` do
   not count: the journal answers with what it recorded, without the `output`.
 - **The refusals that describe the agent can be replaced.** `actions_disabled`,

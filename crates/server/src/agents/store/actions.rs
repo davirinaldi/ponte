@@ -459,9 +459,14 @@ pub trait ActionStore: DeviceStore {
         now: DateTime<Utc>,
     ) -> impl Future<Output = Result<Vec<Outgoing>, Self::Error>> + Send;
 
-    /// Puts a request that was claimed but never reached the connection back in the queue.
-    /// `false` if it is no longer `sent`.
-    fn release(&self, id: RequestId) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+    /// Puts a request that the claim at `claimed_at` marked, and that never reached the
+    /// connection, back in the queue. `false` if it is no longer `sent` at that instant:
+    /// answered, or sent again by a session since ([`ActionStore::resend`]).
+    fn release(
+        &self,
+        id: RequestId,
+        claimed_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
     /// Puts back in the queue every request still `sent` at one of the instants in
     /// `claimed_at`, and says how many: for claims whose answer was lost, which may have
@@ -681,10 +686,10 @@ impl ActionStore for MemoryStore {
         Ok(claimed)
     }
 
-    async fn release(&self, id: RequestId) -> Result<bool, Self::Error> {
+    async fn release(&self, id: RequestId, claimed_at: DateTime<Utc>) -> Result<bool, Self::Error> {
         let mut inner = self.lock();
         Ok(match inner.requests.get_mut(&id) {
-            Some(record) if matches!(record.state, RequestState::Sent { .. }) => {
+            Some(record) if record.state == (RequestState::Sent { at: claimed_at }) => {
                 record.state = RequestState::Queued;
                 true
             }
