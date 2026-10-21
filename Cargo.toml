@@ -57,6 +57,13 @@ tracing = "0.1"
 # `log` crate to our output, and the WebSocket library writes every frame it reads there.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "smallvec", "std"] }
 uuid = { version = "1", features = ["serde", "v7"] }
+# Windows only (agent and fake-erp): the service's lifecycle. Same windows-sys as below.
+windows-service = "0.8.1"
+# Windows only: the calls the agent makes itself, at the version mio already brings. Each
+# crate names the features it needs.
+windows-sys = "0.61"
+# The device key's secret, wiped once it is no longer needed (ADR-0013).
+zeroize = "1.9"
 
 [workspace.lints.rust]
 # `unsafe` is denied everywhere. The only exception is the agent's platform module,

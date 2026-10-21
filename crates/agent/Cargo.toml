@@ -28,9 +28,26 @@ tokio-tungstenite.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zeroize.workspace = true
 
-# Windows-only dependencies (windows-service, windows) are added in milestone M2.
-# Keep them under [target.'cfg(windows)'.dependencies] so the crate still builds on Linux CI.
+# Windows-only dependencies stay under cfg(windows), so the crate still builds on Linux CI.
+[target.'cfg(windows)'.dependencies]
+windows-service.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Environment",
+    "Win32_System_EventLog",
+    "Win32_System_Registry",
+    "Win32_System_Services",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
 
 [dev-dependencies]
 axum.workspace = true
@@ -39,5 +56,10 @@ rcgen.workspace = true
 rustls = { workspace = true, features = ["tls12"] }
 tokio = { workspace = true, features = ["io-util", "test-util"] }
 
+# Tests only: a named pipe that tries to impersonate whoever opens it.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Pipes"] }
+
 [lints]
 workspace = true
+
