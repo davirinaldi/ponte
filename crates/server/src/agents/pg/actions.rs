@@ -407,12 +407,15 @@ impl ActionStore for PgStore {
         .await
     }
 
-    async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Self::Error> {
+    async fn unclaim(&self, claimed_at: &[DateTime<Utc>]) -> Result<u64, Self::Error> {
         const OPERATION: &str = "put back the requests of a claim";
+        if claimed_at.is_empty() {
+            return Ok(0);
+        }
         bounded(OPERATION, async {
             let released = sqlx::query!(
                 "UPDATE action_requests SET status = 'queued', sent_at = NULL
-                 WHERE status = 'sent' AND sent_at = $1",
+                 WHERE status = 'sent' AND sent_at = ANY($1::timestamptz[])",
                 claimed_at,
             )
             .execute(&self.pool)
@@ -439,33 +442,47 @@ impl ActionStore for PgStore {
         .await
     }
 
-    async fn unanswered(
+    async fn resend(
         &self,
         device: DeviceId,
         now: DateTime<Utc>,
     ) -> Result<Vec<Outgoing>, Self::Error> {
-        const OPERATION: &str = "read the requests that got no answer";
+        const OPERATION: &str = "send again the requests that got no answer";
         bounded(OPERATION, async {
-            let now = secs(now);
-            let rows = sqlx::query!(
-                r#"SELECT r.id, r.device_id, r.expires_at, r.initiator,
-                          m.manifest_id, m.version, m.manifest, m.issued_at,
-                          m.expires_at AS manifest_expires_at, m.public_key, m.signature
-                   FROM action_requests r
-                   JOIN devices d ON d.id = r.device_id AND d.status = 'active'
-                   JOIN manifests m ON m.hash = r.manifest_hash
-                   JOIN signing_keys k ON k.public_key = m.public_key
-                   WHERE r.device_id = $1 AND r.status = 'sent' AND r.expires_at > $3
-                   ORDER BY r.expires_at > $2 DESC, r.created_at, r.id
-                   LIMIT $4"#,
+            let secs_now = secs(now);
+            // Chosen and stamped in one statement; `RETURNING` keeps no order, so the
+            // order of the choice comes back with each row.
+            let mut rows = sqlx::query!(
+                r#"WITH chosen AS (
+                       SELECT r.id, r.expires_at > $2 AS live, r.created_at
+                       FROM action_requests r
+                       JOIN devices d ON d.id = r.device_id AND d.status = 'active'
+                       JOIN manifests m ON m.hash = r.manifest_hash
+                       JOIN signing_keys k ON k.public_key = m.public_key
+                       WHERE r.device_id = $1 AND r.status = 'sent' AND r.expires_at > $3
+                       ORDER BY r.expires_at > $2 DESC, r.created_at, r.id
+                       LIMIT $4
+                   )
+                   UPDATE action_requests r SET sent_at = $5
+                   FROM chosen, manifests m
+                   WHERE r.id = chosen.id AND r.status = 'sent' AND m.hash = r.manifest_hash
+                   RETURNING r.id AS "id!", r.device_id AS "device_id!",
+                             r.expires_at AS "expires_at!", r.initiator AS "initiator!",
+                             m.manifest_id AS "manifest_id!", m.version AS "version!",
+                             m.manifest AS "manifest!", m.issued_at AS "issued_at!",
+                             m.expires_at AS "manifest_expires_at!",
+                             m.public_key AS "public_key!", m.signature AS "signature!",
+                             chosen.live AS "live!", chosen.created_at AS "created_at!""#,
                 device.as_uuid(),
-                now,
-                now.saturating_sub(RESEND_WINDOW_SECS),
+                secs_now,
+                secs_now.saturating_sub(RESEND_WINDOW_SECS),
                 limit(MAX_RESENT),
+                now,
             )
             .fetch_all(&self.pool)
             .await
             .map_err(failed(OPERATION))?;
+            rows.sort_by_key(|row| (!row.live, row.created_at, row.id));
             // One row that does not read keeps no other from being sent again.
             Ok(rows
                 .into_iter()

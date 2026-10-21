@@ -373,6 +373,44 @@ async fn pg_a_claimed_row_that_does_not_read_keeps_no_other_from_its_session(
     assert_eq!(status, "sent");
 }
 
+/// The same when a session sends again what got no answer: one row that does not read
+/// keeps no other from being sent.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_a_request_to_send_again_that_does_not_read_keeps_no_other_back(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let mut raw = PgConnection::connect_with(&options).await.unwrap();
+    let store = store(pool, options).await;
+    let entry = catalog(&store).await;
+    let device = active(&store, 1).await;
+    // Two sent and unanswered: the first expires before the second is claimed.
+    let short = NewRequest {
+        id: RequestId::new(),
+        device,
+        manifest: *entry.hash(),
+        expires_at: u64::try_from(at(10).timestamp()).unwrap(),
+        initiator: Initiator::Human {
+            user_id: "server_cli".parse().unwrap(),
+        },
+    };
+    store.request_action(&short, at(0)).await.unwrap();
+    store.claim_due(&[device], at(1)).await.unwrap();
+    ask(&store, device, &entry).await;
+    let long = store.requests(Some(device), 1).await.unwrap()[0].id;
+    store.claim_due(&[device], at(11)).await.unwrap();
+    sqlx::query("UPDATE action_requests SET initiator = '{}' WHERE id = $1")
+        .bind(short.id.as_uuid())
+        .execute(&mut raw)
+        .await
+        .unwrap();
+
+    let resent = store.resend(device, at(12)).await.unwrap();
+    let ids: Vec<_> = resent.iter().map(|o| o.request.request_id).collect();
+    assert_eq!(ids, [long]);
+}
+
 /// A row the code cannot read is an error, never a guess, and never quoted.
 #[sqlx::test]
 #[ignore = "needs PostgreSQL: DATABASE_URL"]

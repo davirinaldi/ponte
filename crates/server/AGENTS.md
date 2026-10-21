@@ -92,7 +92,7 @@ applies its own policy (invariant 2). These rules keep the server's own state ho
 its log clean.
 
 - **Two traits, as for devices.** `ActionStore` is what delivery needs (claim, release,
-  `unanswered`, `finish`, `expire`); `ActionAdmin` adds what an operator does (keys,
+  `resend`, `unclaim`, `finish`, `expire`); `ActionAdmin` adds what an operator does (keys,
   catalog, requests, cancel). Sessions and the sweep are generic over `ActionStore` only:
   nothing a device sends reaches a method that trusts a key or queues a request. Every rule
   is a scenario in `store/action_scenarios.rs`, run on both stores.
@@ -120,7 +120,8 @@ its log clean.
   would bring the same result back in a loop.
 - **A request that never reached a connection goes back to the queue** (`release`), and
   `action_sent` is audited only once a session has it. A session that starts sends again
-  what its device never answered (`unanswered`: still trusted keys, at most four, unexpired
+  what its device never answered (`resend`, which stamps them sent again so that putting
+  back a failed claim leaves them alone: still trusted keys, at most four, unexpired
   first, none expired for more than 23 hours).
 - **Bounds on what a device sends:** 32 results a minute per session reach the store; a
   `duration_ms` past `i64::MAX` is dropped before it; lines about dropped results and

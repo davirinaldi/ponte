@@ -14,7 +14,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use chrono::{DateTime, TimeDelta, Utc};
+use chrono::{DateTime, Utc};
 
 use ponte_protocol::DeviceId;
 use tokio::time::{Instant, MissedTickBehavior};
@@ -31,35 +31,40 @@ pub(crate) const SWEEP_EVERY: Duration = Duration::from_millis(500);
 /// While the store keeps failing, one line every this many sweeps: one a minute.
 const FAILURES_LOGGED_EVERY: u32 = 120;
 
-/// How long the requests of a claim that failed are put back, sweep after sweep. A claim
-/// given up at `CALL_LIMIT` may still be committing in the database, and an `unclaim` that
-/// runs before that commit finds nothing: only a later one puts its requests back. The
-/// database's own limits (5 s a statement, 10 s idle in a transaction) end such a claim
-/// well inside this.
-const UNCLAIM_FOR: TimeDelta = TimeDelta::seconds(60);
+/// How long the requests of a claim that failed are put back, sweep after sweep, counted
+/// from when it failed by a monotonic clock. A claim given up at `CALL_LIMIT` may still be
+/// committing in the database, and an `unclaim` that runs before that commit finds
+/// nothing: only a later one puts its requests back. The database stops the statement
+/// within 5 s of receiving it, but not its commit, which a database in trouble can delay;
+/// a minute covers what such a database still answers, and past it the requests wait for
+/// their device's next session, as before.
+const UNCLAIM_FOR: Duration = Duration::from_secs(60);
 
 /// The most claims that failed kept for [`UNCLAIM_FOR`]: two minutes of sweeps whose claim
 /// takes the whole `CALL_LIMIT`.
 const MAX_FAILED_CLAIMS: usize = 16;
 
-/// The instants of the claims that failed recently, oldest first.
+/// The claims that failed recently, oldest first: the instant each claimed at, which its
+/// rows carry, and until when (by a monotonic clock, which no clock step moves) they are
+/// put back.
 #[derive(Debug, Default)]
-pub(crate) struct FailedClaims(Mutex<VecDeque<DateTime<Utc>>>);
+pub(crate) struct FailedClaims(Mutex<VecDeque<(DateTime<Utc>, Instant)>>);
 
 impl FailedClaims {
-    fn add(&self, at: DateTime<Utc>) {
+    fn add(&self, claimed_at: DateTime<Utc>) {
         let mut claims = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         if claims.len() == MAX_FAILED_CLAIMS {
             claims.pop_front();
         }
-        claims.push_back(at);
+        claims.push_back((claimed_at, Instant::now() + UNCLAIM_FOR));
     }
 
-    /// Those still to put back at `now`; the older ones are forgotten.
-    fn due(&self, now: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+    /// The instants still to put back; the claims whose time is up are forgotten.
+    fn due(&self) -> Vec<DateTime<Utc>> {
+        let now = Instant::now();
         let mut claims = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        claims.retain(|at| now - *at < UNCLAIM_FOR);
-        claims.iter().copied().collect()
+        claims.retain(|(_, until)| now < *until);
+        claims.iter().map(|(claimed_at, _)| *claimed_at).collect()
     }
 }
 
@@ -93,14 +98,13 @@ pub(crate) async fn run<D: ActionStore>(gateway: Weak<Gateway<D>>) {
 /// One sweep: put back what failed claims marked, expire, claim, hand over.
 pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(), D::Error> {
     let now = gateway.now();
-    for claimed_at in gateway.failed_claims.due(now) {
-        // Logged at `debug`: while the database fails, the sweep's own error says so.
-        match gateway.store.unclaim(claimed_at).await {
-            Ok(0) => {}
-            Ok(count) => warn!(count, "requests of a claim that failed were queued again"),
-            Err(error) => {
-                debug!(%error, "the requests of a claim that failed are not queued again yet")
-            }
+    // All in one statement, so a database in trouble gets one more call per sweep.
+    match gateway.store.unclaim(&gateway.failed_claims.due()).await {
+        Ok(0) => {}
+        Ok(count) => warn!(count, "requests of a claim that failed were queued again"),
+        // At `debug`: while the database fails, the sweep's own error says so.
+        Err(error) => {
+            debug!(%error, "the requests of a claim that failed are not queued again yet");
         }
     }
     for (request, device) in gateway.store.expire(now).await? {
@@ -118,7 +122,7 @@ pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(
             // marked would stay `sent`, delivered to nobody, until each device's next
             // session. It is put back now, and again by the next sweeps.
             gateway.failed_claims.add(now);
-            if let Err(again) = gateway.store.unclaim(now).await {
+            if let Err(again) = gateway.store.unclaim(&[now]).await {
                 debug!(error = %again, "the requests of a claim that failed are not queued again yet");
             }
             return Err(error);
@@ -227,3 +231,30 @@ impl DeviceLogs {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod failed_claims_tests {
+    use super::*;
+    use crate::agents::testkit::at;
+
+    /// A failed claim is put back for a minute after it failed, by a clock no step of the
+    /// wall clock moves, and no more than the last 16 are kept.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_claim_is_put_back_for_a_minute_and_sixteen_at_most() {
+        let claims = FailedClaims::default();
+        assert!(claims.due().is_empty());
+        claims.add(at(0));
+        tokio::time::advance(UNCLAIM_FOR - Duration::from_millis(1)).await;
+        assert_eq!(claims.due(), [at(0)]);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(claims.due().is_empty());
+
+        for second in 0..20 {
+            claims.add(at(second));
+        }
+        let due = claims.due();
+        assert_eq!(due.len(), MAX_FAILED_CLAIMS);
+        assert_eq!(due.first(), Some(&at(4)));
+        assert_eq!(due.last(), Some(&at(19)));
+    }
+}

@@ -463,19 +463,21 @@ pub trait ActionStore: DeviceStore {
     /// `false` if it is no longer `sent`.
     fn release(&self, id: RequestId) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
-    /// Puts back in the queue every request still `sent` that a claim made at `claimed_at`
-    /// marked, and says how many: for a claim whose answer was lost, which may have
-    /// committed. Each sweep claims at its own instant, so nothing else is touched.
+    /// Puts back in the queue every request still `sent` at one of the instants in
+    /// `claimed_at`, and says how many: for claims whose answer was lost, which may have
+    /// committed. Each sweep claims at its own instant, and a session that sends a request
+    /// again stamps it with its own ([`ActionStore::resend`]), so nothing else is touched.
     fn unclaim(
         &self,
-        claimed_at: DateTime<Utc>,
+        claimed_at: &[DateTime<Utc>],
     ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
 
     /// The requests of `device` that were sent and got no answer, to send again when a
     /// session starts: an active device, a key still trusted, not expired for longer than
     /// [`RESEND_WINDOW_SECS`]; the unexpired ones first, then the oldest; at most
-    /// [`MAX_RESENT`]. Changes nothing.
-    fn unanswered(
+    /// [`MAX_RESENT`]. In one atomic step, each is marked sent again at `now`: it is on its
+    /// way through this session, and the `unclaim` of an older claim must not take it back.
+    fn resend(
         &self,
         device: DeviceId,
         now: DateTime<Utc>,
@@ -690,11 +692,11 @@ impl ActionStore for MemoryStore {
         })
     }
 
-    async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Self::Error> {
+    async fn unclaim(&self, claimed_at: &[DateTime<Utc>]) -> Result<u64, Self::Error> {
         let mut inner = self.lock();
         let mut count = 0;
         for record in inner.requests.values_mut() {
-            if record.state == (RequestState::Sent { at: claimed_at }) {
+            if matches!(record.state, RequestState::Sent { at } if claimed_at.contains(&at)) {
                 record.state = RequestState::Queued;
                 count += 1;
             }
@@ -702,12 +704,12 @@ impl ActionStore for MemoryStore {
         Ok(count)
     }
 
-    async fn unanswered(
+    async fn resend(
         &self,
         device: DeviceId,
         now: DateTime<Utc>,
     ) -> Result<Vec<Outgoing>, Self::Error> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         let now_secs = secs(now);
         let mut waiting: Vec<&RequestRecord> = inner
             .by_age()
@@ -721,11 +723,21 @@ impl ActionStore for MemoryStore {
             .collect();
         // Stable: within each group, still the oldest first.
         waiting.sort_by_key(|record| !not_expired(record.expires_at, now_secs));
-        Ok(waiting
+        let chosen: Vec<RequestId> = waiting
             .into_iter()
             .take(MAX_RESENT)
-            .filter_map(|record| inner.outgoing(record))
-            .collect())
+            .map(|record| record.id)
+            .collect();
+        let mut resent = Vec::new();
+        for id in chosen {
+            let Some(record) = inner.requests.get_mut(&id) else {
+                continue;
+            };
+            record.state = RequestState::Sent { at: now };
+            let record = record.clone();
+            resent.extend(inner.outgoing(&record));
+        }
+        Ok(resent)
     }
 
     async fn finish(

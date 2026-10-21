@@ -37,6 +37,7 @@ macro_rules! for_each_action_scenario {
         $test!(a_request_that_never_reached_the_connection_goes_back_to_the_queue);
         $test!(requests_are_listed_newest_first);
         $test!(a_revoked_device_writes_no_outcome);
+        $test!(a_request_sent_again_is_not_put_back_with_an_older_claim);
         $test!(a_claim_whose_answer_was_lost_is_put_back_and_nothing_else);
     };
 }
@@ -684,7 +685,7 @@ pub(crate) async fn requests_that_got_no_answer_are_sent_again<S: ActionAdmin>(s
     claim(store, &[other], 0).await;
 
     let again = |now| async move {
-        let outgoing = store.unanswered(device, at(now)).await.unwrap();
+        let outgoing = store.resend(device, at(now)).await.unwrap();
         assert!(outgoing.iter().all(|o| o.device == device));
         outgoing
             .iter()
@@ -751,12 +752,29 @@ pub(crate) async fn a_claim_whose_answer_was_lost_is_put_back_and_nothing_else<S
     assert_eq!(claim(store, &[three], 2).await, [other]);
     assert_eq!(claim(store, &[one, two], 3).await, [first, second]);
 
-    assert_eq!(store.unclaim(at(3)).await.unwrap(), 2);
+    assert_eq!(store.unclaim(&[at(3)]).await.unwrap(), 2);
     assert_eq!(state(store, first).await, RequestState::Queued);
     assert_eq!(state(store, second).await, RequestState::Queued);
     assert_eq!(state(store, other).await, RequestState::Sent { at: at(2) });
     assert_eq!(state(store, answered).await.name(), "succeeded");
-    assert_eq!(store.unclaim(at(3)).await.unwrap(), 0);
+    assert_eq!(store.unclaim(&[at(3), at(9)]).await.unwrap(), 0);
+    assert_eq!(store.unclaim(&[]).await.unwrap(), 0);
+}
+
+/// A session that sends a request again stamps it: the agent may run it now, so putting
+/// back the requests of an older claim that failed must leave it alone.
+pub(crate) async fn a_request_sent_again_is_not_put_back_with_an_older_claim<S: ActionAdmin>(
+    store: &S,
+) {
+    let entry = catalog(store).await;
+    let device = active(store, 1).await;
+    let id = ask(store, device, &entry).await;
+    assert_eq!(claim(store, &[device], 1).await, [id]);
+    let resent = store.resend(device, at(5)).await.unwrap();
+    assert_eq!(resent.len(), 1);
+    assert_eq!(state(store, id).await, RequestState::Sent { at: at(5) });
+    assert_eq!(store.unclaim(&[at(1)]).await.unwrap(), 0);
+    assert_eq!(state(store, id).await, RequestState::Sent { at: at(5) });
 }
 
 /// RF-04: a revoked key may still hold a connection for a moment; it writes no outcome.
