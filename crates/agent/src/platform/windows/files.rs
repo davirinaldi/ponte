@@ -34,10 +34,11 @@ use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TYPE_DISK, FileDispositionInfo, GetFileInformationByHandle, GetFileType,
-    GetFinalPathNameByHandleW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    SECURITY_IDENTIFICATION, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
+    FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileDispositionInfo,
+    FileRenameInfo, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SECURITY_IDENTIFICATION,
+    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 
 /// The impersonation level a server at the end of a path gets: it may learn who opened it,
@@ -171,6 +172,7 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     remove(&temporary)?;
     let mut file = OpenOptions::new()
         .write(true)
+        .access_mode(FILE_GENERIC_WRITE | DELETE)
         .create_new(true)
         .share_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
@@ -178,16 +180,55 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .open(&temporary)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    drop(file);
-    replace_through(&temporary, path)
+    // Renamed through its own handle, then flushed again: on NTFS that commits the log
+    // that holds the rename, which `MOVEFILE_WRITE_THROUGH` only promises for a copy.
+    rename_over(&file, path)?;
+    file.sync_all()
 }
 
-/// A rename replaces what is there, and returns only once it is on the disk: the journal's
-/// "started" must survive a power cut (ADR-0012).
+/// Renames the file `file` holds to `to`, replacing what is there (never following a link
+/// there: the name is replaced).
+fn rename_over(file: &File, to: &Path) -> io::Result<()> {
+    let name: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = header + (name.len() + 1) * 2;
+    // u64s, so the structure is aligned; zeroed, so the name ends in NUL.
+    let mut buffer = vec![0_u64; size.div_ceil(8)];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `buffer` holds `size` bytes, aligned for FILE_RENAME_INFO, and room for the
+    // name after its header; the name is copied within that room.
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = u32::try_from(name.len() * 2).unwrap_or(u32::MAX);
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            (&raw mut (*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+    // SAFETY: the handle belongs to `file`, opened with DELETE; the buffer is the
+    // FILE_RENAME_INFO just written, of `size` bytes, alive through the call.
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            buffer.as_ptr().cast::<c_void>(),
+            u32::try_from(size).unwrap_or(u32::MAX),
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The rename of the logs replaces the older file, written through.
 const RENAME_FLAGS: u32 = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
 
-/// Renames `from` over `to`, and returns once the rename is on the disk.
-fn replace_through(from: &Path, to: &Path) -> io::Result<()> {
+/// Renames `from` over `to`, for the logs. The agent's state goes through
+/// [`write_private`], which renames by handle and flushes.
+pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
     let (from, to) = (wide(from), wide(to));
     // SAFETY: both are NUL-terminated UTF-16 strings that live through the call.
     let moved = unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), RENAME_FLAGS) };
@@ -195,11 +236,6 @@ fn replace_through(from: &Path, to: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
-}
-
-/// Renames `from` over `to`, for the logs: written through like the rest.
-pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
-    replace_through(from, to)
 }
 
 /// Removes the agent's file at `path`, through the handle that was checked. Nothing to do

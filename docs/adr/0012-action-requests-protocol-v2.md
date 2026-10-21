@@ -249,8 +249,11 @@ right. The code follows this section.
   - Renames are not yet written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`), so a
     power cut could roll a start back. Nothing acts until step 5, which brings both, and the
     Windows machine must not land without it. Step 5 of M2 brought them: on Windows the
-    journal, the mark and the identity are written to a new temporary file, flushed, and
-    renamed with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`.
+    journal, the mark and the identity are written to a new temporary file, flushed,
+    renamed over the old one through the temporary file's own handle (`FileRenameInfo`,
+    replacing), and flushed again. The security review of step 5 pointed out that
+    `MOVEFILE_WRITE_THROUGH` documents its promise only for a move done as a copy; flushing
+    the handle after the rename commits the NTFS log that holds it.
   - Step 5 of M2: a service the service manager could not read, or not in time, is
     answered `ServiceRefused` and not recorded, like the refusals that describe the agent
     (ADR-0011, "Step 5 of M2 settled the details").

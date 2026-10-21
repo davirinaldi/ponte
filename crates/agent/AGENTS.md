@@ -147,8 +147,10 @@ the machine is not trusted, and runs code beside a SYSTEM process.
   root as the roots resolved at start (`roots.rs`); `\\?\UNC` and volumes with no letter
   are refused, and `delete_file` deletes through the handle it checked. `path_absent` holds
   only for "file not found" and "path not found".
-- **Writes are written through**: a new temporary file, flushed, then
-  `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. A write never makes a folder; the data
+- **Writes are written through**: a new temporary file, flushed, renamed over the old one
+  through its own handle (`FileRenameInfo`), then flushed again, which commits the rename
+  on NTFS (`MOVEFILE_WRITE_THROUGH` only promises that for a copy). A write never makes a
+  folder; the data
   directory and `logs` are made when the agent starts, with the protected ACL of `acl.rs`.
 - **An elevated token, or one that cannot be read, gets the strict rules** (`lib::prepare`):
   the executable, the configuration, the data directory and the token must pass the owner
