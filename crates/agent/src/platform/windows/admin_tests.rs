@@ -63,7 +63,7 @@ impl Lab {
         };
         lab.remove_service();
         let _ = std::fs::remove_dir_all(&lab.folder);
-        super::acl::create_private_dir(&lab.folder.join("bin"), false).unwrap();
+        super::acl::create_private_dir(&lab.folder.join("bin")).unwrap();
         lab
     }
 

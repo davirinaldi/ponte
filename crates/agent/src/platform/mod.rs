@@ -205,18 +205,22 @@ pub(crate) fn elevation() -> Elevation {
 /// modes, for the owner only.
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(windows)]
-    return windows::acl::create_private_dir(dir, false);
+    return windows::acl::create_private_dir(dir);
     #[cfg(not(windows))]
     create_private_dir_here(dir)
 }
 
-/// [`create_private_dir`] for an elevated agent: on Windows a folder that appears between
-/// the look and the creation refuses it, rather than being gone through.
-pub(crate) fn create_private_dir_exclusive(dir: &Path) -> io::Result<()> {
+/// [`create_private_dir`] for an elevated agent: makes every folder below `checked`, which
+/// exists and passed its rule, down to `dir`, and on Windows refuses any that already
+/// exists, rather than going through it.
+pub(crate) fn create_private_dir_below(checked: &Path, dir: &Path) -> io::Result<()> {
     #[cfg(windows)]
-    return windows::acl::create_private_dir(dir, true);
+    return windows::acl::create_private_dir_below(checked, dir);
     #[cfg(not(windows))]
-    create_private_dir_here(dir)
+    {
+        let _ = checked;
+        create_private_dir_here(dir)
+    }
 }
 
 #[cfg(not(windows))]
