@@ -4,6 +4,8 @@
 //! why it is sound.
 
 pub(crate) mod acl;
+#[cfg(test)]
+mod admin_tests;
 pub(crate) mod clock;
 pub(crate) mod dpapi;
 pub(crate) mod elevation;
