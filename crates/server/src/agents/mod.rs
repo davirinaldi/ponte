@@ -50,8 +50,7 @@ pub use store::{
 pub use store::actions::{
     ActionAdmin, ActionStore, CancelOutcome, CatalogEntry, CatalogError, EnvelopeHash, Finish,
     InvalidManifestId, KeyAdded, MAX_OPEN_PER_DEVICE, ManifestId, NewRequest, Outgoing,
-    RequestOutcome, RequestRecord, RequestRefusal, RequestState, SigningKey,
-    describes_the_agent,
+    RequestOutcome, RequestRecord, RequestRefusal, RequestState, SigningKey, describes_the_agent,
 };
 
 /// How much a peer gets before and after it proves who it is.

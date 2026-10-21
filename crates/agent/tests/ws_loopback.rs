@@ -27,8 +27,8 @@ use ponte_protocol::{
     ServerToAgent, Signature, SignedManifest, manifest_transcript,
 };
 use ponte_server::agents::{
-    ActionAdmin, CatalogEntry, DeviceAdmin, DeviceStatus, NewRequest, RequestOutcome,
-    RequestState, TokenHash,
+    ActionAdmin, CatalogEntry, DeviceAdmin, DeviceStatus, NewRequest, RequestOutcome, RequestState,
+    TokenHash,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;

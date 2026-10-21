@@ -347,7 +347,9 @@ async fn lists_show_one_line_per_item() {
     assert_eq!(out.lines().count(), 1, "{out}");
     assert!(out.starts_with(&device.to_string()), "{out}");
     assert!(
-        out.contains("pending  offline  last seen never  clock unknown  agent 0.1.0  Windows 11 Pro"),
+        out.contains(
+            "pending  offline  last seen never  clock unknown  agent 0.1.0  Windows 11 Pro"
+        ),
         "{out}"
     );
     let (_, out) = run_on(&store, Command::TokenList { customer: None }).await;
@@ -446,7 +448,11 @@ impl DeviceAdmin for Down {
 }
 
 impl ActionStore for Down {
-    async fn claim_due(&self, _: &[DeviceId], _: DateTime<Utc>) -> Result<Vec<Outgoing>, DownError> {
+    async fn claim_due(
+        &self,
+        _: &[DeviceId],
+        _: DateTime<Utc>,
+    ) -> Result<Vec<Outgoing>, DownError> {
         Err(DownError)
     }
 
@@ -505,7 +511,11 @@ impl ActionAdmin for Down {
         Err(DownError)
     }
 
-    async fn requests(&self, _: Option<DeviceId>, _: usize) -> Result<Vec<RequestRecord>, DownError> {
+    async fn requests(
+        &self,
+        _: Option<DeviceId>,
+        _: usize,
+    ) -> Result<Vec<RequestRecord>, DownError> {
         Err(DownError)
     }
 
