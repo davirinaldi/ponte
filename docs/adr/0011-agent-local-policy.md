@@ -239,8 +239,9 @@ code follows this section.
   which the re-review of step 5 found would block exactly that, was tried and dropped.
   Every check or delete walks the whole way again, from the drive, and the root on it
   must be the folder recorded: a root renamed away and made again at its path is not the
-  root. It must also pass the
-  lexical rules again and the folders Windows reports for itself, read from the registry
+  root. An installer that replaces the ERP's folder this way leaves every action under it
+  refused until the agent restarts, which fails safe; the install guidance is to restart
+  the agent after reinstalling the ERP. It must also pass the lexical rules again and the folders Windows reports for itself, read from the registry
   without COM: the Windows folder (none may be or lie in it), the `Program Files` folders,
   `ProgramData`, the folder of profiles and each profile in the profile list (none may be
   one), and any folder right inside the folder of profiles. A delete root must lie inside
