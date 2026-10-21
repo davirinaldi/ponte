@@ -48,8 +48,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, DELETE, FILE_ALL_ACCESS, FILE_APPEND_DATA, FILE_DELETE_CHILD,
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE,
     FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, GetVolumeInformationByHandleW,
-    READ_CONTROL, SECURITY_IDENTIFICATION, SYNCHRONIZE, WRITE_DAC, WRITE_OWNER,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
+    GetVolumeInformationByHandleW, READ_CONTROL, SECURITY_IDENTIFICATION, SYNCHRONIZE, WRITE_DAC,
+    WRITE_OWNER,
 };
 
 use super::files::{self, Facts, Segments};
@@ -71,9 +72,12 @@ const FILE_PERSISTENT_ACLS: u32 = 0x8;
 const MAXIMUM_ALLOWED: u32 = 0x0200_0000;
 
 /// What `Own` and `Executable` let nobody else do: change the content or the folder's
-/// entries, delete, or change the ACL or the owner.
+/// entries, delete, change the ACL or the owner, or write attributes, which is all NTFS
+/// asks of whoever makes a hard link to a file, or extended attributes.
 const CHANGES: u32 = FILE_WRITE_DATA
     | FILE_APPEND_DATA
+    | FILE_WRITE_ATTRIBUTES
+    | FILE_WRITE_EA
     | FILE_DELETE_CHILD
     | DELETE
     | WRITE_DAC
@@ -521,6 +525,10 @@ mod tests {
             "SD",
             "WD",
             "WO",
+            // Writing attributes is enough to make a hard link to a file, and extended
+            // attributes travel with it.
+            "0x100",
+            "0x10",
         ] {
             for who in ["BU", "AU", "WD", "IU", "S-1-5-21-1-2-3-1001"] {
                 let sddl = format!("O:SYD:(A;;FA;;;SY)(A;;{right};;;{who})");
@@ -536,8 +544,8 @@ mod tests {
                 );
             }
         }
-        // Reading, running, writing attributes: none changes the content.
-        for right in ["FR", "FX", "0x100", "0x80", "GR", "GX"] {
+        // Reading and running change nothing.
+        for right in ["FR", "FX", "0x80", "0x8", "GR", "GX"] {
             let sddl = format!("O:SYD:(A;;FA;;;SY)(A;;{right};;;BU)");
             assert_eq!(rule(&sddl, Rule::Own), Ok(()), "{right}");
         }

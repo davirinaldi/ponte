@@ -192,6 +192,11 @@ code follows this section.
   fail. Every folder above, up to the drive, is held to the rule for folders above. The
   agent's executable and its folder are held to the strict rule with TrustedInstaller also
   allowed, and the folders above them to the rule for folders above.
+- **What counts as a right to change.** Besides write, append, delete, the ACL and the
+  owner, the strict rule counts writing attributes and extended attributes: NTFS lets
+  whoever may write a file's attributes make a hard link to it, and a link to the key or
+  the journal in a user's folder would make the agent refuse them (found by the security
+  review of step 5).
 - **How the rule reads an ACL.** Generic rights count as what they map to for files, and
   `MAXIMUM_ALLOWED` as everything. Deny entries are ignored: they only take rights away. For
   the strict rule an entry that only children inherit still counts, since it decides what
