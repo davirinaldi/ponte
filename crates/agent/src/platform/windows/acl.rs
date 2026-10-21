@@ -425,7 +425,12 @@ pub(crate) fn check_chain(path: &Path, leaf: Leaf) -> Result<(), AclError> {
 /// Creates `dir` and whatever is missing above it, each with [`PRIVATE_FOLDER`]. A folder
 /// that already exists keeps its ACL: when the agent runs elevated, [`check_chain`] decides
 /// whether it may be used.
-pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
+///
+/// `exclusive`: a folder that appears between the look and the creation is a refusal, not
+/// a folder to go on through. The folder above the first one made lets others create
+/// entries (`C:\ProgramData` does), and one made in that moment could be a junction; every
+/// folder the agent makes after it is private, so nothing below can be swapped.
+pub(crate) fn create_private_dir(dir: &Path, exclusive: bool) -> io::Result<()> {
     let dir = std::path::absolute(dir)?;
     let mut missing = Vec::new();
     for folder in dir.ancestors() {
@@ -444,14 +449,25 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
         lpSecurityDescriptor: descriptor.as_ptr(),
         bInheritHandle: 0,
     };
-    for folder in missing.into_iter().rev() {
+    make_each(missing.into_iter().rev(), &attributes, exclusive)
+}
+
+/// Makes each of `folders`, in order.
+fn make_each<'a>(
+    folders: impl Iterator<Item = &'a Path>,
+    attributes: &SECURITY_ATTRIBUTES,
+    exclusive: bool,
+) -> io::Result<()> {
+    for folder in folders {
         let path = files::wide(folder);
         // SAFETY: `path` is NUL-terminated, and `attributes` points to a descriptor that
         // lives through the call.
-        if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        if unsafe { CreateDirectoryW(path.as_ptr(), attributes) } == 0 {
             let error = io::Error::last_os_error();
-            // Made by someone else in the meantime: its ACL is checked like any other.
-            if error.raw_os_error() != i32::try_from(ERROR_ALREADY_EXISTS).ok() {
+            let exists = error.raw_os_error() == i32::try_from(ERROR_ALREADY_EXISTS).ok();
+            // Made by someone else in the meantime: refused when exclusive; otherwise its
+            // ACL is checked like any other.
+            if !exists || exclusive {
                 return Err(error);
             }
         }
@@ -755,12 +771,33 @@ mod tests {
         }
     }
 
+    /// A folder that appears where the agent was about to make one, as a junction a user
+    /// raced in would, stops an exclusive creation.
+    #[test]
+    fn an_exclusive_creation_refuses_a_folder_made_in_the_meantime() {
+        let dir = TempDir::new();
+        let first = dir.path().join("first");
+        let second = first.join("second");
+        std::fs::create_dir(&first).unwrap();
+        let descriptor = Descriptor::from_sddl(PRIVATE_FOLDER).unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap(),
+            lpSecurityDescriptor: descriptor.as_ptr(),
+            bInheritHandle: 0,
+        };
+        let folders = [first.as_path(), second.as_path()];
+        assert!(make_each(folders.into_iter(), &attributes, true).is_err());
+        assert!(!second.exists());
+        make_each(folders.into_iter(), &attributes, false).unwrap();
+        assert!(second.is_dir());
+    }
+
     #[test]
     fn a_private_folder_has_the_protected_acl() {
         let dir = TempDir::new();
         let made = dir.path().join("one").join("two");
-        create_private_dir(&made).unwrap();
-        create_private_dir(&made).unwrap();
+        create_private_dir(&made, true).unwrap();
+        create_private_dir(&made, false).unwrap();
         for folder in [dir.path().join("one"), made] {
             let file = open_for_rule(folder.to_str().unwrap()).unwrap();
             let descriptor = Descriptor::of(&file).unwrap();

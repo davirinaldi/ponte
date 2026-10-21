@@ -205,7 +205,16 @@ pub(crate) fn elevation() -> Elevation {
 /// modes, for the owner only.
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     #[cfg(windows)]
-    return windows::acl::create_private_dir(dir);
+    return windows::acl::create_private_dir(dir, false);
+    #[cfg(not(windows))]
+    create_private_dir_here(dir)
+}
+
+/// [`create_private_dir`] for an elevated agent: on Windows a folder that appears between
+/// the look and the creation refuses it, rather than being gone through.
+pub(crate) fn create_private_dir_exclusive(dir: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows::acl::create_private_dir(dir, true);
     #[cfg(not(windows))]
     create_private_dir_here(dir)
 }

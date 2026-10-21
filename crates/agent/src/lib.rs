@@ -318,7 +318,12 @@ fn make_data_dir(data_dir: &Path, strict: bool) -> Result<(), StartError> {
             platform::check_trusted(existing, Leaf::Above).map_err(untrusted)?;
         }
     }
-    platform::create_private_dir(data_dir).map_err(StartError::DataDir)?;
+    if strict {
+        platform::create_private_dir_exclusive(data_dir)
+    } else {
+        platform::create_private_dir(data_dir)
+    }
+    .map_err(StartError::DataDir)?;
     if strict {
         platform::check_trusted(data_dir, Leaf::Directory).map_err(untrusted)?;
     }
