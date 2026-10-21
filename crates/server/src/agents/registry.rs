@@ -11,7 +11,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use ponte_protocol::DeviceId;
+use ponte_protocol::{ActionRequest, DeviceId};
+use tokio::sync::mpsc;
 use tokio::sync::{Notify, OwnedMutexGuard};
 
 use super::store::SessionId;
@@ -20,6 +21,13 @@ use super::store::SessionId;
 /// has one agent, so more than a couple is a reconnect storm or somebody with the key
 /// opening connections on purpose, and each of them would cost a store call.
 const MAX_STARTING: usize = 4;
+
+/// Requests that may wait for a session to write them. The sweep hands a device one at a
+/// time (`ActionStore::claim_due`), so this is a margin, not a queue.
+const OUTBOX: usize = 4;
+
+/// The requests a session writes to its connection, as the sweep hands them over.
+pub(crate) type Outbox = mpsc::Receiver<Box<ActionRequest>>;
 
 #[derive(Debug, Default)]
 pub(crate) struct Registry {
@@ -32,6 +40,7 @@ pub(crate) struct Registry {
 struct Entry {
     session: SessionId,
     replaced: Arc<Notify>,
+    outbox: mpsc::Sender<Box<ActionRequest>>,
 }
 
 #[derive(Debug)]
@@ -101,17 +110,20 @@ impl Registry {
         Some(waiting)
     }
 
-    /// Makes `session` the one that speaks for `device`. Returns its place and the session
-    /// that held it until now, which is told to stop.
+    /// Makes `session` the one that speaks for `device`. Returns its place, the requests
+    /// handed to it from now on, and the session that held the place until now, which is
+    /// told to stop.
     pub(crate) fn register(
         &self,
         device: DeviceId,
         session: SessionId,
-    ) -> (Registration<'_>, Option<SessionId>) {
+    ) -> (Registration<'_>, Outbox, Option<SessionId>) {
         let replaced = Arc::new(Notify::new());
+        let (outbox, requests) = mpsc::channel(OUTBOX);
         let entry = Entry {
             session,
             replaced: Arc::clone(&replaced),
+            outbox,
         };
         let previous = locked(&self.sessions).insert(device, entry).map(|old| {
             // `notify_one` keeps the notice for a session that is not waiting right now.
@@ -124,7 +136,29 @@ impl Registry {
             session,
             replaced,
         };
-        (registration, previous)
+        (registration, requests, previous)
+    }
+
+    /// The devices that have a session now.
+    pub(crate) fn online(&self) -> Vec<DeviceId> {
+        locked(&self.sessions).keys().copied().collect()
+    }
+
+    /// Hands `request` to the session of `device`, or gives it back if there is none, or
+    /// the session is not taking any: then it never reached the connection.
+    pub(crate) fn deliver(
+        &self,
+        device: DeviceId,
+        request: Box<ActionRequest>,
+    ) -> Result<(), Box<ActionRequest>> {
+        let sessions = locked(&self.sessions);
+        let Some(entry) = sessions.get(&device) else {
+            return Err(request);
+        };
+        entry.outbox.try_send(request).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(request)
+            | mpsc::error::TrySendError::Closed(request) => request,
+        })
     }
 
     #[cfg(test)]
@@ -196,7 +230,7 @@ mod tests {
         let session = SessionId::new();
         assert_eq!(registry.current(device), None);
 
-        let (registration, previous) = registry.register(device, session);
+        let (registration, _, previous) = registry.register(device, session);
         assert_eq!(previous, None);
         assert_eq!(registry.current(device), Some(session));
         assert!(!is_replaced(&registration).await);
@@ -211,8 +245,8 @@ mod tests {
         let device = DeviceId::new();
         let (old, new) = (SessionId::new(), SessionId::new());
 
-        let (old_registration, _) = registry.register(device, old);
-        let (new_registration, previous) = registry.register(device, new);
+        let (old_registration, _, _) = registry.register(device, old);
+        let (new_registration, _, previous) = registry.register(device, new);
         assert_eq!(previous, Some(old));
         assert_eq!(registry.current(device), Some(new));
 
@@ -232,8 +266,8 @@ mod tests {
         let registry = Registry::default();
         let (one, other) = (DeviceId::new(), DeviceId::new());
 
-        let (first, _) = registry.register(one, SessionId::new());
-        let (second, previous) = registry.register(other, SessionId::new());
+        let (first, _, _) = registry.register(one, SessionId::new());
+        let (second, _, previous) = registry.register(other, SessionId::new());
         assert_eq!(previous, None);
         assert!(!is_replaced(&first).await);
         assert!(!is_replaced(&second).await);
@@ -241,6 +275,58 @@ mod tests {
         drop(first);
         assert!(registry.current(one).is_none());
         assert!(registry.current(other).is_some());
+    }
+
+    fn request(seed: u8) -> Box<ActionRequest> {
+        let text = format!("id = \"a.b\"\nversion = {seed}\n");
+        Box::new(ActionRequest {
+            request_id: ponte_protocol::RequestId::new(),
+            manifest: ponte_protocol::SignedManifest {
+                manifest: text.parse().unwrap(),
+                issued_at: 1,
+                expires_at: 2,
+                public_key: ponte_protocol::PublicKey::from_bytes([seed; 32]),
+                signature: ponte_protocol::Signature::from_bytes([0; 64]),
+            },
+            expires_at: 3,
+            initiator: ponte_protocol::Initiator::Human {
+                user_id: "server_cli".parse().unwrap(),
+            },
+        })
+    }
+
+    /// A request goes to the session of its own device, the current one, and to no other.
+    /// Whatever cannot be handed over comes back, so it can return to the queue.
+    #[tokio::test(start_paused = true)]
+    async fn a_request_reaches_only_the_current_session_of_its_device() {
+        let registry = Registry::default();
+        let (one, other) = (DeviceId::new(), DeviceId::new());
+        assert!(registry.deliver(one, request(1)).is_err());
+
+        let (_old, mut old_requests, _) = registry.register(one, SessionId::new());
+        let (_new, mut requests, _) = registry.register(one, SessionId::new());
+        let (_other, mut other_requests, _) = registry.register(other, SessionId::new());
+        let mut online = registry.online();
+        online.sort();
+        let mut expected = vec![one, other];
+        expected.sort();
+        assert_eq!(online, expected);
+
+        let sent = request(1);
+        registry.deliver(one, sent.clone()).unwrap();
+        assert_eq!(requests.try_recv().unwrap(), sent);
+        assert!(old_requests.try_recv().is_err());
+        assert!(other_requests.try_recv().is_err());
+
+        // A session that does not take its requests gets no more than its outbox holds.
+        for _ in 0..OUTBOX {
+            registry.deliver(one, request(2)).unwrap();
+        }
+        let back = request(3);
+        assert_eq!(registry.deliver(one, back.clone()), Err(back));
+        // Nor does a session that is going away.
+        drop(other_requests);
+        assert!(registry.deliver(other, request(4)).is_err());
     }
     /// The turn is what keeps the store and the registry in the same order.
     #[tokio::test(start_paused = true)]

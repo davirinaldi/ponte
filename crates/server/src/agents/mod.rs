@@ -1,4 +1,5 @@
-//! Agent connections: enrollment, the handshake on every connection, heartbeats (M1).
+//! Agent connections: enrollment, the handshake on every connection, heartbeats (M1), and
+//! the actions sent to agents and their results (M2).
 //!
 //! | Module | What it does |
 //! |---|---|
@@ -6,13 +7,15 @@
 //! | `session` | One connection from the challenge to the last heartbeat |
 //! | `handshake` | Judges the first message. No socket |
 //! | `registry` | One session per device: a new one replaces the old one |
-//! | `store` | Tokens and devices: the [`DeviceStore`] and [`DeviceAdmin`] traits, [`MemoryStore`] |
+//! | `delivery` | Sweeps the queue of actions and hands each request to its session |
+//! | `store` | Tokens and devices: the [`DeviceStore`] and [`DeviceAdmin`] traits, [`MemoryStore`]; keys, catalog and requests: [`ActionStore`] and [`ActionAdmin`] |
 //! | `pg` | The same over PostgreSQL: [`PgStore`] |
 //! | `audit` | The events that change what the server holds about a device |
 //!
 //! Read `crates/server/AGENTS.md` before changing what is accepted, refused or logged here.
 
 pub(crate) mod audit;
+mod delivery;
 mod handshake;
 mod pg;
 mod registry;
@@ -31,6 +34,7 @@ use axum::routing::get;
 use chrono::{DateTime, Utc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use delivery::DeviceLogs;
 use registry::Registry;
 
 pub use audit::TARGET as AUDIT_TARGET;
@@ -86,6 +90,8 @@ pub(crate) struct Gateway<D> {
     limits: Limits,
     unauthenticated: Arc<Semaphore>,
     clock: fn() -> DateTime<Utc>,
+    /// What each device may still log about the action results it sends.
+    device_logs: DeviceLogs,
 }
 
 impl<D> Gateway<D> {
@@ -96,6 +102,7 @@ impl<D> Gateway<D> {
             limits,
             unauthenticated: Arc::new(Semaphore::new(limits.unauthenticated)),
             clock: Utc::now,
+            device_logs: DeviceLogs::default(),
         }
     }
 
@@ -110,12 +117,19 @@ impl<D> Gateway<D> {
     }
 }
 
-pub(crate) fn routes<D: DeviceStore>(store: D) -> Router {
+pub(crate) fn routes<D: ActionStore>(store: D) -> Router {
     routes_with(store, Limits::default())
 }
 
-fn routes_with<D: DeviceStore>(store: D, limits: Limits) -> Router {
+/// The agent endpoint, and the sweep that sends queued actions through it
+/// ([`delivery::run`]). The sweep needs a Tokio runtime: built outside one, the router
+/// still serves connections and sends no action. The sweep ends when the router is gone.
+fn routes_with<D: ActionStore>(store: D, limits: Limits) -> Router {
+    let gateway = Arc::new(Gateway::new(store, limits));
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(delivery::run(Arc::downgrade(&gateway)));
+    }
     Router::new()
         .route("/agent", get(ws::upgrade::<D>))
-        .with_state(Arc::new(Gateway::new(store, limits)))
+        .with_state(gateway)
 }

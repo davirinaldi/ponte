@@ -19,13 +19,13 @@ use ponte_protocol::{
     hello_transcript, manifest_transcript,
 };
 
-use super::store::actions::CatalogEntry;
+use super::store::actions::{ActionStore, CatalogEntry};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Layer, fmt};
 
-use super::store::{AgentInfo, CustomerId, DeviceStore, MemoryStore, TokenGrant};
+use super::store::{AgentInfo, CustomerId, MemoryStore, TokenGrant};
 use super::{Gateway, Limits, session};
 
 /// The version every test connection negotiated.
@@ -227,7 +227,7 @@ pub(crate) struct Peer {
 
 impl Peer {
     /// Opens a connection that negotiated [`version`] and runs the server's side of it.
-    pub(crate) fn connect<D: DeviceStore>(gateway: &Arc<Gateway<D>>) -> Self {
+    pub(crate) fn connect<D: ActionStore>(gateway: &Arc<Gateway<D>>) -> Self {
         let (to_server, mut inbox) = mpsc::unbounded_channel::<Message>();
         let (outbox, from_server) = mpsc::unbounded_channel();
         let stream = stream::poll_fn(move |cx| {

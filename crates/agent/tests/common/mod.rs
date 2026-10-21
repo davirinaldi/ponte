@@ -134,9 +134,14 @@ impl Machine {
 
     /// The configuration of an agent on this machine that connects to `server`.
     pub fn config(&self, server: SocketAddr) -> AgentConfig {
+        self.config_with(server, "")
+    }
+
+    /// The same, with `more` lines of TOML after it.
+    pub fn config_with(&self, server: SocketAddr, more: &str) -> AgentConfig {
         // Literal strings: a Windows path is full of backslashes.
         format!(
-            "server_url = 'ws://{server}/agent'\ndata_dir = '{}'\nenrollment_token_file = '{}'\n",
+            "server_url = 'ws://{server}/agent'\ndata_dir = '{}'\nenrollment_token_file = '{}'\n{more}",
             self.data_dir().display(),
             self.token_file().display(),
         )

@@ -591,6 +591,15 @@ fn not_expired(expires_at: u64, now: i64) -> bool {
     i128::from(expires_at) > i128::from(now)
 }
 
+impl MemoryStore {
+    /// What the store holds about a request, without waiting. For tests, like
+    /// [`MemoryStore::record`].
+    #[must_use]
+    pub fn request_record(&self, id: RequestId) -> Option<RequestRecord> {
+        self.lock().requests.get(&id).cloned()
+    }
+}
+
 impl ActionStore for MemoryStore {
     async fn claim_due(
         &self,

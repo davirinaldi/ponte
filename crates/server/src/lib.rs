@@ -1,8 +1,8 @@
 //! Ponte control plane.
 //!
 //! Current state: health and version endpoints, and the agent endpoint (`GET /agent`) with
-//! enrollment, the device-key handshake and heartbeats, over PostgreSQL; subcommands for
-//! the operator (`admin`). Approvals, the audit log, MCP and helpdesk connectors arrive
+//! enrollment, the device-key handshake, heartbeats and signed actions sent from a queue,
+//! over PostgreSQL; subcommands for the operator (`admin`). Approvals, the audit log, MCP and helpdesk connectors arrive
 //! milestone by milestone (see `docs/roadmap.md`). Keep handlers thin: HTTP in, domain
 //! call, HTTP out.
 
@@ -17,7 +17,7 @@ use tracing_subscriber::filter::{FilterExt, filter_fn};
 use tracing_subscriber::layer::Filter;
 use tracing_subscriber::registry::LookupSpan;
 
-use agents::{DeviceStore, MemoryStore};
+use agents::{ActionStore, MemoryStore};
 
 /// Builds the HTTP router over a store that starts empty and lives in memory, for tests that
 /// drive it in-process without a database. The server itself uses [`router_with`] and a
@@ -29,8 +29,9 @@ pub fn router() -> Router {
     router_with(MemoryStore::new())
 }
 
-/// Builds the HTTP router over the given device store.
-pub fn router_with<D: DeviceStore>(store: D) -> Router {
+/// Builds the HTTP router over the given store. Inside a Tokio runtime it also starts the
+/// sweep that sends queued actions to connected agents, for as long as the router lives.
+pub fn router_with<D: ActionStore>(store: D) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/version", get(version))

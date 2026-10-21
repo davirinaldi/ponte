@@ -4,8 +4,10 @@
 //! unauthenticated   Challenge sent. One message is accepted, `Enroll` or `Hello`, within
 //!                   the deadline. Anything else ends the connection.
 //! enrolled          `Enrolled` sent and the connection closed: the agent connects again.
-//! authenticated     `Welcome` sent. Heartbeats are recorded. A message that does not parse
-//!                   is logged and dropped, and the session goes on (ADR-0006).
+//! authenticated     `Welcome` sent. Requests that got no answer are sent again, then
+//!                   heartbeats are recorded, requests the sweep hands over are sent, and
+//!                   results are stored. A message that does not parse is logged and
+//!                   dropped, and the session goes on (ADR-0006).
 //! ```
 //!
 //! Every ending looks the same from the other side: the server closes, with no reason.
@@ -20,8 +22,8 @@ use std::time::Duration;
 use axum::extract::ws::Message;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use ponte_protocol::{
-    AgentToServer, DeviceId, MAX_HANDSHAKE_MESSAGE_BYTES, Nonce, ProtocolVersion, ServerToAgent,
-    TelemetrySnapshot,
+    ActionResult, AgentToServer, DeviceId, MAX_HANDSHAKE_MESSAGE_BYTES, Nonce, ProtocolVersion,
+    ServerToAgent, TelemetrySnapshot,
 };
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
@@ -30,12 +32,17 @@ use tracing::{debug, error, info, warn};
 use super::Gateway;
 use super::audit::{self, AuditEvent};
 use super::handshake::{self, Accepted, Claim, Rejection};
-use super::registry::Registration;
-use super::store::{AgentInfo, DeviceStatus, DeviceStore, SessionId};
+use super::registry::{Outbox, Registration};
+use super::store::actions::{ActionStore, Finish, Outgoing};
+use super::store::{AgentInfo, DeviceStatus, SessionId};
 
 /// How many dropped messages of one session get a log line each. A device that keeps
 /// sending what the server cannot read stays connected (ADR-0006), without filling the log.
 const DROPS_LOGGED: u32 = 8;
+
+/// Action results one session may hand to the store in a minute. An agent answers the
+/// requests it is sent, one at a time; more is a device spending the store's connections.
+pub(crate) const RESULTS_PER_MINUTE: u32 = 32;
 
 /// Why an authenticated session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +70,7 @@ pub(crate) async fn run<D, St, Si, E>(
     mut sink: Si,
     permit: OwnedSemaphorePermit,
 ) where
-    D: DeviceStore,
+    D: ActionStore,
     St: Stream<Item = Result<Message, E>> + Unpin,
     Si: Sink<Message> + Unpin,
 {
@@ -181,18 +188,23 @@ async fn session<D, St, Si, E>(
     stream: &mut St,
     sink: &mut Si,
 ) where
-    D: DeviceStore,
+    D: ActionStore,
     St: Stream<Item = Result<Message, E>> + Unpin,
     Si: Sink<Message> + Unpin,
 {
     let session = SessionId::new();
-    let Some(registration) = start(gateway, version, id, session, about).await else {
+    let Some((registration, outbox)) = start(gateway, version, id, session, about).await else {
         return;
     };
 
     let end = if send(sink, &ServerToAgent::Welcome {}).await.is_ok() {
         tokio::select! {
-            end = serve(gateway, id, stream) => end,
+            end = async {
+                if resend(gateway, id, sink).await.is_err() {
+                    return SessionEnd::Disconnected;
+                }
+                serve(gateway, id, stream, sink, outbox).await
+            } => end,
             () = registration.replaced() => SessionEnd::Replaced,
             () = sleep(gateway.limits.session) => SessionEnd::Expired,
         }
@@ -217,16 +229,16 @@ async fn session<D, St, Si, E>(
     });
 }
 
-/// Records the new session in the store, then gives it the device's place in the registry.
-/// `None` if the store refused it or failed: then nothing was replaced and nobody is
-/// welcomed.
-async fn start<'a, D: DeviceStore>(
+/// Records the new session in the store, then gives it the device's place in the registry
+/// and the requests handed to it. `None` if the store refused it or failed: then nothing
+/// was replaced and nobody is welcomed.
+async fn start<'a, D: ActionStore>(
     gateway: &'a Gateway<D>,
     version: ProtocolVersion,
     id: DeviceId,
     session: SessionId,
     about: &AgentInfo,
-) -> Option<Registration<'a>> {
+) -> Option<(Registration<'a>, Outbox)> {
     // Held across both steps, so two connections of one device reach the store and the
     // registry in the same order. See `Registry::starting`.
     let Some(_turn) = gateway.registry.starting(id).await else {
@@ -269,7 +281,7 @@ async fn start<'a, D: DeviceStore>(
     };
 
     // Only now, with the store's word for it, does the session that was there have to go.
-    let (registration, replaced) = gateway.registry.register(id, session);
+    let (registration, outbox, replaced) = gateway.registry.register(id, session);
     if let Some(old) = replaced {
         audit::record(&AuditEvent::SessionReplaced {
             device: id,
@@ -290,24 +302,78 @@ async fn start<'a, D: DeviceStore>(
         os = %about.os,
         "agent connected"
     );
-    Some(registration)
+    Some((registration, outbox))
 }
 
-/// Reads what the agent sends until something ends the session.
-async fn serve<D, St, E>(gateway: &Gateway<D>, id: DeviceId, stream: &mut St) -> SessionEnd
+/// Sends again what the device was sent and never answered (ADR-0012). The agent answers a
+/// request it knows from its journal, so a result lost on the way is recovered; one it
+/// never got is decided now. Fails only if the connection does: a store that fails is
+/// logged, and the requests wait for the next session.
+async fn resend<D, Si>(gateway: &Gateway<D>, id: DeviceId, sink: &mut Si) -> Result<(), SendFailed>
 where
-    D: DeviceStore,
+    D: ActionStore,
+    Si: Sink<Message> + Unpin,
+{
+    let unanswered = match gateway.store.unanswered(id, gateway.now()).await {
+        Ok(unanswered) => unanswered,
+        Err(error) => {
+            error!(device = %id, %error, "the store failed to list the requests to send again");
+            return Ok(());
+        }
+    };
+    for Outgoing {
+        device,
+        id: manifest,
+        version,
+        request,
+    } in unanswered
+    {
+        let request_id = request.request_id;
+        send(sink, &ServerToAgent::RunAction(request)).await?;
+        audit::record(&AuditEvent::ActionSent {
+            request: request_id,
+            device,
+            manifest,
+            version,
+            resent: true,
+        });
+    }
+    Ok(())
+}
+
+/// Reads what the agent sends, and writes the requests handed over, until something ends
+/// the session.
+async fn serve<D, St, Si, E>(
+    gateway: &Gateway<D>,
+    id: DeviceId,
+    stream: &mut St,
+    sink: &mut Si,
+    mut outbox: Outbox,
+) -> SessionEnd
+where
+    D: ActionStore,
     St: Stream<Item = Result<Message, E>> + Unpin,
+    Si: Sink<Message> + Unpin,
 {
     let interval = gateway.limits.status_check;
     // The device's status is read again at least this often: by a heartbeat, or without
     // one. A revoked device is out by then whatever it sends, or does not send (RF-04).
     let mut check_at = Instant::now() + interval;
     let mut drops = Drops::default();
+    let mut results = Results::new();
 
     loop {
         let frame = tokio::select! {
             frame = stream.next() => frame,
+            Some(request) = outbox.recv() => {
+                // Handed over by the sweep, which already recorded `action_sent`. If the
+                // connection fails here the request stays `sent`, and the device's next
+                // session sends it again.
+                if send(sink, &ServerToAgent::RunAction(request)).await.is_err() {
+                    return SessionEnd::Disconnected;
+                }
+                continue;
+            }
             () = sleep_until(check_at) => {
                 match gateway.store.device(id).await {
                     Ok(Some(device)) if device.status != DeviceStatus::Revoked => {
@@ -363,14 +429,100 @@ where
                 }
             }
             AgentToServer::ActionResult(result) => {
-                // The server sends no actions yet (M2), so nothing can be answering one.
-                if drops.log_this_one(id) {
-                    warn!(device = %id, request = %result.request_id, "action result dropped: nothing was asked");
-                }
+                take_result(gateway, id, &result, &mut drops, &mut results).await;
             }
             AgentToServer::Enroll { .. } | AgentToServer::Hello { .. } => {
                 return SessionEnd::HandshakeRepeated;
             }
+        }
+    }
+}
+
+/// Stores what the agent answered, if it may. Whatever happens, the session goes on: a
+/// result the store failed to keep is asked for again when the device next connects, and
+/// ending the session over it would only bring the same result back in a loop.
+///
+/// Never logs the `output`: it is text from the machine (invariants 4 and 6).
+async fn take_result<D: ActionStore>(
+    gateway: &Gateway<D>,
+    id: DeviceId,
+    result: &ActionResult,
+    drops: &mut Drops,
+    results: &mut Results,
+) {
+    let request = result.request_id;
+    let mut may_log = || drops.log_this_one(id) && gateway.device_logs.allow(id);
+    if !results.take() {
+        if may_log() {
+            warn!(device = %id, %request, "action result dropped: too many this minute");
+        }
+        return;
+    }
+    // No run lasts that long, and the store keeps a signed 64-bit number.
+    if i64::try_from(result.duration_ms).is_err() {
+        if may_log() {
+            warn!(device = %id, %request, "action result dropped: a duration no run can have");
+        }
+        return;
+    }
+    match gateway.store.finish(id, result, gateway.now()).await {
+        Ok(Finish::Recorded { replaced }) => audit::record(&AuditEvent::ActionFinished {
+            request,
+            device: id,
+            outcome: result.outcome.clone(),
+            duration_ms: result.duration_ms,
+            replaced,
+        }),
+        // A copy, or an answer the journal sent again (ADR-0012).
+        Ok(Finish::Repeated) => debug!(device = %id, %request, "the same result again"),
+        Ok(Finish::Conflicting) => {
+            if may_log() {
+                warn!(
+                    device = %id,
+                    %request,
+                    "a second, different result for a request; the first is kept, and may not be what happened"
+                );
+            }
+        }
+        Ok(why @ (Finish::NotSent | Finish::OtherDevice | Finish::Unknown)) => {
+            if may_log() {
+                warn!(device = %id, %request, ?why, "action result dropped: not a request this device was sent");
+            }
+        }
+        Err(error) => {
+            if may_log() {
+                error!(device = %id, %request, %error, "the store failed to keep an action result; it is asked for again at the next session");
+            }
+        }
+    }
+}
+
+/// How many results a session has handed to the store in the current minute.
+struct Results {
+    since: Instant,
+    taken: u32,
+}
+
+impl Results {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            taken: 0,
+        }
+    }
+
+    /// Whether one more result may reach the store now.
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.since) >= Duration::from_secs(60) {
+            self.since = now;
+            self.taken = 0;
+        }
+        if self.taken < RESULTS_PER_MINUTE {
+            self.taken += 1;
+            true
+        } else {
+            false
         }
     }
 }
@@ -446,6 +598,7 @@ mod tests {
 
     use super::*;
     use crate::agents::Limits;
+    use crate::agents::store::DeviceStore;
     use crate::agents::store::{
         AgentInfo, Device, DeviceAdmin, DeviceStatus, EnrollOutcome, EnrollRequest, MemoryStore,
         SessionId, TokenHash,
@@ -1114,6 +1267,8 @@ mod tests {
         inner: MemoryStore,
         /// Every call fails.
         broken: AtomicBool,
+        /// Storing an action result fails.
+        no_results: AtomicBool,
         /// Recording the start of a session fails.
         no_sessions: AtomicBool,
         /// The start of a session is recorded, and then the call fails anyway: a database
@@ -1145,6 +1300,7 @@ mod tests {
             Self {
                 inner: inner.clone(),
                 broken: AtomicBool::new(false),
+                no_results: AtomicBool::new(false),
                 no_sessions: AtomicBool::new(false),
                 start_then_fail: AtomicBool::new(false),
                 revoke_at_start: AtomicBool::new(false),
@@ -1239,6 +1395,49 @@ mod tests {
         }
     }
 
+    impl ActionStore for Flaky {
+        async fn claim_due(
+            &self,
+            online: &[DeviceId],
+            now: DateTime<Utc>,
+        ) -> Result<Vec<Outgoing>, Broken> {
+            self.check()?;
+            self.inner.claim_due(online, now).await.map_err(never)
+        }
+
+        async fn release(&self, id: RequestId) -> Result<bool, Broken> {
+            self.check()?;
+            self.inner.release(id).await.map_err(never)
+        }
+
+        async fn unanswered(
+            &self,
+            device: DeviceId,
+            now: DateTime<Utc>,
+        ) -> Result<Vec<Outgoing>, Broken> {
+            self.check()?;
+            self.inner.unanswered(device, now).await.map_err(never)
+        }
+
+        async fn finish(
+            &self,
+            device: DeviceId,
+            result: &ActionResult,
+            now: DateTime<Utc>,
+        ) -> Result<Finish, Broken> {
+            self.check()?;
+            if self.no_results.load(Ordering::SeqCst) {
+                return Err(Broken);
+            }
+            self.inner.finish(device, result, now).await.map_err(never)
+        }
+
+        async fn expire(&self, now: DateTime<Utc>) -> Result<Vec<(RequestId, DeviceId)>, Broken> {
+            self.check()?;
+            self.inner.expire(now).await.map_err(never)
+        }
+    }
+
     /// Enrolls `device` at a gateway over a [`Flaky`] store.
     async fn enroll_at(gateway: &Arc<Gateway<Flaky>>, device: &TestDevice) -> DeviceId {
         let mut peer = Peer::connect(gateway);
@@ -1277,6 +1476,44 @@ mod tests {
 
         assert_eq!(inner.record(id).unwrap().online, None);
         assert_eq!(gateway.registry.current(id), None);
+    }
+
+    /// A result the store failed to keep is asked for again at the next session, when the
+    /// agent answers from its journal. Ending this session over it would only bring the
+    /// same result back, again and again.
+    #[tokio::test(start_paused = true)]
+    async fn a_result_the_store_fails_to_keep_does_not_end_the_session() {
+        let inner = store_with_token(1, 1);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+        let mut peer = hello_at(&gateway, &device, id).await;
+        assert_eq!(
+            peer.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+
+        gateway.store.no_results.store(true, Ordering::SeqCst);
+        let (logs, _guard) = Logs::capture();
+        peer.send(text(&AgentToServer::ActionResult(ActionResult {
+            request_id: RequestId::new(),
+            outcome: ActionOutcome::Succeeded {},
+            output: None,
+            duration_ms: 1,
+        })));
+        peer.send(text(&heartbeat(1)));
+        eventually("the heartbeat after it is recorded", || {
+            inner.record(id).unwrap().telemetry == Some(telemetry(1))
+        })
+        .await;
+        assert!(
+            logs.text()
+                .contains("the store failed to keep an action result"),
+            "{}",
+            logs.text()
+        );
+        assert!(gateway.registry.current(id).is_some());
+        assert!(inner.record(id).unwrap().online.is_some());
     }
 
     /// Invariant 7: when the server cannot check, the answer is no.
