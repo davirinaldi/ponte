@@ -34,10 +34,10 @@ use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
-    FileDispositionInfo, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SECURITY_IDENTIFICATION,
-    SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, FILE_TYPE_DISK, FileDispositionInfo, GetFileInformationByHandle, GetFileType,
+    GetFinalPathNameByHandleW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    SECURITY_IDENTIFICATION, SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
 
 /// The impersonation level a server at the end of a path gets: it may learn who opened it,
@@ -343,6 +343,11 @@ impl Segments {
         self.0.len()
     }
 
+    /// The first `count` segments.
+    pub(crate) fn prefix(&self, count: usize) -> Self {
+        Self(self.0[..count.min(self.0.len())].to_vec())
+    }
+
     /// `C:\name\name`, if every name is text.
     pub(crate) fn to_text(&self) -> Option<String> {
         let names: Option<Vec<String>> = self
@@ -386,6 +391,65 @@ fn open_named(path: &str, access: u32) -> io::Result<File> {
         .open(path)
 }
 
+/// Why a walk down a path stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Walk {
+    /// A folder on the way does not exist.
+    Missing,
+    /// A folder on the way is a junction, a link or a mount point, is not a folder, or is
+    /// not on a disk; or it could not be opened.
+    Refused,
+}
+
+/// Opens the folders of `path` from its `from`-th segment to its `to`-th (the drive is the
+/// first), each without following a reparse point, and holds them without delete sharing:
+/// while they are held none can be renamed, deleted or replaced by a junction.
+pub(crate) fn hold_folders(path: &Segments, from: usize, to: usize) -> Result<Vec<File>, Walk> {
+    let mut held = Vec::new();
+    for count in from.max(2)..=to.min(path.len()) {
+        let text = path.prefix(count).to_text().ok_or(Walk::Refused)?;
+        // Listing access, not attributes only: a handle without data access does not take
+        // part in sharing, and would not keep anyone from renaming the folder.
+        let folder = OpenOptions::new()
+            .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(SHARE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+            .security_qos_flags(SQOS)
+            .open(&text)
+            .map_err(|error| {
+                if is_not_found(&error) {
+                    Walk::Missing
+                } else {
+                    Walk::Refused
+                }
+            })?;
+        let facts = Facts::of(&folder).map_err(|_| Walk::Refused)?;
+        if !facts.is_disk() || facts.is_reparse_point() || !facts.is_directory() {
+            return Err(Walk::Refused);
+        }
+        held.push(folder);
+    }
+    Ok(held)
+}
+
+/// The folders between the root `path` lies in and `path` itself, held as
+/// [`hold_folders`] holds them. A reparse point is followed nowhere on the way, so no
+/// junction or link below a root can send SYSTEM elsewhere, not even to another machine.
+/// `None` if a folder on the way does not exist.
+fn hold_below_root(path: &str, roots: &[Segments]) -> Result<Option<Vec<File>>, PathError> {
+    // Not a path on a drive letter: a pipe, a device, a share. Never acted on.
+    let written = Segments::of_written(path).ok_or(PathError::Refused)?;
+    let root = roots
+        .iter()
+        .find(|root| written.inside(root))
+        .ok_or(PathError::Refused)?;
+    match hold_folders(&written, root.len() + 1, written.len().saturating_sub(1)) {
+        Ok(folders) => Ok(Some(folders)),
+        Err(Walk::Missing) => Ok(None),
+        Err(Walk::Refused) => Err(PathError::Refused),
+    }
+}
+
 /// Whether the final path of `file` lies inside one of `roots`.
 fn lands_inside(file: &File, roots: &[Segments]) -> bool {
     final_path(file)
@@ -399,6 +463,10 @@ fn lands_inside(file: &File, roots: &[Segments]) -> bool {
 /// path lies in `roots` is found; a reparse point, a pipe or a device, or a final path
 /// elsewhere is refused.
 pub(crate) fn probe(path: &str, roots: &[Segments]) -> Result<Option<Found>, PathError> {
+    let _folders = match hold_below_root(path, roots)? {
+        Some(folders) => folders,
+        None => return Ok(None),
+    };
     let file = match open_named(path, FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
         Ok(file) => file,
         Err(error) if is_not_found(&error) => return Ok(None),
@@ -418,6 +486,7 @@ pub(crate) fn probe(path: &str, roots: &[Segments]) -> Result<Option<Found>, Pat
 /// Deletes the regular file of one link at `path`, whose final path must lie in `roots`,
 /// through the handle that was checked.
 pub(crate) fn delete(path: &str, roots: &[Segments]) -> Result<(), PathError> {
+    let _folders = hold_below_root(path, roots)?.ok_or(PathError::Failed)?;
     let file = open_named(path, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .map_err(|_| PathError::Failed)?;
     let facts = Facts::of(&file).map_err(|_| PathError::Failed)?;
@@ -813,10 +882,11 @@ pub(crate) mod tests {
         assert_eq!(probe("erp.lock"), Ok(Some(Found::File)));
     }
 
-    /// A junction in the middle of the path, pointing out of the roots: the final path is
-    /// elsewhere, and the check and the delete are refused.
+    /// A junction in the middle of the path is never followed, wherever it points: not out
+    /// of the roots, not even inside them. A link that pointed at another machine would
+    /// otherwise have SYSTEM authenticate there before any check of where it ended.
     #[test]
-    fn a_junction_in_the_middle_of_the_path_is_followed_and_refused() {
+    fn a_junction_in_the_middle_of_the_path_is_refused() {
         let ground = Ground::new();
         let outside = TempDir::new();
         fs::write(outside.path().join("erp.db"), b"data").unwrap();
@@ -827,9 +897,27 @@ pub(crate) mod tests {
         assert_eq!(delete(&path, &ground.roots), Err(PathError::Refused));
         assert_eq!(fs::read(outside.path().join("erp.db")).unwrap(), b"data");
 
-        // Inside the roots, the same junction is fine: what counts is where it ends.
         let both = vec![ground.roots[0].clone(), segments(outside.path())];
-        assert_eq!(probe(&path, &both), Ok(Some(Found::File)));
+        assert_eq!(probe(&path, &both), Err(PathError::Refused));
+        // A missing folder on the way is "absent", as Windows would say.
+        assert_eq!(
+            probe(&text(&ground.path(r"gone\erp.db")), &ground.roots),
+            Ok(None)
+        );
+    }
+
+    /// While a check or a delete runs, the folders on the way are held: nobody renames one
+    /// and puts a junction in its place between the walk and the open.
+    #[test]
+    fn the_folders_on_the_way_are_held() {
+        let ground = Ground::new();
+        fs::create_dir(ground.path("run")).unwrap();
+        let written = Segments::of_written(&text(&ground.path(r"run\erp.lock"))).unwrap();
+        let held = hold_folders(&written, ground.roots[0].len() + 1, written.len() - 1).unwrap();
+        assert_eq!(held.len(), 1);
+        assert!(fs::rename(ground.path("run"), ground.path("moved")).is_err());
+        drop(held);
+        fs::rename(ground.path("run"), ground.path("moved")).unwrap();
     }
 
     /// A junction or a link at the end of the path is opened as itself and refused.
@@ -851,22 +939,6 @@ pub(crate) mod tests {
             assert_eq!(delete(&link, &ground.roots), Err(PathError::Refused));
             assert!(inside.join("erp.db").exists());
         }
-    }
-
-    /// A root that is itself a junction resolves where it points, and only that counts.
-    #[test]
-    fn a_junction_as_the_root_counts_where_it_points() {
-        let real = TempDir::new();
-        let parent = TempDir::new();
-        let root = parent.path().join("root");
-        junction(&root, real.path());
-        fs::write(real.path().join("erp.lock"), b"").unwrap();
-        let roots = vec![segments(&root)];
-        assert_eq!(roots[0], segments(real.path()));
-        assert_eq!(
-            probe(&text(&root.join("erp.lock")), &roots),
-            Ok(Some(Found::File))
-        );
     }
 
     #[test]

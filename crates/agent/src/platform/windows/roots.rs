@@ -1,17 +1,20 @@
 //! The roots as they resolve when the agent starts (ADR-0011, "Roots, kept apart").
 //!
-//! A root is opened following whatever junction or link it is or passes through, and its
-//! final path is what the agent compares every path a manifest names with. The final path
-//! must pass the same rules as the root as written (no drive, no Windows folder, no folder
-//! every user shares, no profile root), with the folders Windows reports for itself, so a
-//! root a user turned into a junction before the agent started cannot point at the system.
-//! A delete root must still lie in an allowed root, and the agent's own files (its
-//! executable's folder, the configuration, the data directory, the token) may not lie in a
-//! root or hold one, as everything resolves.
+//! A root is walked from its drive, one folder at a time, without following a reparse
+//! point: a root that is, or passes through, a junction, a link or a mount point is left
+//! out, so a user who planted one before the agent started points it nowhere. Each folder
+//! of the way stays open without delete sharing while the agent runs, so none can be
+//! renamed or replaced afterwards, and the root must resolve to itself. It must also pass
+//! the rules of the configuration again, and the folders Windows reports for itself. A
+//! delete root must lie in an allowed root, and the agent's own files (its executable's
+//! folder, the configuration, the data directory, the token) may not lie in a root or hold
+//! one, as everything resolves.
 //!
-//! A root that does not exist when the agent starts stays unresolved: nothing under it is
-//! used until the agent starts again. An agent can then start on a machine where the ERP
-//! is not installed yet, and a root made later, by whoever, is never trusted.
+//! A root that fails, or does not exist yet, is left out with a warning: nothing under it
+//! is used until the agent starts again. An agent then starts on a machine where the ERP is
+//! not installed yet, a root made later is never trusted, and a user who can write beside a
+//! root cannot keep the agent from starting. Only the agent's own files in a root refuse
+//! the start, since only an administrator's configuration puts them there.
 
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
@@ -33,10 +36,13 @@ use super::files::{self, Facts, Segments};
 use crate::platform::RootProblem;
 
 /// The roots that resolved when the agent started.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct ResolvedRoots {
     pub(crate) allowed: Vec<Segments>,
     pub(crate) delete: Vec<Segments>,
+    /// Every folder from the drive to each root, held without delete sharing for as long
+    /// as the agent runs: the roots stay the folders they were when they resolved.
+    held: Vec<File>,
 }
 
 /// Opens a folder or file following links, to learn where it resolves.
@@ -148,7 +154,7 @@ fn profiles() -> Result<Vec<String>, ()> {
 }
 
 /// The folders Windows keeps for itself, as it reports them and as they resolve.
-struct WindowsFolders {
+pub(crate) struct WindowsFolders {
     /// No root may be or lie in these.
     system: Vec<Segments>,
     /// No root may be these, though it may lie in them.
@@ -219,8 +225,28 @@ fn both_ways(text: &str) -> Vec<Segments> {
     found
 }
 
+/// Why a root is left out. Logged with the setting and the index, never the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeftOut {
+    /// It, or a folder on the way, does not exist.
+    Missing,
+    /// It, or a folder on the way, is a junction, a link or a mount point, or it is not a
+    /// folder on a local disk.
+    NotPlain,
+    /// It resolves to another path than the one written.
+    Moved,
+    /// It is a folder no root may be: the rules of the configuration, or the folders Windows
+    /// reports for itself.
+    Forbidden,
+    /// A delete root that lies in no allowed root.
+    OutsideAllowed,
+}
+
 /// Resolves the roots and holds them to the rules of this module. `own` names the agent's
-/// files: the setting, and the path.
+/// files: the setting, and the path. A root that fails is left out, with a warning: nothing
+/// under it is used until the agent starts again. Only the agent's own files lying in a
+/// root, or the folders of Windows that cannot be read, refuse the start: a user who can
+/// write beside a root cannot keep the agent from starting.
 pub(crate) fn resolve_roots(
     allowed: &[String],
     delete: &[String],
@@ -232,45 +258,27 @@ pub(crate) fn resolve_roots(
         return Ok(roots);
     }
     let folders = WindowsFolders::read(windows)?;
-    for (setting, list, resolved) in [
-        ("allowed_roots", allowed, &mut roots.allowed),
-        ("delete_roots", delete, &mut roots.delete),
-    ] {
+    let mut resolved_delete = Vec::new();
+    for (setting, list) in [("allowed_roots", allowed), ("delete_roots", delete)] {
         for (index, root) in list.iter().enumerate() {
-            let not_a_folder = RootProblem::NotAFolder { setting, index };
-            let Some((segments, facts)) = resolve(Path::new(root)).map_err(|_| not_a_folder)?
-            else {
-                warn!(
-                    setting,
-                    index,
-                    "a root does not exist: nothing under it is used until the agent starts again"
-                );
-                continue;
-            };
-            if !facts.is_disk() || !facts.is_directory() {
-                return Err(not_a_folder);
+            match resolve_one(root, &folders) {
+                Ok((segments, held)) => {
+                    roots.held.extend(held);
+                    if setting == "allowed_roots" {
+                        roots.allowed.push(segments);
+                    } else {
+                        resolved_delete.push((index, segments));
+                    }
+                }
+                Err(reason) => left_out(setting, index, reason),
             }
-            let text = segments.to_text().ok_or(not_a_folder)?;
-            if let Err(error) = PathPolicy::new([&text]) {
-                return Err(RootProblem::Lexical {
-                    setting,
-                    index,
-                    rule: error.rule,
-                });
-            }
-            if let Some(rule) = folders.rule(&segments) {
-                return Err(RootProblem::Forbidden {
-                    setting,
-                    index,
-                    rule,
-                });
-            }
-            resolved.push(segments);
         }
     }
-    for (index, root) in roots.delete.iter().enumerate() {
-        if !roots.allowed.iter().any(|allowed| root.inside(allowed)) {
-            return Err(RootProblem::DeleteOutside { index });
+    for (index, root) in resolved_delete {
+        if roots.allowed.iter().any(|allowed| root.inside(allowed)) {
+            roots.delete.push(root);
+        } else {
+            left_out("delete_roots", index, LeftOut::OutsideAllowed);
         }
     }
     let texts: Vec<String> = roots.allowed.iter().filter_map(Segments::to_text).collect();
@@ -290,11 +298,45 @@ pub(crate) fn resolve_roots(
     Ok(roots)
 }
 
+fn left_out(setting: &'static str, index: usize, reason: LeftOut) {
+    warn!(
+        setting,
+        index,
+        ?reason,
+        "a root is left out: nothing under it is used until the agent starts again (ADR-0011)"
+    );
+}
+
+/// One root: walked from its drive without following a reparse point, held open without
+/// delete sharing for as long as the agent runs, so nobody renames or replaces it or a
+/// folder above it, and resolving to itself.
+pub(crate) fn resolve_one(
+    root: &str,
+    folders: &WindowsFolders,
+) -> Result<(Segments, Vec<File>), LeftOut> {
+    let written = Segments::of_written(root).ok_or(LeftOut::NotPlain)?;
+    let held = files::hold_folders(&written, 2, written.len()).map_err(|walk| match walk {
+        files::Walk::Missing => LeftOut::Missing,
+        files::Walk::Refused => LeftOut::NotPlain,
+    })?;
+    let resolved = held
+        .last()
+        .and_then(|folder| files::final_path(folder).ok())
+        .and_then(|path| Segments::of_final(&path))
+        .ok_or(LeftOut::NotPlain)?;
+    if resolved.len() != written.len() || !resolved.inside(&written) {
+        return Err(LeftOut::Moved);
+    }
+    let text = resolved.to_text().ok_or(LeftOut::NotPlain)?;
+    if PathPolicy::new([&text]).is_err() || folders.rule(&resolved).is_some() {
+        return Err(LeftOut::Forbidden);
+    }
+    Ok((resolved, held))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-
-    use ponte_actions::RootRule;
 
     use super::*;
     use crate::platform::windows::files::tests::junction;
@@ -305,10 +347,15 @@ mod tests {
         path.to_str().unwrap().to_owned()
     }
 
-    fn resolve_here(allowed: &[&Path], delete: &[&Path]) -> Result<ResolvedRoots, RootProblem> {
+    fn resolve_here(allowed: &[&Path], delete: &[&Path]) -> ResolvedRoots {
         let allowed: Vec<String> = allowed.iter().map(|path| text(path)).collect();
         let delete: Vec<String> = delete.iter().map(|path| text(path)).collect();
-        resolve_roots(&allowed, &delete, &[], &windows_folder().unwrap())
+        resolve_roots(&allowed, &delete, &[], &windows_folder().unwrap()).unwrap()
+    }
+
+    fn one(root: &str) -> Result<(), LeftOut> {
+        let folders = WindowsFolders::read(&windows_folder().unwrap()).unwrap();
+        resolve_one(root, &folders).map(drop)
     }
 
     /// A folder of its own under the temporary one, deep enough to be no profile root.
@@ -321,16 +368,16 @@ mod tests {
     }
 
     #[test]
-    fn roots_resolve_and_a_missing_one_stays_unresolved() {
+    fn roots_resolve_and_a_missing_one_is_left_out() {
         let (dir, erp, run) = erp();
-        let roots = resolve_here(&[&erp], &[&run]).unwrap();
+        let roots = resolve_here(&[&erp], &[&run]);
         assert_eq!((roots.allowed.len(), roots.delete.len()), (1, 1));
         assert!(roots.delete[0].inside(&roots.allowed[0]));
 
         let missing = dir.path().join("NotYet");
-        let roots = resolve_here(&[&erp, &missing], &[]).unwrap();
+        let roots = resolve_here(&[&erp, &missing], &[]);
         assert_eq!(roots.allowed.len(), 1);
-        // Made after the start: still unresolved, until the agent starts again.
+        // Made after the start: still left out, until the agent starts again.
         std::fs::create_dir(&missing).unwrap();
         assert!(
             !roots
@@ -344,36 +391,65 @@ mod tests {
                 .allowed
                 .is_empty()
         );
+        assert_eq!(one(&text(&missing.join("deeper"))), Err(LeftOut::Missing));
     }
 
-    /// A root a user turned into a junction before the agent started, pointing at the
-    /// Windows folder or at another place no root may be, refuses the start.
+    /// While the agent runs, nobody renames a root or a folder above it, so nobody puts a
+    /// junction in its place.
     #[test]
-    fn a_root_that_resolves_to_a_forbidden_folder_is_refused() {
+    fn a_root_and_the_folders_above_it_stay_while_the_agent_runs() {
+        let (dir, erp, run) = erp();
+        let roots = resolve_here(&[&erp], &[&run]);
+        assert!(std::fs::rename(&run, dir.path().join("moved")).is_err());
+        assert!(std::fs::rename(&erp, dir.path().join("moved")).is_err());
+        drop(roots);
+        std::fs::rename(&erp, dir.path().join("moved")).unwrap();
+    }
+
+    /// A root that is, or passes through, a junction is left out, wherever it points: a user
+    /// may have planted it before the agent started.
+    #[test]
+    fn a_root_through_a_junction_is_left_out() {
         let windows = windows_folder().unwrap();
-        let windows_text = windows[1].to_text().unwrap();
-        let dir = TempDir::new();
-        for (target, rule) in [
-            (windows_text.clone(), RootRule::SystemFolder),
-            (format!(r"{windows_text}\System32"), RootRule::SystemFolder),
-            (r"C:\ProgramData".to_owned(), RootRule::SharedFolder),
-            (r"C:\".to_owned(), RootRule::Drive),
+        let (dir, erp, _run) = erp();
+        for target in [
+            windows[1].to_text().unwrap(),
+            r"C:\ProgramData".to_owned(),
+            r"C:\".to_owned(),
+            text(&erp),
         ] {
             let link = dir.path().join(format!("root-{}", target.len()));
             let _ = std::fs::remove_dir(&link);
             junction(&link, Path::new(&target));
-            let problem = resolve_here(&[&link], &[]).unwrap_err();
+            let left = one(&text(&link));
+            let roots = resolve_here(&[&link], &[]);
             std::fs::remove_dir(&link).unwrap();
-            assert_eq!(
-                problem,
-                RootProblem::Lexical {
-                    setting: "allowed_roots",
-                    index: 0,
-                    rule
-                },
-                "{target}"
-            );
+            assert_eq!(left, Err(LeftOut::NotPlain), "{target}");
+            assert!(roots.allowed.is_empty(), "{target}");
         }
+        // In the middle of the way, the same.
+        let link = dir.path().join("through");
+        junction(&link, &erp);
+        assert_eq!(one(&text(&link.join("run"))), Err(LeftOut::NotPlain));
+    }
+
+    /// Where no root may be, as Windows reports its folders, and a short 8.3 name, which is
+    /// another path than the one written.
+    #[test]
+    fn a_root_where_no_root_may_be_is_left_out() {
+        let windows = windows_folder().unwrap();
+        assert_eq!(one(&windows[1].to_text().unwrap()), Err(LeftOut::Forbidden));
+        assert_eq!(one(r"C:\ProgramData"), Err(LeftOut::Forbidden));
+        assert_eq!(one(r"C:\Program Files"), Err(LeftOut::Forbidden));
+        match one(r"C:\PROGRA~1\Common Files") {
+            Err(LeftOut::Missing) => {}
+            other => assert_eq!(other, Err(LeftOut::Moved)),
+        }
+        let (_dir, erp, _run) = erp();
+        let file = erp.join("erp.db");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(one(&text(&file)), Err(LeftOut::NotPlain));
+        assert!(resolve_here(&[&file], &[]).allowed.is_empty());
     }
 
     /// The folders Windows reports are what the rules name, wherever Windows put them.
@@ -404,20 +480,21 @@ mod tests {
     }
 
     #[test]
-    fn a_delete_root_resolves_inside_an_allowed_root() {
-        let (_dir, erp, _run) = erp();
+    fn a_delete_root_outside_every_allowed_root_is_left_out() {
+        let (_dir, erp, run) = erp();
         let (_other, elsewhere, _) = self::erp();
-        // As written it lies inside; as it resolves, elsewhere.
+        let roots = resolve_here(&[&erp], &[&elsewhere, &run]);
+        assert_eq!(roots.delete.len(), 1);
+        assert!(roots.delete[0].inside(&roots.allowed[0]));
+        // As written it lies inside; through a junction, elsewhere: left out.
         let link = erp.join("deletes");
         junction(&link, &elsewhere);
-        assert_eq!(
-            resolve_here(&[&erp], &[&link]).unwrap_err(),
-            RootProblem::DeleteOutside { index: 0 }
-        );
+        assert!(resolve_here(&[&erp], &[&link]).delete.is_empty());
     }
 
     /// The agent's own files may not lie in a root as it resolves: a manifest could then
-    /// delete the journal or the key.
+    /// delete the journal or the key. That one refuses the start: only the configuration
+    /// puts them there.
     #[test]
     fn the_agents_own_files_lie_outside_the_roots_as_they_resolve() {
         let (_dir, erp, _run) = erp();
@@ -447,20 +524,6 @@ mod tests {
                 &windows
             )
             .is_ok()
-        );
-    }
-
-    #[test]
-    fn a_root_that_is_a_file_is_refused() {
-        let (_dir, erp, _run) = erp();
-        let file = erp.join("erp.db");
-        std::fs::write(&file, b"").unwrap();
-        assert_eq!(
-            resolve_here(&[&file], &[]).unwrap_err(),
-            RootProblem::NotAFolder {
-                setting: "allowed_roots",
-                index: 0
-            }
         );
     }
 }

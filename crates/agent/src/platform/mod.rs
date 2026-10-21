@@ -127,26 +127,10 @@ pub enum Untrusted {
     Unreadable,
 }
 
-/// Why the roots, as they resolve when the agent starts, refuse the start (ADR-0011).
-/// Names the setting and the index, never the path.
+/// Why the roots, as they resolve when the agent starts, refuse the start (ADR-0011). A
+/// root that fails on its own is left out instead. Names the setting, never the path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RootProblem {
-    #[error("{setting}[{index}] is not a folder on a local disk, or cannot be resolved")]
-    NotAFolder { setting: &'static str, index: usize },
-    #[error("{setting}[{index}], as it resolves, {rule}")]
-    Lexical {
-        setting: &'static str,
-        index: usize,
-        rule: ponte_actions::RootRule,
-    },
-    #[error("{setting}[{index}] resolves to {rule}, which no root may be")]
-    Forbidden {
-        setting: &'static str,
-        index: usize,
-        rule: &'static str,
-    },
-    #[error("delete_roots[{index}] resolves outside every allowed root")]
-    DeleteOutside { index: usize },
     #[error("{what} lies inside a root, or holds one, as the roots resolve")]
     Overlaps { what: &'static str },
     #[error("the folders Windows keeps for itself could not be read")]
@@ -158,10 +142,6 @@ impl RootProblem {
     #[must_use]
     pub fn setting(&self) -> &'static str {
         match self {
-            Self::NotAFolder { setting, .. }
-            | Self::Lexical { setting, .. }
-            | Self::Forbidden { setting, .. } => setting,
-            Self::DeleteOutside { .. } => "delete_roots",
             Self::Overlaps { what } => what,
             Self::KnownFolders => "allowed_roots",
         }
