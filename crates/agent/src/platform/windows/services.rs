@@ -269,8 +269,10 @@ fn check_binary(path: &str, windows: &[Segments]) -> Result<(), Refused> {
     if windows.iter().any(|folder| resolved.inside(folder)) {
         return Err(Refused::InWindows);
     }
-    let resolved = resolved.to_text().ok_or(Refused::BinaryUnreadable)?;
-    super::acl::check_chain(Path::new(&resolved), Leaf::Executable)
+    // The path as written is what the service manager launches: it is walked, and may
+    // hold no junction or link a user could swap between this check and the start, and it
+    // must resolve to itself.
+    super::acl::check_chain(Path::new(path), Leaf::Executable)
         .map_err(|_| Refused::BinaryChangeable)
 }
 
@@ -497,6 +499,28 @@ mod tests {
         assert_eq!(
             check_binary(&format!(r"{system32}\cmd.exe"), &windows),
             Err(Refused::InWindows)
+        );
+    }
+
+    /// The service manager launches the path as written. A trusted binary reached through
+    /// a junction in a folder a user controls is the user's to swap between the check and
+    /// the start: the path as written is what must be trusted, and it may hold no junction.
+    #[test]
+    fn a_trusted_binary_behind_a_users_junction_is_refused() {
+        let windows = windows_folder().unwrap();
+        let trusted = Path::new(r"C:\Program Files\Windows Defender");
+        if !trusted.join("MpCmdRun.exe").is_file() {
+            return;
+        }
+        let direct = trusted.join("MpCmdRun.exe");
+        assert_eq!(check_binary(direct.to_str().unwrap(), &windows), Ok(()));
+        let dir = crate::testkit::TempDir::new();
+        let link = dir.path().join("erp");
+        crate::platform::windows::files::tests::junction(&link, trusted);
+        let through = link.join("MpCmdRun.exe");
+        assert_eq!(
+            check_binary(through.to_str().unwrap(), &windows),
+            Err(Refused::BinaryChangeable)
         );
     }
 

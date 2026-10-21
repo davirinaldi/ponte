@@ -161,8 +161,12 @@ impl WindowsMachine {
     }
 
     fn start(&self, name: &str, held: Held, deadline: Instant) -> Result<Held, StepError> {
-        let owned = name.to_owned();
-        let held = match self.run(held, deadline, move || services::start(&owned)) {
+        let (owned, windows) = (name.to_owned(), Arc::clone(&self.windows));
+        // The structure again, right before the start and in the same call: what the service
+        // manager launches is what was checked, not what it was when the action began.
+        let starting =
+            move || services::structure(&owned, &windows).and_then(|()| services::start(&owned));
+        let held = match self.run(held, deadline, starting) {
             Ok((Ok(()), held)) => held,
             Ok((Err(_), _)) | Err(Unanswered::Failed) => return Err(StepError::Failed),
             Err(Unanswered::TimedOut) => return Err(StepError::TimedOut),
