@@ -143,6 +143,40 @@ pub enum ConfigError {
     NoExecutable,
 }
 
+impl ConfigError {
+    /// The setting at fault, or the file itself: what the Event Log gets, since the error's
+    /// text may quote the file (ADR-0013).
+    #[must_use]
+    pub fn setting(&self) -> &'static str {
+        match self {
+            Self::Read(_) | Self::Parse(_) => "the file",
+            Self::AllowedRoot(_) => "allowed_roots",
+            Self::DeleteRoot(_) => "delete_roots",
+            Self::DataDir => "data_dir",
+            Self::TokenFile => "enrollment_token_file",
+            Self::Heartbeat => "heartbeat_secs",
+            Self::ManifestKeys(_) => "manifest_keys",
+            Self::AllowedServices(_) | Self::OwnService => "allowed_services",
+            Self::MaxActionsPerHour => "max_actions_per_hour",
+            Self::ManifestInterval => "min_manifest_interval_secs",
+            Self::ShutdownTimeout => "shutdown_timeout_secs",
+            Self::InsideRoot(what) | Self::NotComparable(what) => what,
+            Self::NoExecutable => "the agent's executable",
+        }
+    }
+
+    /// The line of `text` where the file stopped parsing, if this is that error. A number,
+    /// never the text around it.
+    #[must_use]
+    pub fn line_in(&self, text: &str) -> Option<usize> {
+        let Self::Parse(error) = self else {
+            return None;
+        };
+        let start = error.span()?.start;
+        Some(text.get(..start)?.matches('\n').count() + 1)
+    }
+}
+
 impl AgentConfig {
     /// Reads and validates the file at `path`, for an agent that is not registered as a
     /// service.
@@ -166,7 +200,16 @@ impl AgentConfig {
         registered_as: Option<&ServiceName>,
     ) -> Result<Self, ConfigError> {
         let path = path.as_ref();
-        let config: Self = std::fs::read_to_string(path)?.parse()?;
+        Self::from_file_text(path, &std::fs::read_to_string(path)?, registered_as)
+    }
+
+    /// [`AgentConfig::load_as`] for a file already read as `text`.
+    pub(crate) fn from_file_text(
+        path: &Path,
+        text: &str,
+        registered_as: Option<&ServiceName>,
+    ) -> Result<Self, ConfigError> {
+        let config: Self = text.parse()?;
         let executable = std::env::current_exe().map_err(|_| ConfigError::NoExecutable)?;
         let folder = executable.parent().ok_or(ConfigError::NoExecutable)?;
         config.check_place(path, folder, registered_as)?;
@@ -933,6 +976,26 @@ delete_roots = ['C:\FakeErp\run']",
         assert!(with("enrollment_token_file = 'C:\\FAKEER~1\\token'").is_ok());
         // A relative path is taken from the working directory.
         assert!(with("allowed_roots = ['C:\\FakeErp']").is_ok());
+    }
+
+    /// What the Event Log may say of a refused file: the setting, and for a file that does
+    /// not parse, the line. Never the text.
+    #[test]
+    fn a_refusal_names_the_setting_and_the_line_only() {
+        let text = "server_url = \"wss://ponte.example.com\"\ndata_dir = \"data\"\nheartbeat_secs = \"secret-ish\"\n";
+        let error = config(text).unwrap_err();
+        assert_eq!(error.setting(), "the file");
+        assert_eq!(error.line_in(text), Some(3));
+        assert_eq!(
+            with("heartbeat_secs = 1").unwrap_err().setting(),
+            "heartbeat_secs"
+        );
+        assert_eq!(with("heartbeat_secs = 1").unwrap_err().line_in(""), None);
+        let inside = config(
+            "server_url = \"wss://ponte.example.com\"\nallowed_roots = ['C:\\FakeErp']\ndata_dir = 'C:\\FakeErp\\x'",
+        )
+        .unwrap_err();
+        assert_eq!(inside.setting(), "data_dir");
     }
 
     /// `load` reads the file and checks its place and the executable's.

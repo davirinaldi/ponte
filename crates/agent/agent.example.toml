@@ -1,4 +1,4 @@
-# Copy to agent.toml for local development: cargo run -p ponte-agent -- agent.toml
+# Copy to agent.toml for local development: cargo run -p ponte-agent -- run agent.toml
 server_url = "ws://127.0.0.1:8080/agent"
 allowed_roots = ['C:\FakeErp']
 
