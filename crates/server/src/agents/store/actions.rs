@@ -407,11 +407,18 @@ pub(crate) fn judge(stored: Stored<'_>, outcome: &ActionOutcome) -> Finish {
         Stored::Sent => Finish::Recorded { replaced: false },
         Stored::NeverSent => Finish::NotSent,
         Stored::Answered(before) if before == outcome => Finish::Repeated,
-        Stored::Answered(ActionOutcome::Rejected { reason }) if describes_the_agent(*reason) => {
+        // Replaced only by an answer about the request itself, so it happens once.
+        Stored::Answered(ActionOutcome::Rejected { reason })
+            if describes_the_agent(*reason) && !is_about_the_agent(outcome) =>
+        {
             Finish::Recorded { replaced: true }
         }
         Stored::Answered(_) => Finish::Conflicting,
     }
+}
+
+fn is_about_the_agent(outcome: &ActionOutcome) -> bool {
+    matches!(outcome, ActionOutcome::Rejected { reason } if describes_the_agent(*reason))
 }
 
 /// Seconds since the Unix epoch, as a store keeps them.

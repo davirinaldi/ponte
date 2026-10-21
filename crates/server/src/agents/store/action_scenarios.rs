@@ -550,6 +550,18 @@ pub(crate) async fn a_refusal_that_describes_the_agent_gives_way_to_a_later_resu
             finish(store, other, id, succeeded()).await,
             Finish::OtherDevice
         );
+        // Another refusal of that kind replaces nothing: otherwise a device could rewrite
+        // its answer back and forth for as long as it likes.
+        let another = if reason == RejectReason::QueueFull {
+            RejectReason::ShuttingDown
+        } else {
+            RejectReason::QueueFull
+        };
+        assert_eq!(
+            finish(store, device, id, rejected(another)).await,
+            Finish::Conflicting
+        );
+        assert_eq!(outcome_of(&state(store, id).await), Some(&rejected(reason)));
         assert_eq!(
             finish(store, device, id, succeeded()).await,
             Finish::Recorded { replaced: true }
