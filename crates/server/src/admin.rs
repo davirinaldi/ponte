@@ -315,7 +315,10 @@ pub enum AdminError<E: std::error::Error + 'static> {
     Output(io::ErrorKind),
     #[error("the key cannot be trusted: {0}")]
     KeyNotUsable(TrustedKeysError),
-    #[error("the server trusts {} keys already: remove one first", ponte_actions::MAX_TRUSTED_KEYS)]
+    #[error(
+        "the server trusts {} keys already: remove one first",
+        ponte_actions::MAX_TRUSTED_KEYS
+    )]
     TooManyKeys,
     #[error("the server does not trust that key")]
     UnknownKey,
@@ -325,7 +328,10 @@ pub enum AdminError<E: std::error::Error + 'static> {
     TrustedKeys(TrustedKeysError),
     #[error("the envelope file: {0}")]
     EnvelopeFile(io::ErrorKind),
-    #[error("the envelope file is larger than {} bytes", catalog::MAX_ENVELOPE_FILE_BYTES)]
+    #[error(
+        "the envelope file is larger than {} bytes",
+        catalog::MAX_ENVELOPE_FILE_BYTES
+    )]
     EnvelopeTooLarge,
     #[error("the file is not an envelope written by ponte-sign")]
     NotAnEnvelope,

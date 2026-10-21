@@ -14,10 +14,10 @@ use ponte_protocol::{
 use super::*;
 use crate::agents::Limits;
 use crate::agents::session::RESULTS_PER_MINUTE;
+use crate::agents::store::MemoryStore;
 use crate::agents::store::actions::{
     ActionAdmin, CatalogEntry, NewRequest, RequestOutcome, RequestState,
 };
-use crate::agents::store::MemoryStore;
 use crate::agents::testkit::{
     Logs, Peer, Sent, TestDevice, at, catalog_entry, gateway_with, grant, manifest_public,
     telemetry, token,

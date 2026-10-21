@@ -283,7 +283,9 @@ pub(crate) async fn a_device_has_a_bounded_number_of_open_requests<S: ActionAdmi
 
     // As many sent as the limit, each unanswered and expired before the next is claimed.
     for asked in 0..open {
-        let id = ask_at(store, device, &entry, asked, asked + 1).await.unwrap();
+        let id = ask_at(store, device, &entry, asked, asked + 1)
+            .await
+            .unwrap();
         assert_eq!(claim(store, &[device], asked).await, [id]);
     }
     // None of them counts any more.
