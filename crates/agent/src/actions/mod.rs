@@ -14,7 +14,7 @@ pub(crate) mod journal;
 pub(crate) mod machine;
 pub(crate) mod runner;
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -94,12 +94,7 @@ impl journal::JournalDisk for ActionFiles {
             platform::create_private_dir(dir)?;
         }
         // Nothing is ever written to it: the lock is the point.
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.lock)?;
+        let file = platform::open_lock(&self.lock)?;
         file.try_lock().map_err(|error| match error {
             std::fs::TryLockError::WouldBlock => io::ErrorKind::WouldBlock.into(),
             std::fs::TryLockError::Error(error) => error,

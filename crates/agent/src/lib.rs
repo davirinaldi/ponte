@@ -161,6 +161,10 @@ pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future
     if actions.keys.is_none() {
         warn!("the configuration names no manifest_keys: this agent runs no action (ADR-0010)");
     }
+    // Every file of the agent lives here, and no write makes a folder later.
+    if let Err(error) = platform::create_private_dir(&config.data_dir) {
+        error!(%error, "the data directory could not be made");
+    }
     let files = Arc::new(ActionFiles::new(&config.data_dir));
     let runner = executor::start(
         config.actions.clone(),
