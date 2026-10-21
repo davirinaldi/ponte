@@ -98,6 +98,9 @@ pub(crate) enum Leaf {
     Directory,
     /// An executable: the file and its folder may also belong to TrustedInstaller.
     Executable,
+    /// A folder above what the agent is about to make: held to the rule for folders above,
+    /// itself included.
+    Above,
 }
 
 /// Why a path is not one an elevated agent may trust (ADR-0011). Says which rule, never
