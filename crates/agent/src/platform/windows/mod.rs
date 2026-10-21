@@ -7,5 +7,6 @@ pub(crate) mod acl;
 pub(crate) mod dpapi;
 pub(crate) mod elevation;
 pub(crate) mod files;
+pub(crate) mod services;
 
 pub const NAME: &str = "windows";
