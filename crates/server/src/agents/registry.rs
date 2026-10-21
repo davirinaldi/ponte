@@ -312,11 +312,16 @@ mod tests {
         expected.sort();
         assert_eq!(online, expected);
 
+        // Both ways, so the order of the registry's map cannot make it pass.
         let sent = request(1);
         registry.deliver(one, sent.clone()).unwrap();
         assert_eq!(requests.try_recv().unwrap(), sent);
         assert!(old_requests.try_recv().is_err());
         assert!(other_requests.try_recv().is_err());
+        let theirs = request(5);
+        registry.deliver(other, theirs.clone()).unwrap();
+        assert_eq!(other_requests.try_recv().unwrap(), theirs);
+        assert!(requests.try_recv().is_err());
 
         // A session that does not take its requests gets no more than its outbox holds.
         for _ in 0..OUTBOX {
