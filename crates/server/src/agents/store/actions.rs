@@ -445,6 +445,14 @@ pub trait ActionStore: DeviceStore {
     /// `false` if it is no longer `sent`.
     fn release(&self, id: RequestId) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 
+    /// Puts back in the queue every request still `sent` that a claim made at `claimed_at`
+    /// marked, and says how many: for a claim whose answer was lost, which may have
+    /// committed. Each sweep claims at its own instant, so nothing else is touched.
+    fn unclaim(
+        &self,
+        claimed_at: DateTime<Utc>,
+    ) -> impl Future<Output = Result<u64, Self::Error>> + Send;
+
     /// The requests of `device` that were sent and got no answer, to send again when a
     /// session starts: an active device, a key still trusted, not expired for longer than
     /// [`RESEND_WINDOW_SECS`]; the unexpired ones first, then the oldest; at most
@@ -662,6 +670,18 @@ impl ActionStore for MemoryStore {
             }
             _ => false,
         })
+    }
+
+    async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Self::Error> {
+        let mut inner = self.lock();
+        let mut count = 0;
+        for record in inner.requests.values_mut() {
+            if record.state == (RequestState::Sent { at: claimed_at }) {
+                record.state = RequestState::Queued;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn unanswered(

@@ -36,6 +36,7 @@ macro_rules! for_each_action_scenario {
         $test!(requests_that_got_no_answer_are_sent_again);
         $test!(a_request_that_never_reached_the_connection_goes_back_to_the_queue);
         $test!(requests_are_listed_newest_first);
+        $test!(a_claim_whose_answer_was_lost_is_put_back_and_nothing_else);
     };
 }
 pub(crate) use for_each_action_scenario;
@@ -727,6 +728,36 @@ pub(crate) async fn a_request_that_never_reached_the_connection_goes_back_to_the
     finish(store, device, id, succeeded()).await;
     assert!(!store.release(id).await.unwrap());
     assert!(!store.release(RequestId::new()).await.unwrap());
+}
+
+/// What one claim marked, if its answer was lost, goes back to the queue; what another
+/// claim marked, or what was answered since, stays as it is.
+pub(crate) async fn a_claim_whose_answer_was_lost_is_put_back_and_nothing_else<
+    S: ActionAdmin,
+>(
+    store: &S,
+) {
+    let entry = catalog(store).await;
+    let (one, two, three) = (
+        active(store, 1).await,
+        active(store, 2).await,
+        active(store, 3).await,
+    );
+    let answered = ask_at(store, one, &entry, 0, 3600).await.unwrap();
+    assert_eq!(claim(store, &[one], 1).await, [answered]);
+    finish(store, one, answered, succeeded()).await;
+    let first = ask_at(store, one, &entry, 1, 3600).await.unwrap();
+    let second = ask_at(store, two, &entry, 1, 3600).await.unwrap();
+    let other = ask_at(store, three, &entry, 1, 3600).await.unwrap();
+    assert_eq!(claim(store, &[three], 2).await, [other]);
+    assert_eq!(claim(store, &[one, two], 3).await, [first, second]);
+
+    assert_eq!(store.unclaim(at(3)).await.unwrap(), 2);
+    assert_eq!(state(store, first).await, RequestState::Queued);
+    assert_eq!(state(store, second).await, RequestState::Queued);
+    assert_eq!(state(store, other).await, RequestState::Sent { at: at(2) });
+    assert_eq!(state(store, answered).await.name(), "succeeded");
+    assert_eq!(store.unclaim(at(3)).await.unwrap(), 0);
 }
 
 pub(crate) async fn requests_are_listed_newest_first<S: ActionAdmin>(store: &S) {

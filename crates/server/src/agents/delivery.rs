@@ -67,12 +67,23 @@ pub(crate) async fn sweep_once<D: ActionStore>(gateway: &Gateway<D>) -> Result<(
     if online.is_empty() {
         return Ok(());
     }
+    let claimed = match gateway.store.claim_due(&online, now).await {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            // The claim may have committed and lost its answer: whatever it marked would
+            // stay `sent`, delivered to nobody, until each device's next session.
+            if let Err(again) = gateway.store.unclaim(now).await {
+                warn!(error = %again, "the requests of a claim that failed could not be queued again");
+            }
+            return Err(error);
+        }
+    };
     for Outgoing {
         device,
         id,
         version,
         request,
-    } in gateway.store.claim_due(&online, now).await?
+    } in claimed
     {
         let request_id = request.request_id;
         match gateway.registry.deliver(device, request) {

@@ -1269,6 +1269,8 @@ mod tests {
         broken: AtomicBool,
         /// Storing an action result fails.
         no_results: AtomicBool,
+        /// A claim is made, and then the call fails anyway: its answer was lost.
+        claim_then_fail: AtomicBool,
         /// Recording the start of a session fails.
         no_sessions: AtomicBool,
         /// The start of a session is recorded, and then the call fails anyway: a database
@@ -1301,6 +1303,7 @@ mod tests {
                 inner: inner.clone(),
                 broken: AtomicBool::new(false),
                 no_results: AtomicBool::new(false),
+                claim_then_fail: AtomicBool::new(false),
                 no_sessions: AtomicBool::new(false),
                 start_then_fail: AtomicBool::new(false),
                 revoke_at_start: AtomicBool::new(false),
@@ -1402,7 +1405,16 @@ mod tests {
             now: DateTime<Utc>,
         ) -> Result<Vec<Outgoing>, Broken> {
             self.check()?;
-            self.inner.claim_due(online, now).await.map_err(never)
+            let claimed = self.inner.claim_due(online, now).await.map_err(never)?;
+            if self.claim_then_fail.load(Ordering::SeqCst) {
+                return Err(Broken);
+            }
+            Ok(claimed)
+        }
+
+        async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Broken> {
+            self.check()?;
+            self.inner.unclaim(claimed_at).await.map_err(never)
         }
 
         async fn release(&self, id: RequestId) -> Result<bool, Broken> {
@@ -1514,6 +1526,52 @@ mod tests {
         );
         assert!(gateway.registry.current(id).is_some());
         assert!(inner.record(id).unwrap().online.is_some());
+    }
+
+    /// A claim that committed and lost its answer would leave its requests `sent`,
+    /// delivered to nobody, until each device connects again. The sweep puts them back.
+    #[tokio::test(start_paused = true)]
+    async fn a_claim_whose_answer_was_lost_is_put_back_in_the_queue() {
+        use crate::agents::store::actions::{ActionAdmin, NewRequest, RequestState};
+        use crate::agents::testkit::{at, catalog_entry, manifest_public};
+
+        let inner = store_with_token(1, 1);
+        let gateway = gateway_with(Flaky::over(&inner), Limits::default());
+        let device = TestDevice::new(10);
+        let id = enroll_at(&gateway, &device).await;
+        let mut peer = hello_at(&gateway, &device, id).await;
+        assert_eq!(
+            peer.receive().await,
+            Some(Sent::Message(ServerToAgent::Welcome {}))
+        );
+        inner.add_signing_key(manifest_public(1), at(0)).await.unwrap();
+        let entry = catalog_entry(1, "erp.restart-service", 1, 0);
+        inner.add_manifest(&entry, at(0)).await.unwrap();
+        let request = RequestId::new();
+        let new = NewRequest {
+            id: request,
+            device: id,
+            manifest: *entry.hash(),
+            expires_at: u64::try_from(at(3600).timestamp()).unwrap(),
+            initiator: ponte_protocol::Initiator::Human {
+                user_id: "server_cli".parse().unwrap(),
+            },
+        };
+        inner.request_action(&new, at(0)).await.unwrap();
+
+        gateway.store.claim_then_fail.store(true, Ordering::SeqCst);
+        assert!(crate::agents::delivery::sweep_once(&gateway).await.is_err());
+        assert_eq!(
+            inner.request_record(request).unwrap().state,
+            RequestState::Queued
+        );
+
+        gateway.store.claim_then_fail.store(false, Ordering::SeqCst);
+        crate::agents::delivery::sweep_once(&gateway).await.unwrap();
+        let Some(Sent::Message(ServerToAgent::RunAction(sent))) = peer.receive().await else {
+            panic!("the request was not sent");
+        };
+        assert_eq!(sent.request_id, request);
     }
 
     /// Invariant 7: when the server cannot check, the answer is no.

@@ -339,6 +339,40 @@ async fn pg_an_error_carries_no_value_of_the_call(pool: PgPoolOptions, options: 
     assert!(matches!(state(&store, id).await, RequestState::Sent { .. }));
 }
 
+/// The claim commits before its rows are read. One that does not read stays `sent` and is
+/// not delivered; the others, of other devices, are.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_a_claimed_row_that_does_not_read_keeps_no_other_from_its_session(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let mut raw = PgConnection::connect_with(&options).await.unwrap();
+    let store = store(pool, options).await;
+    let entry = catalog(&store).await;
+    let broken = active(&store, 1).await;
+    let fine = active(&store, 2).await;
+    ask(&store, broken, &entry).await;
+    ask(&store, fine, &entry).await;
+    let broken_id = store.requests(Some(broken), 1).await.unwrap()[0].id;
+    let fine_id = store.requests(Some(fine), 1).await.unwrap()[0].id;
+    sqlx::query("UPDATE action_requests SET initiator = '{}' WHERE id = $1")
+        .bind(broken_id.as_uuid())
+        .execute(&mut raw)
+        .await
+        .unwrap();
+
+    let claimed = store.claim_due(&[broken, fine], at(1)).await.unwrap();
+    let ids: Vec<_> = claimed.iter().map(|o| o.request.request_id).collect();
+    assert_eq!(ids, [fine_id]);
+    let status: String = sqlx::query_scalar("SELECT status FROM action_requests WHERE id = $1")
+        .bind(broken_id.as_uuid())
+        .fetch_one(&mut raw)
+        .await
+        .unwrap();
+    assert_eq!(status, "sent");
+}
+
 /// A row the code cannot read is an error, never a guess, and never quoted.
 #[sqlx::test]
 #[ignore = "needs PostgreSQL: DATABASE_URL"]

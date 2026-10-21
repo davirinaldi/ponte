@@ -284,7 +284,13 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   machine: the agent refuses what has expired on its own.
 - **A request that never reached a connection goes back to the queue.** The sweep marks a
   request sent before its session has it; if the session is gone or not taking requests,
-  the request returns to `queued`, and `action_sent` is audited only once a session holds it.
+  the request returns to `queued`, and `action_sent` is audited only once a session holds it. The
+  security review of step 6 added two cases: a claim whose answer was lost (it may have
+  committed) puts back everything that sweep marked, found by the instant it claimed at; and
+  a claimed row that does not read is left `sent` and undelivered while the others go out.
+  One narrow race is accepted: a session that starts between a failed hand-over and the
+  return to the queue may send the request, and its answer is then dropped as "never
+  sent"; the request is sent again by the next sweep and the agent answers from its journal.
 - **Identical** means the same status, reason and step. The duration and the `output` do
   not count: the journal answers with what it recorded, without the `output`.
 - **The refusals that describe the agent can be replaced.** `actions_disabled`,
