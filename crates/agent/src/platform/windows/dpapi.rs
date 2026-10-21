@@ -155,6 +155,30 @@ mod tests {
         assert!(unprotect(output.bytes()).is_err());
     }
 
+    /// A blob of this account with no entropy at all is not a device key either.
+    #[test]
+    fn no_entropy_does_not_open() {
+        let input = blob(&[7; 32]);
+        let mut output = Output(CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        });
+        // SAFETY: as in `protect`, with no entropy.
+        let made = unsafe {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut output.0,
+            )
+        };
+        assert_ne!(made, 0);
+        assert!(unprotect(output.bytes()).is_err());
+    }
+
     /// What a blob of another account looks like to this one: a master key it does not
     /// have. The blob's header is a version (4 bytes), the provider (16), and then the
     /// version and the GUID of the master key that protects it.
