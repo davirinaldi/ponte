@@ -21,6 +21,7 @@ pub(crate) const PROTECTED: bool = cfg!(windows);
 pub(crate) type Secret = Zeroizing<[u8; 32]>;
 
 /// The key under DPAPI could not be opened by this account.
+#[cfg(windows)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
     "the device key cannot be opened by the account the agent runs as: it was most likely \
