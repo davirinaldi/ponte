@@ -184,6 +184,9 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Renamed through its own handle, then flushed again: on NTFS that commits the log
     // that holds the rename, which `MOVEFILE_WRITE_THROUGH` only promises for a copy.
     rename_over(&file, path)?;
+    // An error here comes after the rename: the new content is in place and may not be on
+    // the disk. Callers take it as a failed write, which is the safe reading: a start not
+    // known to be written is not acted on, and comes back as interrupted if it was.
     file.sync_all()
 }
 
