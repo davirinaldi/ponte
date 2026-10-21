@@ -395,6 +395,7 @@ pub(crate) async fn telemetry_is_kept_for_an_active_device_only<S: DeviceAdmin>(
     assert_eq!(status, Some(DeviceStatus::Pending));
     let record = store.device_record(device).await.unwrap().unwrap();
     assert_eq!(record.telemetry, None);
+    assert_eq!(record.telemetry_at, None);
     assert_eq!(record.last_seen, Some(at(1)));
 
     assert!(store.approve_device(device).await.unwrap());
@@ -402,6 +403,7 @@ pub(crate) async fn telemetry_is_kept_for_an_active_device_only<S: DeviceAdmin>(
     assert_eq!(status, Some(DeviceStatus::Active));
     let record = store.device_record(device).await.unwrap().unwrap();
     assert_eq!(record.telemetry, Some(telemetry(2)));
+    assert_eq!(record.telemetry_at, Some(at(2)));
     assert_eq!(record.last_seen, Some(at(2)));
 
     assert!(store.revoke_device(device).await.unwrap());
@@ -409,6 +411,7 @@ pub(crate) async fn telemetry_is_kept_for_an_active_device_only<S: DeviceAdmin>(
     assert_eq!(status, Some(DeviceStatus::Revoked));
     let record = store.device_record(device).await.unwrap().unwrap();
     assert_eq!(record.telemetry, Some(telemetry(2)));
+    assert_eq!(record.telemetry_at, Some(at(2)));
     assert_eq!(record.last_seen, Some(at(2)));
 
     let unknown = store.heartbeat(DeviceId::new(), &telemetry(4), at(4)).await;

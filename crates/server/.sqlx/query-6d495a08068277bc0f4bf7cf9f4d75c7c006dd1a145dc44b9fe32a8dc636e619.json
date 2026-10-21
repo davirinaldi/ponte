@@ -1,0 +1,151 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH due AS (\n                       SELECT id FROM (\n                           SELECT DISTINCT ON (q.device_id) q.id, q.created_at\n                           FROM action_requests q\n                           JOIN devices d ON d.id = q.device_id AND d.status = 'active'\n                           JOIN manifests m ON m.hash = q.manifest_hash\n                           JOIN signing_keys k ON k.public_key = m.public_key\n                           WHERE q.status = 'queued'\n                             AND q.device_id = ANY($1::uuid[])\n                             AND q.expires_at > $2\n                             AND NOT EXISTS (\n                                 SELECT 1 FROM action_requests s\n                                 WHERE s.device_id = q.device_id AND s.status = 'sent'\n                                   AND s.expires_at > $2)\n                           ORDER BY q.device_id, q.created_at, q.id\n                       ) firsts\n                       ORDER BY created_at, id\n                       LIMIT $3\n                   )\n                   UPDATE action_requests r SET status = 'sent', sent_at = $4\n                   FROM due, manifests m\n                   WHERE r.id = due.id AND r.status = 'queued' AND m.hash = r.manifest_hash\n                   RETURNING r.id AS \"id!\", r.device_id AS \"device_id!\",\n                             r.expires_at AS \"expires_at!\", r.initiator AS \"initiator!\",\n                             m.manifest_id AS \"manifest_id!\", m.version AS \"version!\",\n                             m.manifest AS \"manifest!\", m.issued_at AS \"issued_at!\",\n                             m.expires_at AS \"manifest_expires_at!\",\n                             m.public_key AS \"public_key!\", m.signature AS \"signature!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "expires_at!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "initiator!",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "initiator"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "manifest_id!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "manifest_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "version!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "manifest!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "manifest"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "issued_at!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "issued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "manifest_expires_at!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "public_key!",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "public_key"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "signature!",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "signature"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6d495a08068277bc0f4bf7cf9f4d75c7c006dd1a145dc44b9fe32a8dc636e619"
+}

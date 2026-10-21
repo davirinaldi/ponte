@@ -1,4 +1,5 @@
 //! Devices and enrollment tokens: what the handshake asks and what a session records.
+//! Keys, manifests and action requests are in `actions`.
 //!
 //! [`DeviceStore`] is what a connection needs and nothing more. [`DeviceAdmin`] adds what an
 //! operator does: customers, tokens, approving and revoking. [`MemoryStore`] keeps
@@ -408,6 +409,9 @@ pub struct DeviceRecord {
     pub online: Option<SessionId>,
     pub last_seen: Option<DateTime<Utc>>,
     pub telemetry: Option<TelemetrySnapshot>,
+    /// When the server stored `telemetry`, by its own clock. Against `collected_at`, the
+    /// device's clock offset (ADR-0010).
+    pub telemetry_at: Option<DateTime<Utc>>,
     pub enrolled_with: TokenHash,
 }
 
@@ -436,6 +440,9 @@ struct Inner {
     devices: HashMap<DeviceId, DeviceRecord>,
     /// A key enrolls once: this is the index that says under which device.
     keys: HashMap<PublicKey, DeviceId>,
+    signing_keys: Vec<actions::SigningKey>,
+    manifests: HashMap<actions::EnvelopeHash, actions::CatalogEntry>,
+    requests: HashMap<ponte_protocol::RequestId, actions::RequestRecord>,
 }
 
 /// A [`DeviceStore`] that lives in the process and forgets everything when it stops.
@@ -667,6 +674,7 @@ impl DeviceStore for MemoryStore {
                 online: None,
                 last_seen: None,
                 telemetry: None,
+                telemetry_at: None,
                 enrolled_with: request.token,
             },
         );
@@ -720,6 +728,7 @@ impl DeviceStore for MemoryStore {
             DeviceStatus::Active => {
                 device.last_seen = Some(now);
                 device.telemetry = Some(telemetry.clone());
+                device.telemetry_at = Some(now);
             }
             DeviceStatus::Pending => device.last_seen = Some(now),
             DeviceStatus::Revoked => {}
@@ -743,14 +752,29 @@ impl DeviceStore for MemoryStore {
     }
 }
 
+pub(crate) mod actions;
+
 #[cfg(test)]
 pub(crate) mod scenarios;
 
 #[cfg(test)]
+pub(crate) mod action_scenarios;
+
+#[cfg(test)]
 mod tests {
+    use super::action_scenarios::{self, for_each_action_scenario};
     use super::scenarios::{self, for_each_scenario};
     use super::*;
     use crate::agents::testkit::{grant, token};
+
+    macro_rules! in_memory_actions {
+        ($scenario:ident) => {
+            #[tokio::test]
+            async fn $scenario() {
+                action_scenarios::$scenario(&MemoryStore::new()).await;
+            }
+        };
+    }
 
     macro_rules! in_memory {
         ($scenario:ident) => {
@@ -761,6 +785,7 @@ mod tests {
         };
     }
     for_each_scenario!(in_memory);
+    for_each_action_scenario!(in_memory_actions);
 
     /// A store that kept the token itself would hand it out with any leak of its data.
     #[test]

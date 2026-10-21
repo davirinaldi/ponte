@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE signing_keys IN EXCLUSIVE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d741f67b290a0c19c6c94d2c3751e2c5fd9dd939f7f7d5af4a967394a96ba968"
+}

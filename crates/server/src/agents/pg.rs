@@ -223,6 +223,8 @@ pub enum ErrorKind {
     Migration,
     #[error("a row holds a value the server cannot read ({0})")]
     CorruptRow(&'static str),
+    #[error("a value does not fit the database ({0})")]
+    OutOfRange(&'static str),
     #[error("the database library failed")]
     Other,
 }
@@ -831,7 +833,8 @@ impl DeviceStore for PgStore {
             let row = sqlx::query!(
                 "UPDATE devices SET
                      last_seen = CASE WHEN status = 'revoked' THEN last_seen ELSE $2 END,
-                     telemetry = CASE WHEN status = 'active' THEN $3 ELSE telemetry END
+                     telemetry = CASE WHEN status = 'active' THEN $3 ELSE telemetry END,
+                     telemetry_at = CASE WHEN status = 'active' THEN $2 ELSE telemetry_at END
                  WHERE id = $1
                  RETURNING status",
                 id.as_uuid(),
@@ -882,6 +885,7 @@ struct DeviceRow {
     online_session: Option<Uuid>,
     last_seen: Option<DateTime<Utc>>,
     telemetry: Option<serde_json::Value>,
+    telemetry_at: Option<DateTime<Utc>>,
 }
 
 impl DeviceRow {
@@ -898,6 +902,7 @@ impl DeviceRow {
             online: self.online_session.map(SessionId::from_uuid),
             last_seen: self.last_seen,
             telemetry: self.telemetry.and_then(|stored| readable(self.id, stored)),
+            telemetry_at: self.telemetry_at,
             enrolled_with: token_hash(operation, &self.enrolled_with)?,
         })
     }
@@ -1091,7 +1096,7 @@ impl DeviceAdmin for PgStore {
                 DeviceRow,
                 r#"SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,
                           online_session, last_seen,
-                          telemetry
+                          telemetry, telemetry_at
                    FROM devices WHERE id = $1"#,
                 id.as_uuid(),
             )
@@ -1114,7 +1119,7 @@ impl DeviceAdmin for PgStore {
                 DeviceRow,
                 r#"SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,
                           online_session, last_seen,
-                          telemetry
+                          telemetry, telemetry_at
                    FROM devices
                    WHERE $1::uuid IS NULL OR customer_id = $1
                    ORDER BY id"#,
@@ -1129,9 +1134,15 @@ impl DeviceAdmin for PgStore {
     }
 }
 
+mod actions;
+
 /// Needs a database: see the module.
 #[cfg(test)]
 mod pg_tests;
+
+/// Needs a database, like `pg_tests`.
+#[cfg(test)]
+mod pg_action_tests;
 
 #[cfg(test)]
 mod tests {
