@@ -723,13 +723,20 @@ pub(crate) async fn a_request_that_never_reached_the_connection_goes_back_to_the
     let device = active(store, 1).await;
     let id = ask(store, device, &entry).await;
     assert_eq!(claim(store, &[device], 1).await, [id]);
-    assert!(store.release(id).await.unwrap());
-    assert!(!store.release(id).await.unwrap());
+    assert!(!store.release(id, at(2)).await.unwrap());
+    assert!(store.release(id, at(1)).await.unwrap());
+    assert!(!store.release(id, at(1)).await.unwrap());
     assert_eq!(state(store, id).await, RequestState::Queued);
+
+    // Sent again by a session meanwhile: on its way to the agent, it stays.
     assert_eq!(claim(store, &[device], 2).await, [id]);
+    assert_eq!(store.resend(device, at(3)).await.unwrap().len(), 1);
+    assert!(!store.release(id, at(2)).await.unwrap());
+    assert_eq!(state(store, id).await, RequestState::Sent { at: at(3) });
+
     finish(store, device, id, succeeded()).await;
-    assert!(!store.release(id).await.unwrap());
-    assert!(!store.release(RequestId::new()).await.unwrap());
+    assert!(!store.release(id, at(3)).await.unwrap());
+    assert!(!store.release(RequestId::new(), at(2)).await.unwrap());
 }
 
 /// What one claim marked, if its answer was lost, goes back to the queue; what another

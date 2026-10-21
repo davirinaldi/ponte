@@ -426,13 +426,14 @@ impl ActionStore for PgStore {
         .await
     }
 
-    async fn release(&self, id: RequestId) -> Result<bool, Self::Error> {
+    async fn release(&self, id: RequestId, claimed_at: DateTime<Utc>) -> Result<bool, Self::Error> {
         const OPERATION: &str = "put a request back in the queue";
         bounded(OPERATION, async {
             let released = sqlx::query!(
                 "UPDATE action_requests SET status = 'queued', sent_at = NULL
-                 WHERE id = $1 AND status = 'sent'",
+                 WHERE id = $1 AND status = 'sent' AND sent_at = $2",
                 id.as_uuid(),
+                claimed_at,
             )
             .execute(&self.pool)
             .await

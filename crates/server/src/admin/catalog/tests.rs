@@ -264,7 +264,14 @@ async fn a_key_is_checked_before_it_is_trusted() {
         logs.lines()
             .any(|line| line.contains(event) && line.contains(&key.to_string()))
     };
-    assert!(line_of("signing_key_added", &manifest_public(4)), "{logs}");
+    for seed in 1..=4 {
+        assert!(
+            line_of("signing_key_added", &manifest_public(seed)),
+            "{logs}"
+        );
+    }
+    // The key already trusted added nothing, so it is not audited as an addition.
+    assert_eq!(logs.matches("signing_key_added").count(), 4, "{logs}");
     assert!(
         line_of("signing_key_removed", &manifest_public(2)),
         "{logs}"

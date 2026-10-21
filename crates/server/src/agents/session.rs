@@ -1462,9 +1462,9 @@ mod tests {
             unclaimed
         }
 
-        async fn release(&self, id: RequestId) -> Result<bool, Broken> {
+        async fn release(&self, id: RequestId, claimed_at: DateTime<Utc>) -> Result<bool, Broken> {
             self.check()?;
-            self.inner.release(id).await.map_err(never)
+            self.inner.release(id, claimed_at).await.map_err(never)
         }
 
         async fn resend(
