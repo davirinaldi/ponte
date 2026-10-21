@@ -313,10 +313,9 @@ fn make_data_dir(data_dir: &Path, strict: bool) -> Result<(), StartError> {
         if !data_dir.is_absolute() {
             return Err(untrusted(Untrusted::NotAbsolute));
         }
-        if let Some(existing) = data_dir.ancestors().find(|folder| folder.exists()) {
-            if existing != data_dir {
-                platform::check_trusted(existing, Leaf::Above).map_err(untrusted)?;
-            }
+        let existing = data_dir.ancestors().find(|folder| folder.exists());
+        if let Some(existing) = existing.filter(|existing| *existing != data_dir) {
+            platform::check_trusted(existing, Leaf::Above).map_err(untrusted)?;
         }
     }
     platform::create_private_dir(data_dir).map_err(StartError::DataDir)?;
