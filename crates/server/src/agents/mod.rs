@@ -34,7 +34,7 @@ use axum::routing::get;
 use chrono::{DateTime, Utc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use delivery::DeviceLogs;
+use delivery::{DeviceLogs, FailedClaims};
 use registry::Registry;
 
 pub use audit::TARGET as AUDIT_TARGET;
@@ -96,6 +96,8 @@ pub(crate) struct Gateway<D> {
     clock: fn() -> DateTime<Utc>,
     /// What each device may still log about the action results it sends.
     device_logs: DeviceLogs,
+    /// Claims of the sweep that failed, whose requests are still being put back.
+    failed_claims: FailedClaims,
 }
 
 impl<D> Gateway<D> {
@@ -107,6 +109,7 @@ impl<D> Gateway<D> {
             unauthenticated: Arc::new(Semaphore::new(limits.unauthenticated)),
             clock: Utc::now,
             device_logs: DeviceLogs::default(),
+            failed_claims: FailedClaims::default(),
         }
     }
 

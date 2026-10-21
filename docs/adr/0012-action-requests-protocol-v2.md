@@ -286,7 +286,9 @@ this section; `crates/server/AGENTS.md` keeps the rules.
   request sent before its session has it; if the session is gone or not taking requests,
   the request returns to `queued`, and `action_sent` is audited only once a session holds it. The
   security review of step 6 added two cases: a claim whose answer was lost (it may have
-  committed) puts back everything that sweep marked, found by the instant it claimed at; and
+  committed) puts back everything that sweep marked, found by the instant it claimed at, at
+  once and again at every sweep of the next minute (a claim given up at the store's limit may
+  still commit after the first try; the re-review of the fix found that); and
   a claimed row that does not read is left `sent` and undelivered while the others go out.
   One narrow race is accepted: a session that starts between a failed hand-over and the
   return to the queue may send the request, and its answer is then dropped as "never

@@ -466,9 +466,19 @@ impl ActionStore for PgStore {
             .fetch_all(&self.pool)
             .await
             .map_err(failed(OPERATION))?;
-            rows.into_iter()
-                .map(|row| outgoing_row!(row).outgoing(OPERATION))
-                .collect()
+            // One row that does not read keeps no other from being sent again.
+            Ok(rows
+                .into_iter()
+                .filter_map(|row| {
+                    let id = row.id;
+                    outgoing_row!(row)
+                        .outgoing(OPERATION)
+                        .inspect_err(|error| {
+                            warn!(request = %id, %error, "a request to send again does not read; it is not sent");
+                        })
+                        .ok()
+                })
+                .collect())
         })
         .await
     }
