@@ -20,13 +20,6 @@
 //! reparse points in the middle of a path, so the final path of the handle must lie inside
 //! a root as the roots resolved at start, compared segment by segment the way the file
 //! system compares names. A file is deleted through the handle that was checked.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the machine of Windows, the roots and the logs use the rest, later in step 5"
-    )
-)]
 
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -207,6 +200,10 @@ fn replace_through(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// Renames `from` over `to`, for the logs: written through like the rest.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the service's log uses it, in the next commit")
+)]
 pub(crate) fn replace(from: &Path, to: &Path) -> io::Result<()> {
     replace_through(from, to)
 }
@@ -231,6 +228,10 @@ pub(crate) fn open_lock(path: &Path) -> io::Result<File> {
 }
 
 /// Opens a log file to append to, creating it if needed.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the service's log uses it, in the next commit")
+)]
 pub(crate) fn open_append(path: &Path) -> io::Result<File> {
     own(path, OpenOptions::new().append(true).create(true))
 }

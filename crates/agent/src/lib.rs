@@ -54,11 +54,12 @@ use tracing::{debug, error, info, warn};
 
 pub use config::{AgentConfig, ConfigError, InvalidServerUrl, ServerUrl};
 pub use platform::NAME as PLATFORM;
-pub use platform::{Elevation, Untrusted};
+pub use platform::{Elevation, RootProblem, Untrusted};
 pub use ponte_protocol::ServiceName;
 
 use actions::ActionFiles;
 use actions::clock::SystemClock;
+use actions::machine::{Machine, Unsupported};
 use actions::runner::{self as executor, Actions};
 use config::Security;
 use handshake::{About, Accepted};
@@ -136,10 +137,20 @@ pub fn runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 /// An agent that passed every check of [`prepare`], ready to [`run`].
-#[derive(Debug)]
 pub struct Prepared {
     config: AgentConfig,
     elevation: Elevation,
+    /// Built on the roots as they resolved during the checks.
+    machine: Arc<dyn Machine>,
+}
+
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared")
+            .field("config", &self.config)
+            .field("elevation", &self.elevation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Prepared {
@@ -170,6 +181,8 @@ pub enum StartError {
     PlainUrl,
     #[error("data_dir could not be made: {0}")]
     DataDir(std::io::Error),
+    #[error("{0} (ADR-0011)")]
+    Roots(RootProblem),
 }
 
 impl StartError {
@@ -181,6 +194,7 @@ impl StartError {
             Self::Untrusted { .. } => 2,
             Self::PlainUrl => 3,
             Self::DataDir(_) => 4,
+            Self::Roots(_) => 5,
         }
     }
 
@@ -192,6 +206,7 @@ impl StartError {
             Self::Untrusted { setting, .. } => setting,
             Self::PlainUrl => "server_url",
             Self::DataDir(_) => "data_dir",
+            Self::Roots(problem) => problem.setting(),
         }
     }
 }
@@ -201,7 +216,9 @@ impl StartError {
 ///
 /// When the token is elevated, or cannot be read, the agent's executable, the configuration,
 /// the data directory and the token must pass the owner and ACL rules, every path must be
-/// absolute, and `ws://` is refused. The data directory is made if missing, private.
+/// absolute, and `ws://` is refused. The data directory is made if missing, private. Then
+/// the roots are resolved, and must pass the rules of ADR-0011 as they resolve, with the
+/// agent's own files outside them.
 ///
 /// # Errors
 /// The first check that failed.
@@ -249,7 +266,28 @@ fn prepare_as(
             _ => trusted(token, Leaf::File, "enrollment_token_file")?,
         }
     }
-    Ok(Prepared { config, elevation })
+    let executable = std::env::current_exe().ok();
+    let mut own = own_files(&config);
+    own.push(("the configuration file", config_path));
+    if let Some(folder) = executable.as_deref().and_then(Path::parent) {
+        own.push(("the folder of the agent's executable", folder));
+    }
+    let machine = platform::machine(&config.allowed_roots, &config.delete_roots, &own)
+        .map_err(StartError::Roots)?;
+    Ok(Prepared {
+        config,
+        elevation,
+        machine,
+    })
+}
+
+/// The agent's own files a manifest must never reach: the data directory and the token.
+fn own_files(config: &AgentConfig) -> Vec<(&'static str, &Path)> {
+    let mut own = vec![("data_dir", config.data_dir.as_path())];
+    if let Some(token) = &config.enrollment_token_file {
+        own.push(("enrollment_token_file", token.as_path()));
+    }
+    own
 }
 
 /// An elevated agent refuses `ws://`, even to this machine: any local process that binds
@@ -267,17 +305,40 @@ fn refuse_plain_url(config: &AgentConfig, strict: bool) -> Result<(), StartError
 /// Nothing that the server, the network or the disk does ends it. It only returns once
 /// `shutdown` has completed.
 pub async fn run(prepared: Prepared, shutdown: impl Future<Output = ()>) {
-    let config = prepared.config;
     let timing = Timing {
-        heartbeat: Duration::from_secs(config.heartbeat_secs),
+        heartbeat: Duration::from_secs(prepared.config.heartbeat_secs),
         ..Timing::default()
     };
-    run_with(config, timing, shutdown).await;
+    run_on(prepared.config, prepared.machine, timing, shutdown).await;
 }
 
-/// [`run`] with the waits of the caller's choosing, `heartbeat` included.
+/// [`run`] with the waits of the caller's choosing, `heartbeat` included, without the
+/// checks of [`prepare`]: for tests. Roots that resolve where no root may be leave the agent
+/// with a machine that runs nothing.
 #[doc(hidden)]
 pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future<Output = ()>) {
+    // Every file of the agent lives here, and no write makes a folder later.
+    if let Err(error) = platform::create_private_dir(&config.data_dir) {
+        error!(%error, "the data directory could not be made");
+    }
+    let machine = platform::machine(
+        &config.allowed_roots,
+        &config.delete_roots,
+        &own_files(&config),
+    )
+    .unwrap_or_else(|problem| {
+        error!(%problem, "the roots were refused: no action runs");
+        Arc::new(Unsupported)
+    });
+    run_on(config, machine, timing, shutdown).await;
+}
+
+async fn run_on(
+    config: AgentConfig,
+    machine: Arc<dyn Machine>,
+    timing: Timing,
+    shutdown: impl Future<Output = ()>,
+) {
     let actions = &config.actions;
     // Numbers and a ceiling only: the names of services and roots stay out of the log.
     info!(
@@ -291,17 +352,13 @@ pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future
     if actions.keys.is_none() {
         warn!("the configuration names no manifest_keys: this agent runs no action (ADR-0010)");
     }
-    // Every file of the agent lives here, and no write makes a folder later.
-    if let Err(error) = platform::create_private_dir(&config.data_dir) {
-        error!(%error, "the data directory could not be made");
-    }
     let files = Arc::new(ActionFiles::new(&config.data_dir));
     let runner = executor::start(
         config.actions.clone(),
         Arc::clone(&files) as _,
         files,
         Arc::new(SystemClock::new()),
-        platform::machine(&config.actions.policy.roots),
+        machine,
     )
     .await;
     let (stop, stopped) = watch::channel(false);
@@ -386,7 +443,7 @@ impl Agent {
         Self {
             url: config.server_url.clone(),
             identity: Arc::new(IdentityStore::new(disk)),
-            collector: Collector::new(),
+            collector: Collector::new(config.actions.policy.services.iter().cloned().collect()),
             actions,
             about: About {
                 agent_version: Label::from_lossy(env!("CARGO_PKG_VERSION")),

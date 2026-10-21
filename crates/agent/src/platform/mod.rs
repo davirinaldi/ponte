@@ -24,15 +24,50 @@ use std::{
     io::{Read, Write},
 };
 
-use ponte_actions::Roots;
+use ponte_protocol::{ServiceName, ServiceStatus};
 
-use crate::actions::machine::{Machine, Unsupported};
+use crate::actions::machine::Machine;
+#[cfg(not(windows))]
+use crate::actions::machine::Unsupported;
 
-/// What runs the steps and checks of actions here. Step 5 of M2 gives Windows its own,
-/// which checks the final path of every file it opens against `roots` as they resolved
-/// when the agent started (ADR-0011). Until then every platform refuses everything.
-pub(crate) fn machine(_roots: &Roots) -> Arc<dyn Machine> {
-    Arc::new(Unsupported)
+/// What runs the steps and checks of actions here, with the roots as they resolve now.
+/// `own` names the agent's files (the setting, and the path), which may lie in no root as
+/// they resolve. On Windows the machine checks the final path of every file it opens
+/// against these roots (ADR-0011); elsewhere every platform refuses everything.
+///
+/// # Errors
+/// A root resolves where no root may be, or the folders Windows keeps for itself could
+/// not be read.
+pub(crate) fn machine(
+    allowed: &[String],
+    delete: &[String],
+    own: &[(&'static str, &Path)],
+) -> Result<Arc<dyn Machine>, RootProblem> {
+    #[cfg(windows)]
+    {
+        let folders = windows::services::windows_folder().ok_or(RootProblem::KnownFolders)?;
+        let roots = windows::roots::resolve_roots(allowed, delete, own, &folders)?;
+        Ok(Arc::new(windows::machine::WindowsMachine::new(
+            roots, folders,
+        )))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (allowed, delete, own);
+        Ok(Arc::new(Unsupported))
+    }
+}
+
+/// The state of each service the configuration allows, for the telemetry (RF-06). None
+/// outside Windows.
+pub(crate) fn service_states(names: &[ServiceName]) -> Vec<ServiceStatus> {
+    #[cfg(windows)]
+    return windows::services::report(names);
+    #[cfg(not(windows))]
+    {
+        let _ = names;
+        Vec::new()
+    }
 }
 
 /// Whether the agent's token is elevated (ADR-0013). Outside Windows it never is: those
@@ -89,6 +124,47 @@ pub enum Untrusted {
     Unreadable,
 }
 
+/// Why the roots, as they resolve when the agent starts, refuse the start (ADR-0011).
+/// Names the setting and the index, never the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RootProblem {
+    #[error("{setting}[{index}] is not a folder on a local disk, or cannot be resolved")]
+    NotAFolder { setting: &'static str, index: usize },
+    #[error("{setting}[{index}], as it resolves, {rule}")]
+    Lexical {
+        setting: &'static str,
+        index: usize,
+        rule: ponte_actions::RootRule,
+    },
+    #[error("{setting}[{index}] resolves to {rule}, which no root may be")]
+    Forbidden {
+        setting: &'static str,
+        index: usize,
+        rule: &'static str,
+    },
+    #[error("delete_roots[{index}] resolves outside every allowed root")]
+    DeleteOutside { index: usize },
+    #[error("{what} lies inside a root, or holds one, as the roots resolve")]
+    Overlaps { what: &'static str },
+    #[error("the folders Windows keeps for itself could not be read")]
+    KnownFolders,
+}
+
+impl RootProblem {
+    /// The setting at fault.
+    #[must_use]
+    pub fn setting(&self) -> &'static str {
+        match self {
+            Self::NotAFolder { setting, .. }
+            | Self::Lexical { setting, .. }
+            | Self::Forbidden { setting, .. } => setting,
+            Self::DeleteOutside { .. } => "delete_roots",
+            Self::Overlaps { what } => what,
+            Self::KnownFolders => "allowed_roots",
+        }
+    }
+}
+
 /// Holds `path` and every folder above it to the owner and ACL rules of ADR-0011. Only
 /// Windows has them; elsewhere nothing is checked, and nothing runs elevated.
 pub(crate) fn check_trusted(path: &Path, leaf: Leaf) -> Result<(), Untrusted> {
@@ -108,6 +184,18 @@ const MAX_CONFIG_BYTES: usize = 256 * 1024;
 pub(crate) fn read_config(path: &Path) -> io::Result<String> {
     let bytes = read_bounded(path, MAX_CONFIG_BYTES)?.ok_or(io::ErrorKind::NotFound)?;
     String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// A monotonic clock: time since some fixed moment, never set by anyone. On Windows it
+/// also counts the time the machine slept.
+pub(crate) fn monotonic() -> std::time::Duration {
+    #[cfg(windows)]
+    return windows::clock::interrupt_time();
+    #[cfg(not(windows))]
+    {
+        static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        BASE.get_or_init(std::time::Instant::now).elapsed()
+    }
 }
 
 /// Reads the agent's token.
