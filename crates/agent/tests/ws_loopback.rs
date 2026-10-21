@@ -17,10 +17,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
+use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
+use ponte_actions::TrustedKeys;
 use ponte_agent::Timing;
-use ponte_protocol::{AgentToServer, ProtocolVersion, PublicKey, ServerToAgent};
-use ponte_server::agents::{DeviceAdmin, DeviceStatus, TokenHash};
+use ponte_protocol::{
+    ActionOutcome, AgentToServer, Initiator, ProtocolVersion, PublicKey, RejectReason, RequestId,
+    ServerToAgent, Signature, SignedManifest, manifest_transcript,
+};
+use ponte_server::agents::{
+    ActionAdmin, CatalogEntry, DeviceAdmin, DeviceStatus, NewRequest, RequestOutcome,
+    RequestState, TokenHash,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::time::sleep;
@@ -90,6 +99,76 @@ async fn ws_loopback_a_machine_with_a_token_enrolls_connects_and_reports() {
     let agent = RunningAgent::start(machine.config(addr), fast());
     assert_eq!(machine.online(&store).await, id);
     assert_eq!(Some(record(&store, id).public_key), machine.public_key());
+    agent.stop().await;
+}
+
+/// The whole of M2 from the server's side, against the real agent: a key the operator
+/// trusts, an envelope in the catalog, a request queued for the device. The sweep sends it,
+/// the agent verifies the signature with the key of its own configuration, refuses by its
+/// own policy (the service is not on its list, decided before it touches the machine, the
+/// same on every system), and the answer is stored against the request.
+#[tokio::test]
+async fn ws_loopback_a_request_reaches_the_agent_and_its_answer_is_stored() {
+    const RESTART: &str = include_str!("../../../manifests/examples/erp-restart-service.toml");
+    let signer = SigningKey::from_bytes(&[7; 32]);
+    let key = PublicKey::from_bytes(signer.verifying_key().to_bytes());
+
+    let store = store_with(&token(1));
+    let addr = serve(store.clone()).await;
+    let machine = Machine::with_token(&token(1));
+    let config = machine.config_with(addr, &format!("manifest_keys = ['{key}']\n"));
+    let agent = RunningAgent::start(config, fast());
+    let id = machine.online(&store).await;
+
+    // What `ponte-sign`, `catalog key add`, `catalog add` and `action run` do.
+    let now = u64::try_from(Utc::now().timestamp()).unwrap();
+    let mut envelope = SignedManifest {
+        manifest: RESTART.parse().unwrap(),
+        issued_at: now - 3600,
+        expires_at: now - 3600 + 90 * 24 * 3600,
+        public_key: key,
+        signature: Signature::from_bytes([0; 64]),
+    };
+    let signature = signer.sign(manifest_transcript(&envelope).expose_bytes());
+    envelope.signature = Signature::from_bytes(signature.to_bytes());
+    store.add_signing_key(key, Utc::now()).await.unwrap();
+    let trusted = TrustedKeys::new([key]).unwrap();
+    let entry = CatalogEntry::verify(envelope, &trusted, now).unwrap();
+    assert!(store.add_manifest(&entry, Utc::now()).await.unwrap());
+    let request = RequestId::new();
+    let queued = store
+        .request_action(
+            &NewRequest {
+                id: request,
+                device: id,
+                manifest: *entry.hash(),
+                expires_at: now + 600,
+                initiator: Initiator::Human {
+                    user_id: "server_cli".parse().unwrap(),
+                },
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued, RequestOutcome::Queued);
+
+    eventually("the agent's answer is stored", || {
+        store
+            .request_record(request)
+            .is_some_and(|record| matches!(record.state, RequestState::Answered { .. }))
+    })
+    .await;
+    let RequestState::Answered { outcome, .. } = store.request_record(request).unwrap().state
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        outcome,
+        ActionOutcome::Rejected {
+            reason: RejectReason::ServiceNotAllowed
+        }
+    );
     agent.stop().await;
 }
 

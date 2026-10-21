@@ -8,18 +8,20 @@
 use std::num::NonZeroU32;
 
 use chrono::{DateTime, Utc};
-use ponte_protocol::{DeviceId, PublicKey};
+use ponte_protocol::{ActionOutcome, DeviceId, PublicKey, RequestId};
 use tracing::{info, warn};
 
 use super::handshake::{Claim, Rejection};
 use super::session::SessionEnd;
+use super::store::actions::{ManifestId, outcome_name};
 use super::store::{CustomerId, DeviceStatus, SessionId, TokenHash};
 
 /// The `tracing` target of every audit event.
 pub const TARGET: &str = "ponte::audit";
 
-/// The actor of all of these is the device itself, or whoever holds its key or a token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The actor of the first ones is the device itself, or whoever holds its key or a token;
+/// then come the operator's, and the actions the server sends.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AuditEvent {
     DeviceEnrolled {
         device: DeviceId,
@@ -80,6 +82,29 @@ pub(crate) enum AuditEvent {
         device: DeviceId,
         outcome: Outcome,
     },
+    /// The request was handed to the device's session, which writes it to the connection.
+    /// `resent` when a session sends again what got no answer.
+    ActionSent {
+        request: RequestId,
+        device: DeviceId,
+        manifest: ManifestId,
+        version: u32,
+        resent: bool,
+    },
+    /// The device's answer was stored: codes and numbers only, never the `output`.
+    /// `replaced` when it took the place of a refusal that described the agent.
+    ActionFinished {
+        request: RequestId,
+        device: DeviceId,
+        outcome: ActionOutcome,
+        duration_ms: u64,
+        replaced: bool,
+    },
+    /// A queued request expired before it was sent.
+    ActionExpired {
+        request: RequestId,
+        device: DeviceId,
+    },
 }
 
 /// Whether an operator's change happened.
@@ -94,8 +119,11 @@ pub(crate) enum Outcome {
 /// The actor of the events an operator causes, until there are accounts (M3).
 const OPERATOR: &str = "server_cli";
 
+/// The actor of what the server does on its own: sending, expiring.
+const SERVER: &str = "server";
+
 pub(crate) fn record(event: &AuditEvent) {
-    match *event {
+    match event {
         AuditEvent::DeviceEnrolled {
             device,
             customer,
@@ -162,6 +190,59 @@ pub(crate) fn record(event: &AuditEvent) {
         }
         AuditEvent::DeviceRevoked { device, outcome } => {
             info!(target: TARGET, event = "device_revoked", actor = OPERATOR, %device, ?outcome);
+        }
+        AuditEvent::ActionSent {
+            request,
+            device,
+            manifest,
+            version,
+            resent,
+        } => {
+            info!(
+                target: TARGET,
+                event = "action_sent",
+                actor = SERVER,
+                %request,
+                %device,
+                %manifest,
+                version,
+                resent,
+            );
+        }
+        AuditEvent::ActionFinished {
+            request,
+            device,
+            outcome,
+            duration_ms,
+            replaced,
+        } => {
+            // Codes and the step's index, never text: the outcome carries none.
+            let (reason, step) = match outcome {
+                ActionOutcome::Failed { reason, step } => (Some(format!("{reason:?}")), *step),
+                ActionOutcome::Rejected { reason } => (Some(format!("{reason:?}")), None),
+                _ => (None, None),
+            };
+            info!(
+                target: TARGET,
+                event = "action_finished",
+                %request,
+                %device,
+                status = outcome_name(outcome),
+                reason = reason.as_deref().map(tracing::field::display),
+                step,
+                duration_ms,
+                replaced,
+            );
+        }
+        AuditEvent::ActionExpired { request, device } => {
+            info!(
+                target: TARGET,
+                event = "action_finished",
+                actor = SERVER,
+                %request,
+                %device,
+                status = "expired",
+            );
         }
     }
 }

@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use ponte_protocol::{MAX_MESSAGE_BYTES, ProtocolVersion};
 use tracing::debug;
 
-use super::store::DeviceStore;
+use super::store::actions::ActionStore;
 use super::{Gateway, session};
 
 /// What is written to the socket at once, in bytes. The server's messages are small.
@@ -32,7 +32,7 @@ fn limited(upgrade: WebSocketUpgrade) -> WebSocketUpgrade {
         .max_write_buffer_size(MAX_WRITE_BUFFER_BYTES)
 }
 
-pub(crate) async fn upgrade<D: DeviceStore>(
+pub(crate) async fn upgrade<D: ActionStore>(
     State(gateway): State<Arc<Gateway<D>>>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
