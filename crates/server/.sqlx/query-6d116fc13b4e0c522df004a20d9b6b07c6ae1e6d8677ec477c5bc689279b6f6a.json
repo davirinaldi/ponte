@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE action_requests SET status = 'queued', sent_at = NULL\n                 WHERE status = 'sent' AND sent_at = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6d116fc13b4e0c522df004a20d9b6b07c6ae1e6d8677ec477c5bc689279b6f6a"
+}

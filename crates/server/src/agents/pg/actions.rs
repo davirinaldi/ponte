@@ -16,6 +16,7 @@ use ponte_protocol::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::types::Json;
+use tracing::warn;
 use uuid::Uuid;
 
 use super::{ErrorKind, PgStore, PgStoreError, bounded, corrupt, failed, public_key, status_of};
@@ -387,9 +388,37 @@ impl ActionStore for PgStore {
             .fetch_all(&self.pool)
             .await
             .map_err(failed(OPERATION))?;
-            rows.into_iter()
-                .map(|row| outgoing_row!(row).outgoing(OPERATION))
-                .collect()
+            // Each row on its own: the statement committed, and a row that does not read
+            // must not keep the others from their sessions. It stays `sent`, undelivered,
+            // like any request whose answer is lost; the agent never sees what it holds.
+            Ok(rows
+                .into_iter()
+                .filter_map(|row| {
+                    let id = row.id;
+                    outgoing_row!(row)
+                        .outgoing(OPERATION)
+                        .inspect_err(|error| {
+                            warn!(request = %id, %error, "a claimed request does not read; it is not sent");
+                        })
+                        .ok()
+                })
+                .collect())
+        })
+        .await
+    }
+
+    async fn unclaim(&self, claimed_at: DateTime<Utc>) -> Result<u64, Self::Error> {
+        const OPERATION: &str = "put back the requests of a claim";
+        bounded(OPERATION, async {
+            let released = sqlx::query!(
+                "UPDATE action_requests SET status = 'queued', sent_at = NULL
+                 WHERE status = 'sent' AND sent_at = $1",
+                claimed_at,
+            )
+            .execute(&self.pool)
+            .await
+            .map_err(failed(OPERATION))?;
+            Ok(released.rows_affected())
         })
         .await
     }
