@@ -149,11 +149,17 @@ cargo run -q --release -p ponte-server -- device list $CUSTOMER
 ```
 
 ```
-<device id>  customer <id>  active  online  last seen <now>  agent 0.1.0  <OS name>
+<device id>  customer <id>  active  online  last seen <now>  clock +0s  agent 0.1.0  <OS name>
 ```
 
 Devices from earlier runs are listed too, `offline`. Run it again after a minute:
-`last seen` moves with every heartbeat.
+`last seen` moves with every heartbeat. `clock` is how far the device's clock was from the
+server's at its last heartbeat (`clock unknown` before the first one, and for a pending
+device): an agent whose clock is off by more than its tolerances refuses actions (ADR-0010),
+and this is where that shows.
+
+The `catalog` and `action` subcommands (`ponte-server help`) put signed manifests in the
+server's catalog and send them to a device; the walkthrough of M2 runs them.
 
 ## 5. A token for many machines waits for approval
 

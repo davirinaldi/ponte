@@ -146,6 +146,23 @@ renew its validity adds a second envelope instead of colliding. `action run` pic
 `(id, version)`, the unexpired envelope with the latest `issued_at` signed by a key the
 server still trusts. One server serves one software house; multi-tenancy is out of scope.
 
+Step 6 of M2 settled the server's side:
+
+- `catalog key add` refuses a key that would make the server's list unusable to `verify`
+  (not a point, weak, already there, a fifth), so one bad key never stops every
+  `catalog add`. A server with no key refuses `catalog add` and `action run` with that
+  reason.
+- Without `--version`, `action run` takes the highest version that has an envelope that
+  verifies now; with it, that version. Either way the envelope is verified again when it is
+  picked, so a catalog row changed in the database is not sent, and an envelope whose key
+  was removed is not sent either, even when it was queued before the removal.
+- The catalog keeps envelopes whose key was removed (requests point at them); listings say
+  which can be sent.
+- The server keeps no high-water mark of its clock: it passes its clock as both `now` and
+  the mark. It never runs anything, and the agent checks its own.
+- `device list` shows each device's clock offset: the `collected_at` of its last heartbeat
+  less the moment the server stored it.
+
 ## Consequences
 
 - A compromised server can only send manifests that were signed offline, and only until
