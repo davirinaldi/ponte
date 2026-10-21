@@ -335,6 +335,31 @@ fn win_admin_a_service_whose_binary_users_can_change_is_refused() {
     );
 }
 
+/// The structure is read again in the call that starts the service: a binary that users
+/// could change only after the action was decided is still not started.
+#[test]
+#[ignore = "installs a service: needs an elevated token"]
+fn win_admin_a_binary_opened_to_users_after_the_check_is_not_started() {
+    let lab = Lab::new("Late");
+    let machine = lab.machine();
+    let lock = lab.lock();
+    lab.install(
+        &built("fake-erp"),
+        &["service", "--lock", lock.to_str().unwrap()],
+    );
+    assert_eq!(machine.service_allowed(&lab.service, MINUTE), Ok(()));
+    let mut command = Command::new("icacls");
+    command
+        .arg(lab.folder.join("bin"))
+        .args(["/grant", "*S-1-5-32-545:(OI)(CI)M"]);
+    assert!(command.output().unwrap().status.success());
+    let start = Primitive::ServiceStart {
+        service: lab.service.clone(),
+    };
+    assert_eq!(machine.step(&start, MINUTE), Err(StepError::Failed));
+    assert!(!lock.exists(), "the ERP never ran");
+}
+
 /// The agent itself, as a service: it reaches `RUNNING`, logs to `<data_dir>\logs`, and
 /// stops cleanly. A configuration it refuses stops it with the code of the refusal.
 #[test]
