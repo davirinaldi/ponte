@@ -86,8 +86,14 @@ keep the agent's half, and most of them exist because the server is not trusted 
 - **Telemetry is numbers and a drive letter** (RNF-09). Never read processes, users, host
   names or network interfaces, and never send a path: `telemetry::mount_name` keeps `C:`
   and `/` and drops the rest.
-- **The key file is not encrypted until M2.** `platform::keystore` is where DPAPI goes
-  (RNF-04); the agent says so in its log on every start. M1 builds are for development.
+- **The key is under DPAPI on Windows** (RNF-04, ADR-0013), in the scope of the account
+  that runs the agent, with a fixed entropy and no prompt; `platform::keystore` is the only
+  place that knows. The plain key file of M1 is refused as "no key", so a new enrollment
+  replaces it; a blob this account cannot open is an error, never "no key", so the agent
+  never enrolls over a key it could not read. The secret lives in `Zeroizing` buffers and
+  in a `DeviceKey` that wipes itself and stays behind a `Box`; never clone the signing key.
+  Outside Windows the key is a plain file, and the agent says on every start that the
+  build is for development.
 - Tests of the handshake and the session run without a socket and with a paused clock. A
   test of a deadline asserts the time that passed and the reason the wait ended, and has
   a twin in which the thing waited for arrives: a wait that ends for any reason at all
