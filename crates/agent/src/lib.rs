@@ -275,8 +275,7 @@ fn prepare_as(
             }
         })?;
     refuse_plain_url(&config, strict)?;
-    platform::create_private_dir(&config.data_dir).map_err(StartError::DataDir)?;
-    trusted(&config.data_dir, Leaf::Directory, "data_dir")?;
+    make_data_dir(&config.data_dir, strict)?;
     if let Some(token) = &config.enrollment_token_file {
         // The token may be gone, once used; its folder may not.
         match token.parent() {
@@ -299,6 +298,32 @@ fn prepare_as(
         elevation,
         machine,
     })
+}
+
+/// Makes the data directory if it is missing, private, then holds it to the rules of an
+/// elevated agent when `strict`. Strict, nothing is made before the path is known to be
+/// absolute and the deepest folder that exists already passes the rule for folders above:
+/// otherwise a junction a user planted there would have SYSTEM make folders elsewhere.
+fn make_data_dir(data_dir: &Path, strict: bool) -> Result<(), StartError> {
+    let untrusted = |problem| StartError::Untrusted {
+        setting: "data_dir",
+        problem,
+    };
+    if strict {
+        if !data_dir.is_absolute() {
+            return Err(untrusted(Untrusted::NotAbsolute));
+        }
+        if let Some(existing) = data_dir.ancestors().find(|folder| folder.exists()) {
+            if existing != data_dir {
+                platform::check_trusted(existing, Leaf::Above).map_err(untrusted)?;
+            }
+        }
+    }
+    platform::create_private_dir(data_dir).map_err(StartError::DataDir)?;
+    if strict {
+        platform::check_trusted(data_dir, Leaf::Directory).map_err(untrusted)?;
+    }
+    Ok(())
 }
 
 /// The agent's own files a manifest must never reach: the data directory and the token.
@@ -799,6 +824,32 @@ mod tests {
             assert_eq!(refused.code(), 2);
         }
         assert!(!dir.path().join("data").exists());
+    }
+
+    /// Strict, a data directory is made only under folders already trusted, and only on an
+    /// absolute path.
+    #[cfg(windows)]
+    #[test]
+    fn an_elevated_agent_makes_nothing_before_checking_where() {
+        let dir = crate::testkit::TempDir::new();
+        let relative = Path::new("ponte-test-relative-data");
+        assert!(matches!(
+            make_data_dir(relative, true),
+            Err(StartError::Untrusted {
+                problem: Untrusted::NotAbsolute,
+                ..
+            })
+        ));
+        assert!(!relative.exists());
+        // A user's temporary folder is no ground for it.
+        let nested = dir.path().join("a").join("data");
+        assert!(matches!(
+            make_data_dir(&nested, true),
+            Err(StartError::Untrusted { .. })
+        ));
+        assert!(!dir.path().join("a").exists());
+        make_data_dir(&nested, false).unwrap();
+        assert!(nested.is_dir());
     }
 
     #[test]

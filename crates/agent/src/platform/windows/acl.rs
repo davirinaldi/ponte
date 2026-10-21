@@ -381,7 +381,7 @@ pub(crate) fn check_chain(path: &Path, leaf: Leaf) -> Result<(), AclError> {
             Leaf::Directory if count == last => Rule::Own,
             Leaf::File if count + 1 >= last => Rule::Own,
             Leaf::Executable if count + 1 >= last => Rule::Executable,
-            _ => Rule::Above,
+            Leaf::Directory | Leaf::File | Leaf::Executable | Leaf::Above => Rule::Above,
         };
         // The drive itself is held to `Above` whatever lies under it.
         let rule = if count == 1 { Rule::Above } else { rule };
