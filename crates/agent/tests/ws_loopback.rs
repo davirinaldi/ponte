@@ -48,7 +48,13 @@ async fn ws_loopback_a_machine_with_a_token_enrolls_connects_and_reports() {
     assert_eq!(device.status, DeviceStatus::Active);
     assert_eq!(Some(device.public_key), machine.public_key());
     assert_eq!(machine.state().as_deref(), Some("enrolled"));
-    assert_eq!(machine.key_file().map(|key| key.len()), Some(32));
+    // Under DPAPI on Windows, a blob of a few hundred bytes; the plain 32 elsewhere.
+    let stored = machine.key_file().map(|key| key.len()).unwrap();
+    if cfg!(windows) {
+        assert!(stored > 32, "{stored}");
+    } else {
+        assert_eq!(stored, 32);
+    }
     assert_eq!(
         device.about.agent_version.as_str(),
         env!("CARGO_PKG_VERSION")

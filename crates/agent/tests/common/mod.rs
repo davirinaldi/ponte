@@ -168,7 +168,7 @@ impl Machine {
         Some(self.identity_field("public_key")?.parse().unwrap())
     }
 
-    /// The 32 secret bytes of the device key.
+    /// What `device.key` holds: the 32 secret bytes, or on Windows their DPAPI blob.
     pub fn key_file(&self) -> Option<Vec<u8>> {
         std::fs::read(self.data_dir().join("device.key")).ok()
     }

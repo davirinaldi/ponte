@@ -109,6 +109,8 @@ async fn ws_loopback_the_log_holds_no_token_no_key_and_no_frame_even_at_trace() 
     for (what, secret) in [
         ("a token", token(0xa1).expose_hex()),
         ("a token", token(0xb2).expose_hex()),
+        // On Windows the file holds the DPAPI blob, so there it is the blob that is looked
+        // for; the Linux job looks for the plain secret.
         ("a device key", hex(&key)),
         ("a device key", hex(&strangers_key)),
     ] {
