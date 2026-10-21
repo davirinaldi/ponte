@@ -159,7 +159,9 @@ the machine is not trusted, and runs code beside a SYSTEM process.
 - **The machine has one slot** (`machine.rs`). Every call takes it within the time the
   manifest has left and works on a thread that holds it until the work returns: a call that
   overran its deadline keeps the machine, and the next action times out rather than run
-  beside it. Never call the service manager or open a manifest's path outside it.
+  beside it. Never act on a service or open a manifest's path outside it. The telemetry's
+  read-only queries of service states run on a thread of their own, one at a time, and
+  report "unknown" when the last one still waits.
 - **Services** (`services.rs`) are refused by their structure whatever the configuration
   says: not `SERVICE_WIN32_OWN_PROCESS`, protected, a binary path that is not one plain
   `.exe`, a binary in the Windows folder or one that non-administrators can change, a

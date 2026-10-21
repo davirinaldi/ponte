@@ -7,6 +7,7 @@
 //! name the configuration gave it.
 
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
@@ -34,6 +35,8 @@ pub(crate) struct Collector {
     probe: Arc<Mutex<Option<Probe>>>,
     /// `allowed_services`, whose states every snapshot reports.
     services: Arc<Vec<ServiceName>>,
+    /// Set while a reading of the service manager is out.
+    reading_services: Arc<AtomicBool>,
 }
 
 struct Probe {
@@ -46,6 +49,7 @@ impl Collector {
         Self {
             probe: Arc::new(Mutex::new(None)),
             services: Arc::new(services),
+            reading_services: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -70,11 +74,12 @@ impl Collect for Collector {
     async fn snapshot(&self) -> Option<TelemetrySnapshot> {
         let probe = Arc::clone(&self.probe);
         let services = Arc::clone(&self.services);
+        let reading_services = Arc::clone(&self.reading_services);
         // Reading disks is a handful of system calls that may wait on a slow drive, and the
         // service manager may take its time too.
         let reading = tokio::task::spawn_blocking(move || {
             let mut reading = locked(&probe).get_or_insert_with(Probe::new).read();
-            reading.services = crate::platform::service_states(&services);
+            reading.services = crate::platform::service_states(&services, &reading_services);
             reading
         })
         .await;
