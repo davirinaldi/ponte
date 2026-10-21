@@ -44,24 +44,26 @@ use crate::platform::{self, keystore};
 /// The device's private key. It signs the two handshake transcripts of `ponte_protocol`
 /// and nothing else: there is no method here that takes bytes to sign, so no message from
 /// the server can be turned into a signature over something of its choosing.
-pub(crate) struct DeviceKey(SigningKey);
+///
+/// The key wipes itself when dropped, and lives behind a `Box` so that moving a
+/// `DeviceKey` around does not copy it (ADR-0013). The signing key type implements
+/// `Clone`: never clone it.
+pub(crate) struct DeviceKey(Box<SigningKey>);
 
 impl DeviceKey {
     fn generate() -> Result<Self, IdentityError> {
         let mut secret = keystore::Secret::default();
-        getrandom::fill(&mut secret).map_err(|_| IdentityError::NoRandomBytes)?;
-        let key = Self::from_secret(&secret);
-        secret.fill(0);
-        Ok(key)
+        getrandom::fill(secret.as_mut_slice()).map_err(|_| IdentityError::NoRandomBytes)?;
+        Ok(Self::from_secret(&secret))
     }
 
-    pub(crate) fn from_secret(secret: &keystore::Secret) -> Self {
-        Self(SigningKey::from_bytes(secret))
+    pub(crate) fn from_secret(secret: &[u8; 32]) -> Self {
+        Self(Box::new(SigningKey::from_bytes(secret)))
     }
 
-    /// The private half, to store it. Never log it.
+    /// The private half, to store it, wiped when dropped. Never log it.
     fn expose_secret(&self) -> keystore::Secret {
-        self.0.to_bytes()
+        keystore::Secret::new(self.0.to_bytes())
     }
 
     pub(crate) fn public_key(&self) -> PublicKey {
@@ -206,7 +208,7 @@ pub(crate) enum IdentityError {
 pub(crate) trait Disk: Send + Sync + 'static {
     /// `None` if there is no key, and `InvalidData` if what is there is not one.
     fn read_key(&self) -> io::Result<Option<keystore::Secret>>;
-    fn write_key(&self, secret: &keystore::Secret) -> io::Result<()>;
+    fn write_key(&self, secret: &[u8; 32]) -> io::Result<()>;
     /// `None` if there is no record, and `InvalidData` if what is there cannot be one.
     fn read_record(&self) -> io::Result<Option<String>>;
     fn write_record(&self, record: &str) -> io::Result<()>;
@@ -230,11 +232,7 @@ impl<D: Disk> IdentityStore<D> {
     /// record before returning, so whatever comes back is already on disk.
     pub(crate) fn credentials(&self) -> Result<Option<Credentials>, IdentityError> {
         let key = match self.disk.read_key() {
-            Ok(secret) => secret.map(|mut secret| {
-                let key = DeviceKey::from_secret(&secret);
-                secret.fill(0);
-                key
-            }),
+            Ok(secret) => secret.map(|secret| DeviceKey::from_secret(&secret)),
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
                 error!("the device key file does not hold a key: it is ignored");
                 None
@@ -321,9 +319,7 @@ impl<D: Disk> IdentityStore<D> {
     /// handed out.
     fn begin(&self, token: EnrollmentToken) -> Result<Credentials, IdentityError> {
         let key = DeviceKey::generate()?;
-        let mut secret = key.expose_secret();
-        let written = self.disk.write_key(&secret);
-        secret.fill(0);
+        let written = self.disk.write_key(&key.expose_secret());
         written.map_err(|error| IdentityError::Disk("write the device key", error))?;
         self.write_record(&Record::Enrolling {
             public_key: key.public_key(),
@@ -427,7 +423,7 @@ impl Disk for DataDir {
         keystore::load(&self.key)
     }
 
-    fn write_key(&self, secret: &keystore::Secret) -> io::Result<()> {
+    fn write_key(&self, secret: &[u8; 32]) -> io::Result<()> {
         keystore::save(&self.key, secret)
     }
 
@@ -534,7 +530,7 @@ mod tests {
         /// The public half of the key on disk.
         fn public_key(&self) -> Option<PublicKey> {
             let key = self.files().key.clone()?;
-            let secret = keystore::Secret::try_from(key.as_slice()).unwrap();
+            let secret = <[u8; 32]>::try_from(key.as_slice()).unwrap();
             Some(DeviceKey::from_secret(&secret).public_key())
         }
 
@@ -561,12 +557,14 @@ mod tests {
                 .key
                 .as_deref()
                 .map(|key| {
-                    keystore::Secret::try_from(key).map_err(|_| io::ErrorKind::InvalidData.into())
+                    <[u8; 32]>::try_from(key)
+                        .map(keystore::Secret::new)
+                        .map_err(|_| io::ErrorKind::InvalidData.into())
                 })
                 .transpose()
         }
 
-        fn write_key(&self, secret: &keystore::Secret) -> io::Result<()> {
+        fn write_key(&self, secret: &[u8; 32]) -> io::Result<()> {
             self.write(Write::Key, |files| files.key = Some(secret.to_vec()))
         }
 
@@ -654,7 +652,7 @@ mod tests {
         let first = DeviceKey::generate().unwrap();
         let second = DeviceKey::generate().unwrap();
         assert_ne!(first.public_key(), second.public_key());
-        assert_ne!(first.expose_secret(), [0; 32]);
+        assert_ne!(*first.expose_secret(), [0; 32]);
     }
 
     /// A key ends up in a `{:?}` sooner or later. Only its public half may show.
@@ -1087,7 +1085,9 @@ mod tests {
 
         let credentials = open().credentials().unwrap().unwrap();
         let enrollment = credentials.enrollment().unwrap();
-        assert_eq!(std::fs::read(data.join("device.key")).unwrap().len(), 32);
+        let stored = std::fs::read(data.join("device.key")).unwrap();
+        // Under DPAPI on Windows; a plain file elsewhere.
+        assert_eq!(stored.len() == 32, !keystore::PROTECTED);
         assert!(token_file.exists());
 
         // Read again by a store that knows nothing: a restart.
@@ -1107,6 +1107,39 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["device.key", "identity.toml"]);
+    }
+
+    /// A key under DPAPI that this account cannot open is not "no key": with a new token
+    /// waiting, the agent still does not enroll over it (ADR-0013). The plain key of M1 is
+    /// another matter: refused as no key, and replaced by the new enrollment.
+    #[cfg(windows)]
+    #[test]
+    fn a_key_this_account_cannot_open_is_never_enrolled_over() {
+        let dir = TempDir::new();
+        let data = dir.path().join("data");
+        platform::create_private_dir(&data).unwrap();
+        let token_file = dir.path().join("enrollment-token");
+        std::fs::write(&token_file, token(1).expose_hex()).unwrap();
+        let open = || IdentityStore::new(DataDir::new(&data, Some(&token_file)));
+        open().credentials().unwrap().unwrap();
+
+        let key_file = data.join("device.key");
+        let mut foreign = std::fs::read(&key_file).unwrap();
+        for byte in &mut foreign[24..40] {
+            *byte ^= 0x5a;
+        }
+        std::fs::write(&key_file, &foreign).unwrap();
+        std::fs::write(&token_file, token(2).expose_hex()).unwrap();
+        assert!(matches!(
+            open().credentials(),
+            Err(IdentityError::Disk("read the device key", _))
+        ));
+        assert_eq!(std::fs::read(&key_file).unwrap(), foreign);
+
+        std::fs::write(&key_file, [7; 32]).unwrap();
+        let (_, token) = enrolling(open().credentials().unwrap());
+        assert_eq!(token, self::token(2));
+        assert_ne!(std::fs::read(&key_file).unwrap().len(), 32);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! why it is sound.
 
 pub(crate) mod acl;
+pub(crate) mod dpapi;
 pub(crate) mod elevation;
 pub(crate) mod files;
 
