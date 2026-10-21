@@ -4,7 +4,7 @@ use anyhow::{Context, bail};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-const USAGE: &str = "usage: ponte-agent run <config>";
+const USAGE: &str = "usage: ponte-agent run <config>\n       ponte-agent service --config <config>   (for the Windows service manager)";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -15,6 +15,7 @@ fn main() -> anyhow::Result<()> {
         .as_slice()
     {
         ["run", config] => run(PathBuf::from(config)),
+        ["service", "--config", config] => service(PathBuf::from(config)),
         _ => bail!("{USAGE}"),
     }
 }
@@ -46,6 +47,19 @@ fn run(config_path: PathBuf) -> anyhow::Result<()> {
     runtime.shutdown_background();
     info!("agent stopped");
     Ok(())
+}
+
+/// The agent as the Windows service, started by the service manager (ADR-0013). It logs to
+/// `<data_dir>\logs`, and to the Event Log what fails before that.
+#[cfg(windows)]
+fn service(config_path: PathBuf) -> anyhow::Result<()> {
+    ponte_agent::run_as_service(config_path)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn service(_config_path: PathBuf) -> anyhow::Result<()> {
+    bail!("the service exists on Windows only: use `ponte-agent run <config>`")
 }
 
 async fn shutdown_signal() {

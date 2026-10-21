@@ -198,6 +198,12 @@ pub(crate) fn monotonic() -> std::time::Duration {
     }
 }
 
+/// Hands this thread to the service manager (ADR-0013).
+#[cfg(windows)]
+pub(crate) fn run_service(config: std::path::PathBuf) -> windows_service::Result<()> {
+    windows::service::run_dispatcher(config)
+}
+
 /// Reads the agent's token.
 pub(crate) fn elevation() -> Elevation {
     #[cfg(windows)]

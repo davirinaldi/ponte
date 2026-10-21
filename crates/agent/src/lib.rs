@@ -171,7 +171,11 @@ impl Prepared {
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
     #[error("the configuration was refused, {}: {error}", error.setting())]
-    Config { error: ConfigError },
+    Config {
+        error: ConfigError,
+        /// Where the file stopped parsing, if that was the error.
+        line: Option<usize>,
+    },
     #[error("{setting} {problem} (ADR-0011)")]
     Untrusted {
         setting: &'static str,
@@ -202,12 +206,25 @@ impl StartError {
     #[must_use]
     pub fn setting(&self) -> &'static str {
         match self {
-            Self::Config { error } => error.setting(),
+            Self::Config { error, .. } => error.setting(),
             Self::Untrusted { setting, .. } => setting,
             Self::PlainUrl => "server_url",
             Self::DataDir(_) => "data_dir",
             Self::Roots(problem) => problem.setting(),
         }
+    }
+
+    /// The line of the configuration where it stopped parsing, if that was the error.
+    #[must_use]
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::Config { line, .. } => *line,
+            _ => None,
+        }
+    }
+
+    fn config(error: ConfigError) -> Self {
+        Self::Config { error, line: None }
     }
 }
 
@@ -243,17 +260,20 @@ fn prepare_as(
             .map_err(|problem| StartError::Untrusted { setting, problem })
     };
     if strict {
-        let executable = std::env::current_exe().map_err(|_| StartError::Config {
-            error: ConfigError::NoExecutable,
-        })?;
+        let executable =
+            std::env::current_exe().map_err(|_| StartError::config(ConfigError::NoExecutable))?;
         trusted(&executable, Leaf::Executable, "the agent's executable")?;
     }
     trusted(config_path, Leaf::File, "the configuration file")?;
-    let text = platform::read_config(config_path).map_err(|error| StartError::Config {
-        error: ConfigError::Read(error),
-    })?;
-    let config = AgentConfig::from_file_text(config_path, &text, registered_as)
-        .map_err(|error| StartError::Config { error })?;
+    let text = platform::read_config(config_path)
+        .map_err(|error| StartError::config(ConfigError::Read(error)))?;
+    let config =
+        AgentConfig::from_file_text(config_path, &text, registered_as).map_err(|error| {
+            StartError::Config {
+                line: error.line_in(&text),
+                error,
+            }
+        })?;
     refuse_plain_url(&config, strict)?;
     platform::create_private_dir(&config.data_dir).map_err(StartError::DataDir)?;
     trusted(&config.data_dir, Leaf::Directory, "data_dir")?;
@@ -290,6 +310,26 @@ fn own_files(config: &AgentConfig) -> Vec<(&'static str, &Path)> {
     own
 }
 
+/// This process was not started by the service manager.
+#[cfg(windows)]
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "`service` is for the service manager to start; in a console, use `ponte-agent run \
+     <config>`"
+)]
+pub struct NotAService;
+
+/// Runs the agent as the Windows service the service manager started, with the
+/// configuration at `config_path`, until the service manager stops it (ADR-0013). What
+/// goes wrong before the log can be trusted goes to the Event Log.
+///
+/// # Errors
+/// The process was not started by the service manager.
+#[cfg(windows)]
+pub fn run_as_service(config_path: std::path::PathBuf) -> Result<(), NotAService> {
+    platform::run_service(config_path).map_err(|_| NotAService)
+}
+
 /// An elevated agent refuses `ws://`, even to this machine: any local process that binds
 /// the port first would be "the server", and could take the enrollment token (ADR-0011).
 fn refuse_plain_url(config: &AgentConfig, strict: bool) -> Result<(), StartError> {
@@ -305,11 +345,21 @@ fn refuse_plain_url(config: &AgentConfig, strict: bool) -> Result<(), StartError
 /// Nothing that the server, the network or the disk does ends it. It only returns once
 /// `shutdown` has completed.
 pub async fn run(prepared: Prepared, shutdown: impl Future<Output = ()>) {
+    run_until(prepared, shutdown, || {}).await;
+}
+
+/// [`run`], calling `ready` once the executor holds the journal, which an agent that is
+/// still stopping may hold for up to ten seconds: the service reports itself running then.
+pub(crate) async fn run_until(
+    prepared: Prepared,
+    shutdown: impl Future<Output = ()>,
+    ready: impl FnOnce(),
+) {
     let timing = Timing {
         heartbeat: Duration::from_secs(prepared.config.heartbeat_secs),
         ..Timing::default()
     };
-    run_on(prepared.config, prepared.machine, timing, shutdown).await;
+    run_on(prepared.config, prepared.machine, timing, shutdown, ready).await;
 }
 
 /// [`run`] with the waits of the caller's choosing, `heartbeat` included, without the
@@ -330,7 +380,7 @@ pub async fn run_with(config: AgentConfig, timing: Timing, shutdown: impl Future
         error!(%problem, "the roots were refused: no action runs");
         Arc::new(Unsupported)
     });
-    run_on(config, machine, timing, shutdown).await;
+    run_on(config, machine, timing, shutdown, || {}).await;
 }
 
 async fn run_on(
@@ -338,6 +388,7 @@ async fn run_on(
     machine: Arc<dyn Machine>,
     timing: Timing,
     shutdown: impl Future<Output = ()>,
+    ready: impl FnOnce(),
 ) {
     let actions = &config.actions;
     // Numbers and a ceiling only: the names of services and roots stay out of the log.
@@ -361,6 +412,7 @@ async fn run_on(
         machine,
     )
     .await;
+    ready();
     let (stop, stopped) = watch::channel(false);
     let agent = Agent::new(&config, timing, runner.actions());
     let work = agent.run(stopped);
