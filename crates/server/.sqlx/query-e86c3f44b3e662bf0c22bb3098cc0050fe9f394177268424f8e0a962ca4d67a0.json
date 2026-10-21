@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE action_requests SET status = 'cancelled', finished_at = $2\n                 WHERE id = $1 AND status = 'queued'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e86c3f44b3e662bf0c22bb3098cc0050fe9f394177268424f8e0a962ca4d67a0"
+}

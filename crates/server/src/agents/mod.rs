@@ -43,6 +43,13 @@ pub use store::{
     SessionId, TokenGrant, TokenHash, TokenInfo,
 };
 
+pub use store::actions::{
+    ActionAdmin, ActionStore, CancelOutcome, CatalogEntry, CatalogError, EnvelopeHash, Finish,
+    InvalidManifestId, KeyAdded, MAX_OPEN_PER_DEVICE, ManifestId, NewRequest, Outgoing,
+    RequestOutcome, RequestRecord, RequestRefusal, RequestState, SigningKey,
+    describes_the_agent,
+};
+
 /// How much a peer gets before and after it proves who it is.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Limits {

@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO action_requests\n                     (id, device_id, manifest_hash, initiator, expires_at, status, created_at)\n                 VALUES ($1, $2, $3, $4, $5, 'queued', $6)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bytea",
+        "Jsonb",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "919c2b0cd446efe61982322f74e0b865964cbde1f0a53bf3f439ad010cfa83d9"
+}

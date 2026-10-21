@@ -19,6 +19,7 @@ use ponte_protocol::{AgentToServer, ServerToAgent};
 
 use super::*;
 use crate::agents::Limits;
+use crate::agents::store::action_scenarios::{self, for_each_action_scenario};
 use crate::agents::store::scenarios::{self, for_each_scenario};
 use crate::agents::testkit::{
     Logs, Peer, Sent, TestDevice, about, at, gateway_with, telemetry, token,
@@ -38,6 +39,17 @@ macro_rules! in_postgres {
     };
 }
 for_each_scenario!(in_postgres);
+
+macro_rules! in_postgres_actions {
+    ($scenario:ident) => {
+        #[sqlx::test]
+        #[ignore = "needs PostgreSQL: DATABASE_URL"]
+        async fn $scenario(pool: PgPoolOptions, options: PgConnectOptions) {
+            action_scenarios::$scenario(&store(pool, options).await).await;
+        }
+    };
+}
+for_each_action_scenario!(in_postgres_actions);
 
 /// Issues `token(token_seed)` for `max_uses` machines until `at(100)`.
 async fn issue(store: &PgStore, token_seed: u8, max_uses: u32) {

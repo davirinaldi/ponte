@@ -1,0 +1,196 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT r.id, r.device_id, r.manifest_hash, m.manifest_id, m.version,\n                          r.initiator, r.expires_at, r.status, r.created_at, r.sent_at,\n                          r.finished_at, r.reason, r.step, r.duration_ms, r.output\n                   FROM action_requests r JOIN manifests m ON m.hash = r.manifest_hash\n                   WHERE r.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "device_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "manifest_hash",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "manifest_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "manifest_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "manifest_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "manifests",
+            "name": "version"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "initiator",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "initiator"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "sent_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "sent_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "step",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "step"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "duration_ms",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "duration_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "output",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "output"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d3cd78fdf0ec732d44e3a4fa99dda1c7979bb936450a38e73e807587e5d1553a"
+}

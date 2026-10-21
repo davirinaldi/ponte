@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT public_key, added_at FROM signing_keys ORDER BY added_at, public_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "public_key",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "signing_keys",
+            "name": "public_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "added_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "signing_keys",
+            "name": "added_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "cb21ae2dd64163f788b1b8d2928bb483011151d4b465f3a16804b14a2cb02456"
+}

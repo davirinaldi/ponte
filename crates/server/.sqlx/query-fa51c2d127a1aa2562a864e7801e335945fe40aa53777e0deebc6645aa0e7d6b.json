@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE action_requests r SET status = 'expired', finished_at = $3\n                   FROM (SELECT id FROM action_requests\n                         WHERE status = 'queued' AND expires_at <= $1\n                         ORDER BY created_at, id LIMIT $2) due\n                   WHERE r.id = due.id AND r.status = 'queued'\n                   RETURNING r.id, r.device_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "action_requests",
+            "name": "device_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "fa51c2d127a1aa2562a864e7801e335945fe40aa53777e0deebc6645aa0e7d6b"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,\n                          online_session, last_seen,\n                          telemetry\n                   FROM devices WHERE id = $1",
+  "query": "SELECT id, customer_id, public_key, enrolled_with, status, agent_version, os,\n                          online_session, last_seen,\n                          telemetry, telemetry_at\n                   FROM devices WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,17 @@
             "name": "telemetry"
           }
         }
+      },
+      {
+        "ordinal": 10,
+        "name": "telemetry_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "devices",
+            "name": "telemetry_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -129,8 +140,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "e5156271dc1e5b242077902789e364ff2e1c2c038e2375fc89ffd07e4029eac7"
+  "hash": "f4f95b9d6eb2b7b4cb55b4308afd8b0fab27b467a7eb3eae18b60f541dc22d22"
 }

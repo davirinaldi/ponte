@@ -12,10 +12,14 @@ use axum::extract::ws::Message;
 use chrono::{DateTime, TimeDelta, Utc};
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{Sink, stream};
+use ponte_actions::TrustedKeys;
 use ponte_protocol::{
     AgentToServer, DeviceId, EnrollmentToken, MemoryUsage, Nonce, ProtocolVersion, PublicKey,
-    ServerToAgent, Signature, TelemetrySnapshot, Transcript, enroll_transcript, hello_transcript,
+    ServerToAgent, Signature, SignedManifest, TelemetrySnapshot, Transcript, enroll_transcript,
+    hello_transcript, manifest_transcript,
 };
+
+use super::store::actions::CatalogEntry;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing_subscriber::layer::SubscriberExt;
@@ -58,6 +62,50 @@ pub(crate) fn telemetry(uptime_secs: u64) -> TelemetrySnapshot {
         disks: Vec::new(),
         services: Vec::new(),
     }
+}
+
+/// The example that restarts the ERP: a manifest every rule of `validate_shape` accepts.
+const RESTART: &str = include_str!("../../../../manifests/examples/erp-restart-service.toml");
+
+/// A key that signs manifests, as `ponte-sign` holds one.
+pub(crate) fn manifest_key(seed: u8) -> SigningKey {
+    SigningKey::from_bytes(&[seed.wrapping_add(100); 32])
+}
+
+pub(crate) fn manifest_public(seed: u8) -> PublicKey {
+    PublicKey::from_bytes(manifest_key(seed).verifying_key().to_bytes())
+}
+
+/// The example manifest under another id and version.
+pub(crate) fn manifest_text(id: &str, version: u32) -> String {
+    RESTART
+        .replacen("id = \"erp.restart-service\"", &format!("id = \"{id}\""), 1)
+        .replacen("version = 1", &format!("version = {version}"), 1)
+}
+
+/// An envelope signed by `manifest_key(key_seed)`, issued at `issued_at` and valid for 90
+/// days, as `ponte-sign` writes it.
+pub(crate) fn envelope(key_seed: u8, text: &str, issued_at: DateTime<Utc>) -> SignedManifest {
+    let issued_at = u64::try_from(issued_at.timestamp()).unwrap();
+    let mut signed = SignedManifest {
+        manifest: text.parse().unwrap(),
+        issued_at,
+        expires_at: issued_at + 90 * 24 * 60 * 60,
+        public_key: manifest_public(key_seed),
+        signature: Signature::from_bytes([0; 64]),
+    };
+    let signature = manifest_key(key_seed).sign(manifest_transcript(&signed).expose_bytes());
+    signed.signature = Signature::from_bytes(signature.to_bytes());
+    signed
+}
+
+/// `id` v`version`, signed by `manifest_key(key_seed)` `issued` seconds after `at(0)`
+/// minus an hour, and verified at `at(0)` against that key alone.
+pub(crate) fn catalog_entry(key_seed: u8, id: &str, version: u32, issued: i64) -> CatalogEntry {
+    let signed = envelope(key_seed, &manifest_text(id, version), at(issued - 3600));
+    let keys = TrustedKeys::new([manifest_public(key_seed)]).unwrap();
+    let now = u64::try_from(at(0).timestamp()).unwrap();
+    CatalogEntry::verify(signed, &keys, now).unwrap()
 }
 
 /// The agent's side of the handshake, with a real ed25519 key.

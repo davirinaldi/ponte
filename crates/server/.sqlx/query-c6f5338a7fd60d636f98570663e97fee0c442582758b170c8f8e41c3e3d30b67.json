@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO manifests (hash, manifest_id, version, risk, manifest, issued_at,\n                                        expires_at, public_key, signature, added_at)\n                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)\n                 ON CONFLICT (hash) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bytea",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Bytea",
+        "Bytea",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c6f5338a7fd60d636f98570663e97fee0c442582758b170c8f8e41c3e3d30b67"
+}
