@@ -69,6 +69,13 @@ for the security invariants in `AGENTS.md`; update it whenever a trust boundary 
   (walkthrough of M2, MSI of M5) is to leave out of `allowed_services` any service whose
   configuration non-administrators can change; the threat model review of M5 decides
   whether the agent should check more.
+- From step 5 of M2, a local user who can write in a delete root can hold a batch oplock on
+  a file there and never acknowledge its break. A `delete_file` on it then never returns,
+  and since the machine's one slot is held until a call returns (ADR-0013), every later
+  action ends `TimedOut` until the agent restarts. It is a denial of actions, not an
+  escape: nothing runs beside it. Opening without waiting on an oplock needs `NtCreateFile`
+  with `FILE_COMPLETE_IF_OPLOCKED`, which the agent does not call yet; the threat model
+  review of M5 decides.
 - Until M3 nothing ties a request to a person. A compromised server, or whoever terminates
   TLS in front of it, can run any manifest that is signed, unexpired and allowed by a
   device's local policy, at a moment of its choosing, up to the rate limits (ADR-0012).

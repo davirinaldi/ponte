@@ -126,6 +126,13 @@ directory live under `C:\ProgramData\Ponte`, created with the ACL above.
 - **`Machine` still takes a step or a check**, not the `RunnableManifest` and an index: the
   signed manifest the type would need cannot be made in the agent's tests, and the machine
   of Windows checks every path and service again on its own.
+- **What the security review of step 5 left as it is**: the service accepts `SHUTDOWN`,
+  not `PRESHUTDOWN`, so when the whole machine shuts down Windows may give it less than the
+  hint; the journal covers what that cuts, as above. `SigningKey::from_bytes` and
+  `to_bytes` leave copies of the key on the stack that nothing wipes; the key type wipes its
+  own copy, and this stays best effort, as the decision says. A file held under an oplock
+  in a delete root can keep the machine's slot, and with it every later action, until the
+  agent restarts (`docs/threat-model.md`).
 
 ## Consequences
 
