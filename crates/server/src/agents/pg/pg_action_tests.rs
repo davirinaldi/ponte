@@ -426,3 +426,35 @@ async fn pg_a_date_past_the_range_of_the_database_is_refused(
     assert_eq!(error.kind(), ErrorKind::OutOfRange("duration"));
     assert!(matches!(state(&store, id).await, RequestState::Sent { .. }));
 }
+
+/// `action run` verifies the envelope it picks once more: a row whose id was changed in
+/// the database is not the manifest it claims to be, and is not sent under that name.
+#[sqlx::test]
+#[ignore = "needs PostgreSQL: DATABASE_URL"]
+async fn pg_an_envelope_changed_in_the_database_is_not_sent(
+    pool: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let mut raw = PgConnection::connect_with(&options).await.unwrap();
+    let store = store(pool, options).await;
+    catalog(&store).await;
+    let device = active(&store, 1).await;
+    sqlx::query("UPDATE manifests SET manifest_id = 'erp.delete-everything'")
+        .execute(&mut raw)
+        .await
+        .unwrap();
+
+    let command = crate::admin::Command::ActionRun {
+        device,
+        manifest: "erp.delete-everything".parse().unwrap(),
+        version: None,
+        minutes: 10,
+    };
+    let mut out = Vec::new();
+    let refused = crate::admin::run(&store, command, &mut out, at(0)).await;
+    assert!(
+        matches!(refused, Err(crate::admin::AdminError::NoValidManifest)),
+        "{refused:?}"
+    );
+    assert_eq!(store.requests(None, 10).await.unwrap(), []);
+}
