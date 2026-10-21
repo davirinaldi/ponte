@@ -2,9 +2,10 @@
 //!
 //! A root is walked from its drive, one folder at a time, without following a reparse
 //! point: a root that is, or passes through, a junction, a link or a mount point is left
-//! out, so a user who planted one before the agent started points it nowhere. Each folder
-//! of the way stays open without delete sharing while the agent runs, so none can be
-//! renamed or replaced afterwards, and the root must resolve to itself. It must also pass
+//! out, so a user who planted one before the agent started points it nowhere. The root
+//! must resolve to itself, and the id of the folder it is gets recorded: every later walk
+//! to a path below it checks that id, so a root renamed away and made again is not the
+//! root. Nothing is held open between actions, so installers may rename it. It must also pass
 //! the rules of the configuration again, and the folders Windows reports for itself. A
 //! delete root must lie in an allowed root, and the agent's own files (its executable's
 //! folder, the configuration, the data directory, the token) may not lie in a root or hold
@@ -32,17 +33,14 @@ use windows_sys::Win32::System::Registry::{
     RegOpenKeyExW,
 };
 
-use super::files::{self, Facts, Segments};
+use super::files::{self, Facts, FileId, Root, Segments};
 use crate::platform::RootProblem;
 
-/// The roots that resolved when the agent started.
-#[derive(Debug, Default)]
+/// The roots that resolved when the agent started, each with the folder it was then.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct ResolvedRoots {
-    pub(crate) allowed: Vec<Segments>,
-    pub(crate) delete: Vec<Segments>,
-    /// Every folder from the drive to each root, held without delete sharing for as long
-    /// as the agent runs: the roots stay the folders they were when they resolved.
-    held: Vec<File>,
+    pub(crate) allowed: Vec<Root>,
+    pub(crate) delete: Vec<Root>,
 }
 
 /// Opens a folder or file following links, to learn where it resolves.
@@ -262,12 +260,11 @@ pub(crate) fn resolve_roots(
     for (setting, list) in [("allowed_roots", allowed), ("delete_roots", delete)] {
         for (index, root) in list.iter().enumerate() {
             match resolve_one(root, &folders) {
-                Ok((segments, held)) => {
-                    roots.held.extend(held);
+                Ok(resolved) => {
                     if setting == "allowed_roots" {
-                        roots.allowed.push(segments);
+                        roots.allowed.push(resolved);
                     } else {
-                        resolved_delete.push((index, segments));
+                        resolved_delete.push((index, resolved));
                     }
                 }
                 Err(reason) => left_out(setting, index, reason),
@@ -275,13 +272,21 @@ pub(crate) fn resolve_roots(
         }
     }
     for (index, root) in resolved_delete {
-        if roots.allowed.iter().any(|allowed| root.inside(allowed)) {
+        if roots
+            .allowed
+            .iter()
+            .any(|allowed| root.path.inside(&allowed.path))
+        {
             roots.delete.push(root);
         } else {
             left_out("delete_roots", index, LeftOut::OutsideAllowed);
         }
     }
-    let texts: Vec<String> = roots.allowed.iter().filter_map(Segments::to_text).collect();
+    let texts: Vec<String> = roots
+        .allowed
+        .iter()
+        .filter_map(|root| root.path.to_text())
+        .collect();
     let policy = PathPolicy::new(&texts).map_err(|_| RootProblem::KnownFolders)?;
     for (what, path) in own {
         let resolved = match resolve(path) {
@@ -307,13 +312,9 @@ fn left_out(setting: &'static str, index: usize, reason: LeftOut) {
     );
 }
 
-/// One root: walked from its drive without following a reparse point, held open without
-/// delete sharing for as long as the agent runs, so nobody renames or replaces it or a
-/// folder above it, and resolving to itself.
-pub(crate) fn resolve_one(
-    root: &str,
-    folders: &WindowsFolders,
-) -> Result<(Segments, Vec<File>), LeftOut> {
+/// One root: walked from its drive without following a reparse point, resolving to itself,
+/// and recorded with the id of the folder it is, which every later walk checks.
+pub(crate) fn resolve_one(root: &str, folders: &WindowsFolders) -> Result<Root, LeftOut> {
     let written = Segments::of_written(root).ok_or(LeftOut::NotPlain)?;
     let held = files::hold_folders(&written, 2, written.len()).map_err(|walk| match walk {
         files::Walk::Missing => LeftOut::Missing,
@@ -331,7 +332,11 @@ pub(crate) fn resolve_one(
     if PathPolicy::new([&text]).is_err() || folders.rule(&resolved).is_some() {
         return Err(LeftOut::Forbidden);
     }
-    Ok((resolved, held))
+    let id = held
+        .last()
+        .and_then(|folder| FileId::of(folder).ok())
+        .ok_or(LeftOut::NotPlain)?;
+    Ok(Root { path: resolved, id })
 }
 
 #[cfg(test)]
@@ -372,7 +377,7 @@ mod tests {
         let (dir, erp, run) = erp();
         let roots = resolve_here(&[&erp], &[&run]);
         assert_eq!((roots.allowed.len(), roots.delete.len()), (1, 1));
-        assert!(roots.delete[0].inside(&roots.allowed[0]));
+        assert!(roots.delete[0].path.inside(&roots.allowed[0].path));
 
         let missing = dir.path().join("NotYet");
         let roots = resolve_here(&[&erp, &missing], &[]);
@@ -383,7 +388,7 @@ mod tests {
             !roots
                 .allowed
                 .iter()
-                .any(|root| root.to_text().unwrap().ends_with("NotYet"))
+                .any(|root| root.path.to_text().unwrap().ends_with("NotYet"))
         );
         assert!(
             resolve_roots(&[], &[], &[], &[])
@@ -394,16 +399,14 @@ mod tests {
         assert_eq!(one(&text(&missing.join("deeper"))), Err(LeftOut::Missing));
     }
 
-    /// While the agent runs, nobody renames a root or a folder above it, so nobody puts a
-    /// junction in its place.
+    /// Nothing is held between actions: an installer or an upgrade may rename a root. The
+    /// folder made in its place is not the root (see `files`).
     #[test]
-    fn a_root_and_the_folders_above_it_stay_while_the_agent_runs() {
+    fn a_root_is_not_held_between_actions() {
         let (dir, erp, run) = erp();
         let roots = resolve_here(&[&erp], &[&run]);
-        assert!(std::fs::rename(&run, dir.path().join("moved")).is_err());
-        assert!(std::fs::rename(&erp, dir.path().join("moved")).is_err());
-        drop(roots);
         std::fs::rename(&erp, dir.path().join("moved")).unwrap();
+        drop(roots);
     }
 
     /// A root that is, or passes through, a junction is left out, wherever it points: a user
@@ -485,7 +488,7 @@ mod tests {
         let (_other, elsewhere, _) = self::erp();
         let roots = resolve_here(&[&erp], &[&elsewhere, &run]);
         assert_eq!(roots.delete.len(), 1);
-        assert!(roots.delete[0].inside(&roots.allowed[0]));
+        assert!(roots.delete[0].path.inside(&roots.allowed[0].path));
         // As written it lies inside; through a junction, elsewhere: left out.
         let link = erp.join("deletes");
         junction(&link, &elsewhere);

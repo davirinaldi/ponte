@@ -34,9 +34,10 @@ use windows_sys::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
     FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_GENERIC_WRITE, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, FileDispositionInfo,
-    FileRenameInfo, GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
+    FILE_GENERIC_WRITE, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+    FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, SECURITY_IDENTIFICATION,
     SYNCHRONIZE, SetFileInformationByHandle, VOLUME_NAME_DOS,
 };
@@ -468,40 +469,103 @@ pub(crate) fn hold_folders(path: &Segments, from: usize, to: usize) -> Result<Ve
     Ok(held)
 }
 
-/// The folders between the root `path` lies in and `path` itself, held as
-/// [`hold_folders`] holds them. A reparse point is followed nowhere on the way, so no
-/// junction or link below a root can send SYSTEM elsewhere, not even to another machine.
-/// `None` if a folder on the way does not exist.
-fn hold_below_root(path: &str, roots: &[Segments]) -> Result<Option<Vec<File>>, PathError> {
+/// Which file a handle holds, for as long as it exists: the volume and the 128-bit id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileId {
+    volume: u64,
+    id: [u8; 16],
+}
+
+impl FileId {
+    pub(crate) fn of(file: &File) -> io::Result<Self> {
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: the handle belongs to `file`, and `info` is a FILE_ID_INFO of the size
+        // given, alive through the call.
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&raw mut info).cast::<c_void>(),
+                u32::try_from(size_of::<FILE_ID_INFO>()).unwrap_or(u32::MAX),
+            )
+        };
+        if read == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Self {
+            volume: info.VolumeSerialNumber,
+            id: info.FileId.Identifier,
+        })
+    }
+}
+
+/// A root as it resolved when the agent started: where it is, and which folder it was.
+/// A folder made later at the same path, after the root was renamed away, is not it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Root {
+    pub(crate) path: Segments,
+    pub(crate) id: FileId,
+}
+
+/// The way from the drive to the folder that holds a path, walked and held.
+struct Walked<'a> {
+    _folders: Vec<File>,
+    root: &'a Root,
+    /// Whether the root was among the folders walked, and was the root of the start.
+    root_checked: bool,
+}
+
+/// Walks every folder from the drive to the one that holds `path`, as [`hold_folders`]
+/// does: a reparse point is followed nowhere on the way, so no junction or link can send
+/// SYSTEM elsewhere, not even to another machine, and none of the folders can be renamed
+/// or replaced while they are held. The root on the way must be the folder that was the
+/// root when the agent started. `None` if a folder on the way does not exist.
+fn walk_to<'a>(path: &str, roots: &'a [Root]) -> Result<Option<Walked<'a>>, PathError> {
     // Not a path on a drive letter: a pipe, a device, a share. Never acted on.
     let written = Segments::of_written(path).ok_or(PathError::Refused)?;
     let root = roots
         .iter()
-        .find(|root| written.inside(root))
+        .find(|root| written.inside(&root.path))
         .ok_or(PathError::Refused)?;
-    match hold_folders(&written, root.len() + 1, written.len().saturating_sub(1)) {
-        Ok(folders) => Ok(Some(folders)),
-        Err(Walk::Missing) => Ok(None),
-        Err(Walk::Refused) => Err(PathError::Refused),
-    }
+    let folders = match hold_folders(&written, 2, written.len().saturating_sub(1)) {
+        Ok(folders) => folders,
+        Err(Walk::Missing) => return Ok(None),
+        Err(Walk::Refused) => return Err(PathError::Refused),
+    };
+    // The folder of `n` segments is the (n - 2)th held: the drive is not held.
+    let root_checked = match folders.get(root.path.len().saturating_sub(2)) {
+        Some(folder) if root.path.len() < written.len() => {
+            if FileId::of(folder).ok() != Some(root.id) {
+                return Err(PathError::Refused);
+            }
+            true
+        }
+        _ => false,
+    };
+    Ok(Some(Walked {
+        _folders: folders,
+        root,
+        root_checked,
+    }))
 }
 
-/// Whether the final path of `file` lies inside one of `roots`.
-fn lands_inside(file: &File, roots: &[Segments]) -> bool {
-    final_path(file)
+/// Whether `file`, opened at the end of a walk, ends where it should: its final path in a
+/// root, and when the path is the root itself, that root.
+fn lands_inside(file: &File, roots: &[Root], walked: &Walked<'_>) -> bool {
+    let inside = final_path(file)
         .ok()
         .and_then(|path| Segments::of_final(&path))
-        .is_some_and(|path| roots.iter().any(|root| path.inside(root)))
+        .is_some_and(|path| roots.iter().any(|root| path.inside(&root.path)));
+    inside && (walked.root_checked || FileId::of(file).ok() == Some(walked.root.id))
 }
 
 /// What is at `path`, for `path_exists` and `path_absent`: `None` only when Windows
 /// answers "file not found" or "path not found". A regular file or a folder whose final
 /// path lies in `roots` is found; a reparse point, a pipe or a device, or a final path
 /// elsewhere is refused.
-pub(crate) fn probe(path: &str, roots: &[Segments]) -> Result<Option<Found>, PathError> {
-    let _folders = match hold_below_root(path, roots)? {
-        Some(folders) => folders,
-        None => return Ok(None),
+pub(crate) fn probe(path: &str, roots: &[Root]) -> Result<Option<Found>, PathError> {
+    let Some(walked) = walk_to(path, roots)? else {
+        return Ok(None);
     };
     let file = match open_named(path, FILE_READ_ATTRIBUTES | SYNCHRONIZE) {
         Ok(file) => file,
@@ -509,7 +573,7 @@ pub(crate) fn probe(path: &str, roots: &[Segments]) -> Result<Option<Found>, Pat
         Err(_) => return Err(PathError::Failed),
     };
     let facts = Facts::of(&file).map_err(|_| PathError::Failed)?;
-    if !facts.is_disk() || facts.is_reparse_point() || !lands_inside(&file, roots) {
+    if !facts.is_disk() || facts.is_reparse_point() || !lands_inside(&file, roots, &walked) {
         return Err(PathError::Refused);
     }
     Ok(Some(if facts.is_directory() {
@@ -521,12 +585,12 @@ pub(crate) fn probe(path: &str, roots: &[Segments]) -> Result<Option<Found>, Pat
 
 /// Deletes the regular file of one link at `path`, whose final path must lie in `roots`,
 /// through the handle that was checked.
-pub(crate) fn delete(path: &str, roots: &[Segments]) -> Result<(), PathError> {
-    let _folders = hold_below_root(path, roots)?.ok_or(PathError::Failed)?;
+pub(crate) fn delete(path: &str, roots: &[Root]) -> Result<(), PathError> {
+    let walked = walk_to(path, roots)?.ok_or(PathError::Failed)?;
     let file = open_named(path, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .map_err(|_| PathError::Failed)?;
     let facts = Facts::of(&file).map_err(|_| PathError::Failed)?;
-    if !facts.is_plain() || !lands_inside(&file, roots) {
+    if !facts.is_plain() || !lands_inside(&file, roots, &walked) {
         return Err(PathError::Refused);
     }
     dispose(&file).map_err(|_| PathError::Failed)
@@ -564,13 +628,17 @@ pub(crate) mod tests {
         }
     }
 
-    fn segments(path: &Path) -> Segments {
+    /// The root at `path`, as the agent records it when it starts.
+    pub(crate) fn root_of(path: &Path) -> Root {
         let file = OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path)
             .unwrap();
-        Segments::of_final(&final_path(&file).unwrap()).unwrap()
+        Root {
+            path: Segments::of_final(&final_path(&file).unwrap()).unwrap(),
+            id: FileId::of(&file).unwrap(),
+        }
     }
 
     fn text(path: &Path) -> String {
@@ -816,7 +884,7 @@ pub(crate) mod tests {
                 .is_some_and(|inner| inner.is::<NotPlain>())
         );
         drop(server);
-        let anywhere = [Segments::of_written(r"C:\").unwrap()];
+        let anywhere: [Root; 0] = [];
         let server = pipe::Server::new(&name);
         assert_eq!(probe(&name, &anywhere), Err(PathError::Refused));
         drop(server);
@@ -885,13 +953,13 @@ pub(crate) mod tests {
     /// A root on the disk, its segments, and a file inside it.
     struct Ground {
         root: TempDir,
-        roots: Vec<Segments>,
+        roots: Vec<Root>,
     }
 
     impl Ground {
         fn new() -> Self {
             let root = TempDir::new();
-            let roots = vec![segments(root.path())];
+            let roots = vec![root_of(root.path())];
             Self { root, roots }
         }
 
@@ -933,7 +1001,7 @@ pub(crate) mod tests {
         assert_eq!(delete(&path, &ground.roots), Err(PathError::Refused));
         assert_eq!(fs::read(outside.path().join("erp.db")).unwrap(), b"data");
 
-        let both = vec![ground.roots[0].clone(), segments(outside.path())];
+        let both = vec![ground.roots[0].clone(), root_of(outside.path())];
         assert_eq!(probe(&path, &both), Err(PathError::Refused));
         // A missing folder on the way is "absent", as Windows would say.
         assert_eq!(
@@ -949,7 +1017,8 @@ pub(crate) mod tests {
         let ground = Ground::new();
         fs::create_dir(ground.path("run")).unwrap();
         let written = Segments::of_written(&text(&ground.path(r"run\erp.lock"))).unwrap();
-        let held = hold_folders(&written, ground.roots[0].len() + 1, written.len() - 1).unwrap();
+        let held =
+            hold_folders(&written, ground.roots[0].path.len() + 1, written.len() - 1).unwrap();
         assert_eq!(held.len(), 1);
         assert!(fs::rename(ground.path("run"), ground.path("moved")).is_err());
         drop(held);
@@ -957,6 +1026,28 @@ pub(crate) mod tests {
     }
 
     /// A junction or a link at the end of the path is opened as itself and refused.
+    /// A root renamed away and made again at its path is another folder: nothing under it
+    /// is the root's any more, though nothing kept anyone from renaming it.
+    #[test]
+    fn a_root_made_again_after_the_start_is_not_the_root() {
+        let ground = Ground::new();
+        let erp = ground.path("FakeErp");
+        fs::create_dir_all(erp.join("run")).unwrap();
+        fs::write(erp.join(r"run\erp.lock"), b"").unwrap();
+        let roots = vec![root_of(&erp)];
+        let lock = text(&erp.join(r"run\erp.lock"));
+        assert_eq!(probe(&lock, &roots), Ok(Some(Found::File)));
+        assert_eq!(probe(&text(&erp), &roots), Ok(Some(Found::Directory)));
+
+        fs::rename(&erp, ground.path("FakeErp.old")).unwrap();
+        fs::create_dir_all(erp.join("run")).unwrap();
+        fs::write(erp.join(r"run\erp.lock"), b"").unwrap();
+        assert_eq!(probe(&lock, &roots), Err(PathError::Refused));
+        assert_eq!(delete(&lock, &roots), Err(PathError::Refused));
+        assert_eq!(probe(&text(&erp), &roots), Err(PathError::Refused));
+        assert!(erp.join(r"run\erp.lock").exists());
+    }
+
     #[test]
     fn a_reparse_point_at_the_end_is_refused() {
         let ground = Ground::new();
@@ -1003,7 +1094,8 @@ pub(crate) mod tests {
 
         // Outside every root.
         fs::write(ground.path("erp.log"), b"").unwrap();
-        let elsewhere = vec![Segments::of_written(r"C:\FakeErpThatIsNotHere").unwrap()];
+        let other = TempDir::new();
+        let elsewhere = vec![root_of(other.path())];
         assert_eq!(
             delete(&text(&ground.path("erp.log")), &elsewhere),
             Err(PathError::Refused)

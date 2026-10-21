@@ -233,10 +233,13 @@ code follows this section.
 - **Roots, and the paths below them, follow no reparse point.** The plan resolved roots
   through junctions and checked where they ended; the security review of step 5 showed
   that a name is not enough. A root is walked from its drive, one folder at a time, without
-  following a reparse point, must resolve to itself, and every folder of the way is held
-  open, with listing access and without delete sharing, for as long as the agent runs, so
-  none can be renamed and replaced by a junction afterwards (a handle with attribute
-  access only takes no part in sharing and would not stop a rename). It must also pass the
+  following a reparse point, must resolve to itself, and the id of the folder it is (the
+  volume and the 128-bit file id) is recorded. Nothing is held between actions, so an
+  installer or an upgrade may rename it; holding every root for the life of the process,
+  which the re-review of step 5 found would block exactly that, was tried and dropped.
+  Every check or delete walks the whole way again, from the drive, and the root on it
+  must be the folder recorded: a root renamed away and made again at its path is not the
+  root. It must also pass the
   lexical rules again and the folders Windows reports for itself, read from the registry
   without COM: the Windows folder (none may be or lie in it), the `Program Files` folders,
   `ProgramData`, the folder of profiles and each profile in the profile list (none may be
@@ -246,8 +249,10 @@ code follows this section.
   rather than refusing the start: otherwise a user who can write beside a root could keep
   the agent from starting. Only the agent's executable folder, configuration, data
   directory or token lying in a root, or holding one, refuses the start, since only the
-  configuration puts them there. Below a root, every folder of a manifest's path is walked
-  and held the same way for the length of the check or the delete, and a reparse point
+  configuration puts them there. On the way to a manifest's path, every folder from the
+  drive is walked and held, with listing access and without delete sharing (a handle with
+  attribute access only takes no part in sharing and would not stop a rename), for the
+  length of the check or the delete, and a reparse point
   anywhere refuses the path: a directory link to another machine would otherwise make
   SYSTEM authenticate there before any check of where the path ended. The final path is
   still checked against the roots.
