@@ -6,7 +6,11 @@ use ponte_protocol::{EnrollmentToken, PublicKey};
 
 use super::*;
 use crate::agents::testkit::{Logs, about, at, grant, token};
-use crate::agents::{DeviceStatus, DeviceStore, EnrollOutcome, EnrollRequest, MemoryStore};
+use crate::agents::{
+    ActionStore, CancelOutcome, CatalogEntry, DeviceAdmin, DeviceStatus, DeviceStore,
+    EnrollOutcome, EnrollRequest, Finish, KeyAdded, MemoryStore, NewRequest, Outgoing,
+    RequestOutcome, RequestRecord, SigningKey,
+};
 
 fn args(line: &str) -> Vec<OsString> {
     line.split_whitespace().map(OsString::from).collect()
@@ -343,7 +347,7 @@ async fn lists_show_one_line_per_item() {
     assert_eq!(out.lines().count(), 1, "{out}");
     assert!(out.starts_with(&device.to_string()), "{out}");
     assert!(
-        out.contains("pending  offline  last seen never  agent 0.1.0  Windows 11 Pro"),
+        out.contains("pending  offline  last seen never  clock unknown  agent 0.1.0  Windows 11 Pro"),
         "{out}"
     );
     let (_, out) = run_on(&store, Command::TokenList { customer: None }).await;
@@ -441,6 +445,75 @@ impl DeviceAdmin for Down {
     }
 }
 
+impl ActionStore for Down {
+    async fn claim_due(&self, _: &[DeviceId], _: DateTime<Utc>) -> Result<Vec<Outgoing>, DownError> {
+        Err(DownError)
+    }
+
+    async fn release(&self, _: RequestId) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn unanswered(&self, _: DeviceId, _: DateTime<Utc>) -> Result<Vec<Outgoing>, DownError> {
+        Err(DownError)
+    }
+
+    async fn finish(
+        &self,
+        _: DeviceId,
+        _: &ponte_protocol::ActionResult,
+        _: DateTime<Utc>,
+    ) -> Result<Finish, DownError> {
+        Err(DownError)
+    }
+
+    async fn expire(&self, _: DateTime<Utc>) -> Result<Vec<(RequestId, DeviceId)>, DownError> {
+        Err(DownError)
+    }
+}
+
+impl ActionAdmin for Down {
+    async fn add_signing_key(&self, _: PublicKey, _: DateTime<Utc>) -> Result<KeyAdded, DownError> {
+        Err(DownError)
+    }
+
+    async fn remove_signing_key(&self, _: &PublicKey) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn signing_keys(&self) -> Result<Vec<SigningKey>, DownError> {
+        Err(DownError)
+    }
+
+    async fn add_manifest(&self, _: &CatalogEntry, _: DateTime<Utc>) -> Result<bool, DownError> {
+        Err(DownError)
+    }
+
+    async fn manifests(&self, _: Option<&ManifestId>) -> Result<Vec<CatalogEntry>, DownError> {
+        Err(DownError)
+    }
+
+    async fn request_action(
+        &self,
+        _: &NewRequest,
+        _: DateTime<Utc>,
+    ) -> Result<RequestOutcome, DownError> {
+        Err(DownError)
+    }
+
+    async fn request(&self, _: RequestId) -> Result<Option<RequestRecord>, DownError> {
+        Err(DownError)
+    }
+
+    async fn requests(&self, _: Option<DeviceId>, _: usize) -> Result<Vec<RequestRecord>, DownError> {
+        Err(DownError)
+    }
+
+    async fn cancel(&self, _: RequestId, _: DateTime<Utc>) -> Result<CancelOutcome, DownError> {
+        Err(DownError)
+    }
+}
+
 /// RF-40: a change that may have happened is audited as one, with its outcome unknown.
 /// Otherwise a lost answer leaves an approval, a revocation or a token with no record.
 #[tokio::test]
@@ -460,6 +533,12 @@ async fn a_change_whose_outcome_is_unknown_is_still_audited() {
         },
         Command::DeviceApprove { device },
         Command::DeviceRevoke { device },
+        Command::CatalogKeyRemove {
+            key: PublicKey::from_bytes([1; 32]),
+        },
+        Command::ActionCancel {
+            request: RequestId::new(),
+        },
     ] {
         let mut out = Vec::new();
         let failed = run(&Down, command, &mut out, at(0)).await;
@@ -474,6 +553,8 @@ async fn a_change_whose_outcome_is_unknown_is_still_audited() {
         "token_issued",
         "device_approved",
         "device_revoked",
+        "signing_key_removed",
+        "action_cancelled",
     ] {
         let line = logs
             .lines()

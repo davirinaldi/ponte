@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use super::handshake::{Claim, Rejection};
 use super::session::SessionEnd;
-use super::store::actions::{ManifestId, outcome_name};
+use super::store::actions::{EnvelopeHash, ManifestId, outcome_name};
 use super::store::{CustomerId, DeviceStatus, SessionId, TokenHash};
 
 /// The `tracing` target of every audit event.
@@ -80,6 +80,38 @@ pub(crate) enum AuditEvent {
     },
     DeviceRevoked {
         device: DeviceId,
+        outcome: Outcome,
+    },
+    /// The operator trusted a key to sign manifests (ADR-0010).
+    SigningKeyAdded {
+        key: PublicKey,
+        outcome: Outcome,
+    },
+    SigningKeyRemoved {
+        key: PublicKey,
+        outcome: Outcome,
+    },
+    /// An envelope entered the catalog. Its id, version and hash: never its text.
+    ManifestAdded {
+        envelope: EnvelopeHash,
+        manifest: ManifestId,
+        version: u32,
+        key: PublicKey,
+        outcome: Outcome,
+    },
+    /// The operator asked for an action (ADR-0012).
+    ActionRequested {
+        request: RequestId,
+        device: DeviceId,
+        manifest: ManifestId,
+        version: u32,
+        envelope: EnvelopeHash,
+        /// Seconds since the Unix epoch.
+        expires_at: u64,
+        outcome: Outcome,
+    },
+    ActionCancelled {
+        request: RequestId,
         outcome: Outcome,
     },
     /// The request was handed to the device's session, which writes it to the connection.
@@ -190,6 +222,55 @@ pub(crate) fn record(event: &AuditEvent) {
         }
         AuditEvent::DeviceRevoked { device, outcome } => {
             info!(target: TARGET, event = "device_revoked", actor = OPERATOR, %device, ?outcome);
+        }
+        AuditEvent::SigningKeyAdded { key, outcome } => {
+            info!(target: TARGET, event = "signing_key_added", actor = OPERATOR, public_key = %key, ?outcome);
+        }
+        AuditEvent::SigningKeyRemoved { key, outcome } => {
+            info!(target: TARGET, event = "signing_key_removed", actor = OPERATOR, public_key = %key, ?outcome);
+        }
+        AuditEvent::ManifestAdded {
+            envelope,
+            manifest,
+            version,
+            key,
+            outcome,
+        } => {
+            info!(
+                target: TARGET,
+                event = "manifest_added",
+                actor = OPERATOR,
+                envelope = %envelope.short(),
+                %manifest,
+                version,
+                public_key = %key,
+                ?outcome,
+            );
+        }
+        AuditEvent::ActionRequested {
+            request,
+            device,
+            manifest,
+            version,
+            envelope,
+            expires_at,
+            outcome,
+        } => {
+            info!(
+                target: TARGET,
+                event = "action_requested",
+                actor = OPERATOR,
+                %request,
+                %device,
+                %manifest,
+                version,
+                envelope = %envelope.short(),
+                expires_at,
+                ?outcome,
+            );
+        }
+        AuditEvent::ActionCancelled { request, outcome } => {
+            info!(target: TARGET, event = "action_cancelled", actor = OPERATOR, %request, ?outcome);
         }
         AuditEvent::ActionSent {
             request,
